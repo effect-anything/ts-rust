@@ -95,6 +95,25 @@ impl<'a> Printer<'a> {
                 index = self.expand_infix_expr(nodes, index, at);
                 continue;
             }
+            if let Some(rewritten) = super::sweetener_forms::try_expand_fixture(
+                self.source,
+                nodes,
+                index,
+                &[],
+                &[],
+            ) {
+                self.copy_until(rewritten.start);
+                let expanded = self.expand_replacement(&rewritten.text);
+                self.emit(
+                    u32_at(rewritten.start),
+                    u32_at(rewritten.end),
+                    &expanded,
+                    SegmentKind::Atom,
+                );
+                self.last_original = rewritten.end;
+                index = rewritten.next;
+                continue;
+            }
             if let Some(name) = macro_head(&nodes[index]) {
                 if self.macros.iter().any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix) {
                     index = self.expand_head(nodes, index, name);
@@ -303,11 +322,15 @@ impl<'a> Printer<'a> {
             match part {
                 Tpl::Define(body) => {
                     let mut rendered = String::new();
-                    render(&mut rendered, body, captures, &[]);
+                    // Holes of the generated rule are not captures of this
+                    // invocation. Keep them as `$name` so the compiled rule
+                    // still has a pattern.
+                    render_keeping_holes(&mut rendered, body, captures);
                     let read = sweetener_reader::read_syntax(&rendered);
                     let mut found = HashMap::new();
                     collect_macros(&rendered, &read.children, &mut found);
                     self.classes.extend(collect_classes(&read.children));
+                    eprintln!("defined from {rendered:?} found={:?}", found.keys().collect::<Vec<_>>());
                     for macro_ in found.into_values() {
                         if let Some(existing) = self.macros.iter_mut().find(|have| have.name == macro_.name) {
                             existing.rules.extend(macro_.rules);
@@ -428,13 +451,13 @@ impl<'a> Printer<'a> {
     }
 
     fn hygiene_plan(&mut self, introduced: &[String]) -> Option<Vec<(String, String)>> {
-        // A later expansion must not reprint `Brand` or `value` that an
+        // A later expansion must not reprint `Inner` or `A` that an
         // earlier expansion already bound, even when the first one needed
-        // no rename.
+        // no rename. Record them before deciding the plan is empty.
+        for name in introduced {
+            self.user_names.insert(name.clone());
+        }
         if !self.needs_hygiene(introduced) {
-            for name in introduced {
-                self.user_names.insert(name.clone());
-            }
             return None;
         }
         let mut plan: Vec<(String, String)> = Vec::new();
@@ -1239,6 +1262,7 @@ fn hole_kind(raw: &str) -> HoleKind {
         "stmt" => HoleKind::Stmt,
         "type" => HoleKind::Type,
         "binding" | "ident" => HoleKind::Ident,
+        "tt" | "token" => HoleKind::TokenTree,
         // A user syntax class (`State`, `Segment`) is not a builtin hole.
         // Matching looks the class up by this spelling.
         other => HoleKind::Class(other.to_owned()),
@@ -1551,7 +1575,12 @@ fn directive_tpl(
     arg_span: &Span,
 ) -> Option<Tpl> {
     match raw {
-        "#text" => text_hole_name(args).map(Tpl::Quote),
+        "#text" => text_hole_name(args).map(Tpl::Quote).or_else(|| {
+            let Syntax::Group { children, .. } = args else {
+                return None;
+            };
+            read_var_path(children, 0).map(|(path, _, _)| Tpl::Quote(path))
+        }),
         "#core" => {
             let mut inner = Vec::new();
             let mut inner_cursor = arg_span.start as usize + 1;
@@ -1573,11 +1602,9 @@ fn directive_tpl(
 fn read_join(children: &[Syntax]) -> Tpl {
     let mut name = String::new();
     let mut index = 0;
-    if dollar_at(children, 0) {
-        if let Some(Syntax::Token { raw, .. }) = children.get(1) {
-            name = raw.clone();
-        }
-        index = 2;
+    if let Some((path, _, next)) = read_var_path(children, 0) {
+        name = path;
+        index = next;
     } else if let Some(Syntax::Token { raw, .. }) = children.first() {
         name = raw.clone();
     }
@@ -2844,7 +2871,7 @@ fn introduced_names(declared: &[String], rendered: &str, captures: &HashMap<Stri
 fn capture_spellings(captures: &HashMap<String, Capture>) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
     for value in captures.values() {
-        if let Capture::Text(text) = value {
+        if let Some(text) = capture_spelling(value) {
             let trimmed = text.trim();
             if is_ident_text(trimmed) {
                 names.insert(trimmed.to_owned());
@@ -2916,6 +2943,75 @@ fn param_names(children: &[Syntax]) -> Vec<String> {
         child += 1;
     }
     names
+}
+
+/// Render a `#syntax` body. A hole this invocation captured is
+/// substituted. A hole of the macro being defined is written back as
+/// `$name`, including `$name.field`.
+fn render_keeping_holes(out: &mut String, template: &[Tpl], captures: &HashMap<String, Capture>) {
+    for part in template {
+        match part {
+            Tpl::Text(text) => out.push_str(&substitute_text(text, captures)),
+            Tpl::Var(name) | Tpl::Quote(name) | Tpl::Count(name) => {
+                if capture_at(captures, name).is_some() {
+                    render(out, std::slice::from_ref(part), captures, &[]);
+                } else {
+                    out.push('$');
+                    out.push_str(name);
+                }
+            }
+            Tpl::Join { name, prefix, suffix, casing } => {
+                if capture_at(captures, name).is_some() {
+                    render(out, std::slice::from_ref(part), captures, &[]);
+                } else {
+                    out.push_str("#join($");
+                    out.push_str(name);
+                    if !prefix.is_empty() {
+                        out.push_str(&format!(", prefix: \"{prefix}\""));
+                    }
+                    if !suffix.is_empty() {
+                        out.push_str(&format!(", suffix: \"{suffix}\""));
+                    }
+                    if casing != "preserve" {
+                        out.push_str(&format!(", casing: \"{casing}\""));
+                    }
+                    out.push(')');
+                }
+            }
+            Tpl::Core(inner) => {
+                out.push_str("#core(");
+                render_keeping_holes(out, inner, captures);
+                out.push(')');
+            }
+            Tpl::If { path, then_body, else_body } => {
+                out.push_str("#if(present $");
+                out.push_str(path);
+                out.push_str(") {");
+                render_keeping_holes(out, then_body, captures);
+                out.push('}');
+                if let Some(else_body) = else_body {
+                    out.push_str(" #else {");
+                    render_keeping_holes(out, else_body, captures);
+                    out.push('}');
+                }
+            }
+            Tpl::Rep { inner, sep } => {
+                out.push_str("$(");
+                render_keeping_holes(out, inner, captures);
+                out.push(')');
+                if let Some(sep) = sep {
+                    out.push_str(sep);
+                }
+                out.push('*');
+            }
+            Tpl::Define(inner) => {
+                out.push_str("#syntax {");
+                render_keeping_holes(out, inner, captures);
+                out.push('}');
+            }
+            Tpl::Unknown { name, .. } => out.push_str(name),
+        }
+    }
 }
 
 fn render(
@@ -3196,22 +3292,66 @@ fn string_literal(text: &str) -> String {
 }
 
 fn capture_text<'a>(captures: &'a HashMap<String, Capture>, name: &str) -> Option<&'a str> {
-    match captures.get(name) {
-        Some(Capture::Text(text)) => Some(text.as_str()),
-        Some(Capture::Many(rows)) => rows.first().and_then(|row| {
-            row.iter().find_map(|(key, value)| match value {
-                Capture::Text(text) if key == name => Some(text.as_str()),
-                _ => None,
-            })
+    capture_at(captures, name).and_then(capture_spelling)
+}
+
+fn capture_spelling(value: &Capture) -> Option<&str> {
+    match value {
+        Capture::Text(text) => Some(text.as_str()),
+        Capture::Record { text, .. } => Some(text.as_str()),
+        Capture::Many(rows) => rows.first().and_then(|row| {
+            row.iter().find_map(|(_, value)| capture_spelling(value))
         }),
-        None => None,
     }
 }
 
+fn capture_present(captures: &HashMap<String, Capture>, path: &str) -> bool {
+    match capture_at(captures, path) {
+        Some(Capture::Many(rows)) => !rows.is_empty(),
+        Some(Capture::Text(text)) => !text.trim().is_empty(),
+        Some(Capture::Record { .. }) => true,
+        None => false,
+    }
+}
+
+/// `$state.name` and `$state.moves.event` walk record fields. A repeated
+/// field keeps the repetition so the template row splitter can see it.
+fn capture_at<'a>(captures: &'a HashMap<String, Capture>, path: &str) -> Option<&'a Capture> {
+    let (root, rest) = path.split_once('.').unwrap_or((path, ""));
+    let mut value = captures.get(root)?;
+    if rest.is_empty() {
+        return Some(value);
+    }
+    for field in rest.split('.') {
+        value = match value {
+            Capture::Record { fields, .. } => fields.get(field)?,
+            Capture::Many(rows) => {
+                // `$state.moves.event` while `moves` is still the sequence:
+                // the field lives on each element. Callers that repeat on
+                // `moves` scope one element first.
+                let _ = field;
+                return rows.first().and_then(|row| {
+                    row.iter().find_map(|(_, element)| match element {
+                        Capture::Record { fields, .. } => capture_field(fields, field),
+                        _ => None,
+                    })
+                });
+            }
+            Capture::Text(_) => return None,
+        };
+    }
+    Some(value)
+}
+
+fn capture_field<'a>(fields: &'a HashMap<String, Capture>, name: &str) -> Option<&'a Capture> {
+    fields.get(name)
+}
+
 fn capture_count(captures: &HashMap<String, Capture>, name: &str) -> usize {
-    match captures.get(name) {
+    match capture_at(captures, name) {
         Some(Capture::Many(rows)) => rows.len(),
         Some(Capture::Text(text)) if !text.trim().is_empty() => 1,
+        Some(Capture::Record { .. }) => 1,
         _ => 0,
     }
 }
@@ -3307,20 +3447,71 @@ fn new_expr_end(nodes: &[Syntax], index: usize) -> usize {
 fn rep_rows(inner: &[Tpl], captures: &HashMap<String, Capture>) -> Vec<Vec<(String, Capture)>> {
     let mut names = Vec::new();
     collect_vars(inner, &mut names);
+    // A nested field (`$state.moves.event`) repeats on the sequence it
+    // walks through, not on the leaf. The longest path that is a sequence
+    // is that repetition.
+    let mut best: Option<(&str, &Vec<Vec<(String, Capture)>>)> = None;
+    for name in &names {
+        let mut path = name.as_str();
+        while !path.is_empty() {
+            if let Some(Capture::Many(rows)) = capture_at(captures, path) {
+                let longer = best.is_none_or(|(_, have)| rows.len() >= have.len() && path.len() >= best.unwrap().0.len());
+                if longer {
+                    best = Some((path, rows));
+                }
+                break;
+            }
+            path = path.rsplit_once('.').map(|(parent, _)| parent).unwrap_or("");
+        }
+    }
+    if let Some((path, rows)) = best {
+        return rows
+            .iter()
+            .map(|row| scope_rep_row(path, row))
+            .collect();
+    }
     let Some(name) = names.first() else {
         return Vec::new();
     };
-    match captures.get(name) {
+    match capture_at(captures, name) {
         Some(Capture::Many(rows)) => rows.clone(),
-        Some(Capture::Text(_)) => vec![vec![(name.clone(), captures[name].clone())]],
+        Some(value) => vec![vec![(name.clone(), value.clone())]],
         None => Vec::new(),
     }
+}
+
+fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)> {
+    let mut scoped = Vec::new();
+    let element = row
+        .iter()
+        .find(|(key, _)| key == path.rsplit('.').next().unwrap_or(path) || key == path)
+        .or_else(|| row.first())
+        .map(|(_, value)| value.clone());
+    if let Some(element) = element {
+        scoped.push((path.to_owned(), element.clone()));
+        // `$state.moves.event` inside a repetition of `$state` reads the
+        // field off this element, not off the whole sequence.
+        if let Capture::Record { fields, .. } = &element {
+            for (field, value) in fields {
+                let mut child = String::from(path);
+                child.push('.');
+                child.push_str(field);
+                scoped.push((child, value.clone()));
+            }
+        }
+    }
+    for (key, value) in row {
+        if !scoped.iter().any(|(have, _)| have == key) {
+            scoped.push((key.clone(), value.clone()));
+        }
+    }
+    scoped
 }
 
 fn collect_vars(template: &[Tpl], names: &mut Vec<String>) {
     for part in template {
         match part {
-            Tpl::Var(name) | Tpl::Quote(name) | Tpl::Count(name) => {
+            Tpl::Var(name) | Tpl::Quote(name) | Tpl::Count(name) | Tpl::If { path: name, .. } => {
                 if !names.contains(name) {
                     names.push(name.clone());
                 }
@@ -3330,8 +3521,13 @@ fn collect_vars(template: &[Tpl], names: &mut Vec<String>) {
                     names.push(name.clone());
                 }
             }
-            Tpl::Define(_) => {}
-            Tpl::Core(inner) | Tpl::Rep { inner, .. } => collect_vars(inner, names),
+            Tpl::Define(inner) | Tpl::Core(inner) | Tpl::Rep { inner, .. } => collect_vars(inner, names),
+            Tpl::If { then_body, else_body, .. } => {
+                collect_vars(then_body, names);
+                if let Some(else_body) = else_body {
+                    collect_vars(else_body, names);
+                }
+            }
             Tpl::Text(_) | Tpl::Unknown { .. } => {}
         }
     }

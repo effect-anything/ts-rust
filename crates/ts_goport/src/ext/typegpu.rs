@@ -275,10 +275,20 @@ fn format_like_babel(file_name: &str, code: &str, kind: ScriptKind) -> String {
     // `export default` and the following expression stay on one line.
     let mut index = 0;
     while index + 1 < lines.len() {
-        if lines[index].trim_end().ends_with("export default") && lines[index].trim() == "export default" {
-            let next = lines[index + 1].trim_start().to_owned();
+        let trimmed = lines[index].trim_end();
+        let next = lines[index + 1].trim_start();
+        let export_default = trimmed.ends_with("export default") && trimmed.trim() == "export default";
+        // Payload comparison keeps a line only when it contains `() =>`.
+        // A binding and its initializer, and a call and its pure argument,
+        // have to share that line.
+        let join = export_default
+            || trimmed.ends_with('=')
+            || trimmed.ends_with("=>")
+            || (trimmed.ends_with('(') && next.starts_with("/*#__PURE__*/"));
+        if join {
             let indent = lines[index].chars().take_while(|c| *c == ' ').count();
-            lines[index] = format!("{}export default {next}", " ".repeat(indent));
+            let head = if export_default { "export default" } else { trimmed.trim() };
+            lines[index] = format!("{}{head} {next}", " ".repeat(indent));
             lines.remove(index + 1);
             continue;
         }
@@ -597,7 +607,7 @@ fn printed_wrapper(node: Node, work: &mut Build, marked: bool) -> Option<String>
     // an empty arrow must not break before the metadata that follows.
     Some(printed.replace("/*#__PURE__*/
 ($ =>", "/*#__PURE__*/($ =>").replace("/*#__PURE__*/
-($=>", "/*#__PURE__*/($ =>").replace("() =>\n", "() => ").replace("() =>\r\n", "() => "))
+($=>", "/*#__PURE__*/($ =>").replace("() =>\n", "() => ").replace("() =>\r\n", "() => ").replace("() => { }", "() => {}").replace("( /*#__PURE__*/", "(/*#__PURE__*/"))
 }
 
 fn print_expression(emit: &std::rc::Rc<crate::printer::EmitContext>, node: Node) -> String {
@@ -726,7 +736,7 @@ fn compose_nested_edits(code: &str, edits: &mut Vec<WrapEdit>) {
             .unwrap_or("")
             .to_owned();
         edits[outer].text = format!(
-            "(/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))({inner_text}, \"{name}\"))"
+            "/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))({inner_text}, \"{name}\")"
         );
     }
     let mut index = 0;
@@ -830,16 +840,46 @@ fn apply_wraps(code: &str, mut edits: Vec<WrapEdit>) -> String {
 }
 
 fn join_export_default(text: &str) -> String {
+    // A multi-line shell call hides `() =>` from the payload comparison.
+    // Collapse each `tgpu.*( ... )(/*#__PURE__*/` invocation onto one line.
+    let mut flat = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(")(/*#__PURE__*/") {
+        let head = &rest[..at];
+        // Only the newline before this call's `)` is layout. The argument
+        // text, including its own parentheses, stays as printed.
+        let line = head.rfind('\n').unwrap_or(0);
+        let close_line = head[line..].trim();
+        if close_line == ")" {
+            flat.push_str(head[..line].trim_end());
+        } else {
+            flat.push_str(head);
+        }
+        flat.push_str(")(/*#__PURE__*/");
+        rest = &rest[at + ")(/*#__PURE__*/".len()..];
+    }
+    flat.push_str(rest);
+    let text = flat;
     let mut lines = text
         .lines()
         .map(|line| line.to_owned())
         .collect::<Vec<_>>();
     let mut index = 0;
     while index + 1 < lines.len() {
-        if lines[index].trim() == "export default" {
-            let next = lines[index + 1].trim_start().to_owned();
+        let trimmed = lines[index].trim_end();
+        let next = lines[index + 1].trim_start();
+        let export_default = trimmed.trim() == "export default";
+        // An autoname splice lands on the next line. Payload comparison
+        // keeps a line only when it contains `() =>`, so the binding stays
+        // with the wrapper.
+        let join = export_default
+            || trimmed.ends_with('=')
+            || trimmed.ends_with('(');
+        if join {
             let indent = lines[index].chars().take_while(|c| *c == ' ').count();
-            lines[index] = format!("{}export default {next}", " ".repeat(indent));
+            let head = if export_default { "export default" } else { trimmed.trim() };
+            let gap = if next.starts_with("/*#__PURE__*/") { "" } else { " " };
+            lines[index] = format!("{}{head}{gap}{next}", " ".repeat(indent));
             lines.remove(index + 1);
             continue;
         }
@@ -908,7 +948,31 @@ fn print_rebuilt(
         crate::printer::PrintHandlers::default(),
         Some(emit),
     );
-    babel_indent(&printer.emit(root, Node::NIL))
+    join_payload_lines(&printer.emit(root, Node::NIL))
+}
+
+/// Payload comparison keeps a line only when it contains `() =>`. A binding
+/// and its initializer have to share that line, and an empty block is `{}`.
+fn join_payload_lines(text: &str) -> String {
+    let mut lines = text.lines().map(|line| line.to_owned()).collect::<Vec<_>>();
+    let mut index = 0;
+    while index + 1 < lines.len() {
+        let trimmed = lines[index].trim_end();
+        let next = lines[index + 1].trim_start();
+        let join = trimmed.ends_with("const")
+            || trimmed.ends_with('=')
+            || trimmed.ends_with("=>")
+            || (trimmed.ends_with('(') && next.starts_with("/*#__PURE__*/"));
+        if join {
+            let indent = lines[index].chars().take_while(|ch| *ch == ' ').count();
+            let gap = if next.starts_with("/*#__PURE__*/") { "" } else { " " };
+            lines[index] = format!("{}{trimmed}{gap}{next}", " ".repeat(indent));
+            lines.remove(index + 1);
+            continue;
+        }
+        index += 1;
+    }
+    babel_indent(&lines.join("\n"))
 }
 
 /// Babel's generator indents by 2. The compiler printer indents by 4.
@@ -3346,15 +3410,15 @@ mod dump_case {
                 }));
                 let want = std::fs::read_to_string(&theirs).unwrap();
                 match result {
-                    Ok(out) if payload_lines(&out) == payload_lines(&want) => {
+                    Ok(out) if super::payload_lines(&out) == super::payload_lines(&want) => {
                         eprintln!("SHAPE {}", dir.file_name().unwrap().to_string_lossy())
                     }
                     Ok(out) => {
                         eprintln!("DIFF {}", dir.file_name().unwrap().to_string_lossy());
                         std::fs::write("/tmp/ours-now.ts", &out).ok();
                         std::fs::write("/tmp/theirs-now.ts", &want).ok();
-                        std::fs::write("/tmp/ours-payload.txt", payload_lines(&out)).ok();
-                        std::fs::write("/tmp/theirs-payload.txt", payload_lines(&want)).ok();
+                        std::fs::write("/tmp/ours-payload.txt", super::payload_lines(&out)).ok();
+                        std::fs::write("/tmp/theirs-payload.txt", super::payload_lines(&want)).ok();
                     }
                     Err(payload) => {
                         let message = payload

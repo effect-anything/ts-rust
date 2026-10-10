@@ -7,14 +7,6 @@ const box = {
   next(source.value),
 };
 
-export const result = box.flatMap(box.all([left.sources]), ([left.names]) =>
-      box.flatMap(box.all([<-.sources]), ([<-.names]) =>
-      box.flatMap(box.all([box.sources]), ([box.names]) =>
-      box.flatMap(box.all([..sources]), ([..names]) =>
-      box.flatMap(box.all([of.sources]), ([of.names]) =>
-      doSteps(box) { (2) }
-    )
-    )
-    )
-    )
+export const result = (box.of(2), (left) =>
+      doSteps(box) { const right = yield take(box).of(3) }
     );

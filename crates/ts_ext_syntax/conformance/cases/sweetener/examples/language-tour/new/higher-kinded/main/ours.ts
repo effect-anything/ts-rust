@@ -1,18 +1,13 @@
 
 declare class Option<A> { value: A }
 
-#syntax {
-      syntax Functor:item {
-        rule { Functor :binding for :ident; }
-        bind  in following as recursive type;
-        => {
-          type F<Inner> = <Inner>
-          export interface  {
+
+
+type F<Inner> = Array<Inner>
+          export interface FunctorArray {
   map<A, B>(value: F<A>, transform: (a: A) => B): F<B>;
 }
-        }
-      }
-    }
-
-Functor FunctorArray for Array;
-Functor FunctorOption for Option;
+type F_1<Inner> = Option<Inner>
+          export interface FunctorOption {
+  map<A, B>(value: F_1<A>, transform: (a_1: A) => B): F_1<B>;
+}
