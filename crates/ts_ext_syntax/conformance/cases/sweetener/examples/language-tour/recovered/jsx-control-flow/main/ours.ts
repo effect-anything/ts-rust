@@ -9,17 +9,9 @@ void Fragment;
 
 export const list = (items: readonly Item[], loading: boolean) => (
   <ul>
-    {when (loading)}
-      <li>loading</li>
-    {else}
-      <li>ready</li>
-    {end}
-    {when (items.length === 0)}
-      <li>nothing here</li>
-    {end}
-    {each (items as item, index)}
-      <li key={item.id}>{index}: {item.name}</li>
-    {end}
+    {(loading) ? <li>loading</li> : <li>ready</li>}
+    {(items.length === 0) ? <li>nothing here</li> : null}
+    {(items).map((item, index) => <li key={item.id}>{index}: {item.name}</li>)}
   </ul>
 );
 

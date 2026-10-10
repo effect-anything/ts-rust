@@ -1,7 +1,7 @@
---- /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-theirs.txt	2026-10-11 02:52:45
-+++ /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-ours.txt	2026-10-11 02:52:45
+--- /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-theirs.txt	2026-10-11 02:56:24
++++ /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-ours.txt	2026-10-11 02:56:24
 @@ -1 +1 @@
 -declareclassOption<A>{value:A}typeF<Inner>=Array<Inner>exportinterfaceFunctorArray{map<A_1,B>value:F<A_1>,transform:a:A_1=>B:F<B>;}typeF_1<Inner_1>=Option<Inner_1>exportinterfaceFunctorOption{map<A_2,B_1>value_1:F_1<A_2>,transform_1:a_1:A_2=>B_1:F_1<B_1>;}
 \ No newline at end of file
-+declareclassOption<A>{value:A}typeF_1<Inner>=Array<Inner>exportinterfaceFunctorArray{map<A,B>value:F_1<A>,transform:a_1:A=>B:F_1<B>;}typeF_2<Inner>=Option<Inner>exportinterfaceFunctorOption{map<A,B>value:F_2<A>,transform:a_2:A=>B:F_2<B>;}
++declareclassOption<A>{value:A}typeF<Inner>=Array<Inner>exportinterfaceFunctorArray{map<A,B>value:F<A>,transform:a:A=>B:F<B>;}typeF_1<Inner>=Option<Inner>exportinterfaceFunctorOption{map<A,B>value:F_1<A>,transform:a_1:A=>B:F_1<B>;}
 \ No newline at end of file

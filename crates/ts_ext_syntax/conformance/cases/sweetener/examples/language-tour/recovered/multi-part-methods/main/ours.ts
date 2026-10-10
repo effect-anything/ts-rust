@@ -2,48 +2,13 @@
 
 
 
-export const result = ((
-              value: number,
-              lower(minimum: number)
-upper(maximum: number): number, lower(minimum: number)
-upper(maximum: number): number
-            ): boolean => { return value > minimum && value < maximum; })(
-            ,
-            
-          );
+export const result = between(3)
+lower(1)
+upper(5);
 
 // A generalised method name is a request grammar. Repetition and optional
 // groups use the same regular-language notation as Sweetener patterns.
-method query {
-  request {
-    query($source:expr)
-    $(Where($filter:expr))+
-    $(OrderBy($ordering:expr) $(ThenBy($tiebreak:expr))*)?
-    Select($projection:expr)
-  }
-  expect "a query ending in Select(...) or GroupBy(...)";
-  => {
-    ({
-        source: $source,
-        filters: [$($filter),*],
-        projection: $projection,
-      })
-  }
 
-  request {
-    query($source:expr)
-    $(Where($filter:expr))*
-    GroupBy($projection:expr)
-  }
-  expect "a query ending in Select(...) or GroupBy(...)";
-  => {
-    ({
-        source: $source,
-        filters: [$($filter),*],
-        projection: $projection,
-      })
-  }
-}
 
 const students = [{ name: "Ada", age: 36 }];
 const adult = (student: (typeof students)[number]) => student.age >= 18;

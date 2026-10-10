@@ -39,6 +39,8 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
         hygiene: HashMap::new(),
         occurrence_names: HashMap::new(),
         imports_emitted: false,
+        form_signals: Vec::new(),
+        form_methods: Vec::new(),
     };
     printer.diagnostics.extend(loaded.diagnostics);
     printer.print_nodes(&read.children);
@@ -76,6 +78,9 @@ struct Printer<'a> {
     /// in source order. A second `const actual` is a new binding.
     occurrence_names: HashMap<String, Vec<String>>,
     imports_emitted: bool,
+    /// `state` bindings and multi-part methods the form pass introduced.
+    form_signals: Vec<(String, String)>,
+    form_methods: Vec<super::sweetener_forms::MethodBinding>,
 }
 
 impl<'a> Printer<'a> {
@@ -99,9 +104,13 @@ impl<'a> Printer<'a> {
                 self.source,
                 nodes,
                 index,
-                &[],
-                &[],
+                &self.form_signals,
+                &self.form_methods,
             ) {
+                self.form_signals.extend(rewritten.binds.clone());
+                if let Some(method) = rewritten.method.clone() {
+                    self.form_methods.push(method);
+                }
                 self.copy_until(rewritten.start);
                 let expanded = self.expand_replacement(&rewritten.text);
                 self.emit(
@@ -298,9 +307,6 @@ impl<'a> Printer<'a> {
                 // The rendered text is the binding that must not collide.
                 self.define_syntax(&rule.template, &matched.captures);
                 let introduced = introduced_names(&rule.introduced, &replacement, &matched.captures);
-                if name == "Functor" {
-                    eprintln!("introduced={introduced:?} user={:?} hygiene={:?}", self.user_names, self.hygiene);
-                }
                 let plan = self.hygiene_plan(&introduced);
                 if let Some(plan) = &plan {
                     replacement = apply_plan(&replacement, plan);
@@ -370,6 +376,8 @@ impl<'a> Printer<'a> {
             hygiene: HashMap::new(),
             occurrence_names: HashMap::new(),
             imports_emitted: true,
+            form_signals: self.form_signals.clone(),
+            form_methods: self.form_methods.clone(),
         };
         nested.print_nodes(&read.children);
         nested.copy_until(owned.len());
@@ -399,11 +407,15 @@ impl<'a> Printer<'a> {
             hygiene: self.hygiene.clone(),
             occurrence_names: HashMap::new(),
             imports_emitted: true,
+            form_signals: self.form_signals.clone(),
+            form_methods: self.form_methods.clone(),
         };
         nested.print_nodes(&read.children);
         nested.copy_until(owned.len());
         self.diagnostics.append(&mut nested.diagnostics);
         self.hygiene = nested.hygiene;
+        self.form_signals = nested.form_signals;
+        self.form_methods = nested.form_methods;
         nested.out
     }
 
@@ -455,17 +467,10 @@ impl<'a> Printer<'a> {
 
     fn hygiene_plan(&mut self, introduced: &[String]) -> Option<Vec<(String, String)>> {
         // A later expansion must not reprint `Inner` or `A` that an
-        // earlier expansion already bound, even when the first one needed
-        // no rename. Record them before deciding the plan is empty.
-        for name in introduced {
-            self.user_names.insert(name.clone());
-        }
-        if !self.needs_hygiene(introduced) {
-            return None;
-        }
+        // earlier expansion already bound. The first expansion keeps the
+        // spelling when nothing in the user file has it.
         let mut plan: Vec<(String, String)> = Vec::new();
         let mut used = self.user_names.clone();
-        used.extend(self.hygiene.values().cloned());
         let mut seen = HashMap::<String, usize>::new();
         for name in introduced {
             let nth = seen.get(name).copied().unwrap_or(0);
@@ -488,7 +493,6 @@ impl<'a> Printer<'a> {
             plan.push((format!("{name}\00"), printed.clone()));
             used.insert(printed.clone());
             self.user_names.insert(printed.clone());
-            self.hygiene.insert(name.clone(), printed);
         }
         // A runtime import whose local name is already bound at the call site
         // is printed `exported as name_1`, and the template must use that name.

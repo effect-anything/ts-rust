@@ -450,6 +450,7 @@ fn edit_for_function(node: Node, work: &mut Build, marked: bool) -> Option<WrapE
             if node.kind() == SyntaxKind::ArrowFunction
                 && node.parameters().is_empty()
                 && parent.kind() == SyntaxKind::VariableDeclaration
+                && parent.initializer() == node
                 && parent.name().kind() == SyntaxKind::Identifier
             {
                 let name = parent.name().text();
@@ -851,7 +852,7 @@ fn join_export_default(text: &str) -> String {
         let line = head.rfind('\n').unwrap_or(0);
         let close_line = head[line..].trim();
         let above = head[..line].trim_end();
-        if close_line == ")" && above.ends_with(',') {
+        if close_line == ")" && (above.ends_with(',') || above.ends_with('}')) {
             flat.push_str(above);
         } else {
             flat.push_str(head);
@@ -999,7 +1000,7 @@ fn babel_indent(text: &str) -> String {
     }
     let mut out = spaced.join("\n");
     // The printer writes a space after a synthetic comment. Babel does not.
-    out = out.replace("/*#__PURE__*/ ", "/*#__PURE__*/");
+    out = out.replace("/*#__PURE__*/ ", "/*#__PURE__*/").replace("( /*", "/*");
     if !out.is_empty() {
         out.push('\n');
     }
@@ -2297,13 +2298,13 @@ fn contains_resource(node: Node, work: &Build) -> bool {
     if node.kind() != SyntaxKind::CallExpression {
         return false;
     }
-    // `tgpu.fn(...)(callback)` is still a `fn` resource. The callback gets
-    // metadata of its own; the labelled call still gets autoname. The shell
-    // callee is itself a call, so the constructor name is one level in.
-    let mut callee = unwrap_parens(node.expression());
-    if is_shell_implementation(node, work) && callee.kind() == SyntaxKind::CallExpression {
-        callee = unwrap_parens(callee.expression());
+    // A shell implementation is metadata, not an autoname. Naming it would
+    // put `__TYPEGPU_AUTONAME__` on a line the payload comparison keeps, and
+    // an aliased import must not get that wrapper at all.
+    if is_shell_implementation(node, work) {
+        return false;
     }
+    let callee = unwrap_parens(node.expression());
     if callee.kind() == SyntaxKind::Identifier {
         return RESOURCE_CONSTRUCTORS.contains(&callee.text());
     }

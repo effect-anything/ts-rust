@@ -48,19 +48,28 @@ pub fn try_expand_fixture(
         for (_name, params) in &item.segments {
             segments.push(param_pairs(source, params));
         }
+        let method = MethodBinding {
+            head: item.head.clone(),
+            head_params,
+            segments,
+            result: item.result.to_owned(),
+            body: item.body.to_owned(),
+        };
+        // The second `method` rule emits `#syntax`, which is not printed.
+        // The binding is what a later call expands. The grammar form is
+        // different: its requests become ordinary `syntax` rules.
+        let text = if item.requests.is_empty() {
+            String::new()
+        } else {
+            expand_method_grammar(&item.head, &item.requests)
+        };
         return Some(FixtureRewrite {
             start: node_start(&nodes[index]),
             end,
             next: end_index(nodes, index, end),
-            text: String::new(),
+            text,
             binds: vec![(item.head.clone(), "method".to_owned())],
-            method: Some(MethodBinding {
-                head: item.head,
-                head_params,
-                segments,
-                result: item.result.to_owned(),
-                body: item.body.to_owned(),
-            }),
+            method: Some(method),
         });
     }
     if let Some(call) = match_method_call(source, nodes, index, methods) {
@@ -393,6 +402,22 @@ pub fn match_method_item<'a>(source: &'a str, nodes: &'a [Syntax]) -> Option<Met
     index += 1;
     let head = token_raw(nodes.get(index))?;
     index += 1;
+    // `method query { request { ... } expect ...; => { ... } }` is the
+    // grammar rule. It has no parameter group on the head.
+    if group_children(nodes.get(index), Delimiter::Brace).is_some() {
+        let requests = method_requests(source, nodes.get(index)?);
+        if requests.is_empty() {
+            return None;
+        }
+        return Some(MethodItem {
+            head,
+            head_params: &[],
+            segments: Vec::new(),
+            result: "",
+            body: "",
+            requests,
+        });
+    }
     let head_group = group_children(nodes.get(index), Delimiter::Paren)?;
     index += 1;
     let mut segments = Vec::new();
@@ -415,7 +440,78 @@ pub fn match_method_item<'a>(source: &'a str, nodes: &'a [Syntax]) -> Option<Met
         segments,
         result,
         body: body.trim(),
+        requests: Vec::new(),
     })
+}
+
+/// `method query { request { ... } expect "..."; => { ... } }` becomes the
+/// `syntax query` the first `method` rule would define. `#syntax` is not
+/// printed; the rules are.
+fn method_requests(source: &str, body: &Syntax) -> Vec<MethodRequest> {
+    let Some(children) = group_children(Some(body), Delimiter::Brace) else {
+        return Vec::new();
+    };
+    let mut requests = Vec::new();
+    let mut index = 0;
+    while index < children.len() {
+        if !token_is(children.get(index), "request") {
+            index += 1;
+            continue;
+        }
+        let Some(pattern) = group_interior(source, children.get(index + 1).unwrap_or(&children[index]), Delimiter::Brace) else {
+            index += 1;
+            continue;
+        };
+        index += 2;
+        let mut expectation = "";
+        if token_is(children.get(index), "expect") {
+            expectation = children
+                .get(index + 1)
+                .map(|node| sweetener_reader::slice(source, node).trim())
+                .unwrap_or("");
+            index += 2;
+            if operator_is(children.get(index), ";") {
+                index += 1;
+            }
+        }
+        if !operator_is(children.get(index), "=>") {
+            continue;
+        }
+        let Some(expansion) = group_interior(source, children.get(index + 1).unwrap_or(&children[index]), Delimiter::Brace) else {
+            index += 1;
+            continue;
+        };
+        requests.push(MethodRequest {
+            pattern: pattern.trim().to_owned(),
+            expectation: expectation.trim_matches('"').to_owned(),
+            expansion: expansion.trim().to_owned(),
+        });
+        index += 2;
+    }
+    requests
+}
+
+struct MethodRequest {
+    pattern: String,
+    expectation: String,
+    expansion: String,
+}
+
+pub fn expand_method_grammar(head: &str, requests: &[MethodRequest]) -> String {
+    let mut rules = Vec::new();
+    for request in requests {
+        let expect = if request.expectation.is_empty() {
+            String::new()
+        } else {
+            format!("\nexpect \"{}\";", request.expectation)
+        };
+        rules.push(format!(
+            "rule {{ {} }}{expect}\n=> {{ {} }}",
+            request.pattern.trim(),
+            request.expansion.trim()
+        ));
+    }
+    format!("syntax {head}:expr {{\n{}\n}}", rules.join("\n"))
 }
 
 /// Pieces of a multi-part method item. Parameter groups are still token trees;
@@ -426,6 +522,7 @@ pub struct MethodItem<'a> {
     pub segments: Vec<(String, &'a [Syntax])>,
     pub result: &'a str,
     pub body: &'a str,
+    requests: Vec<MethodRequest>,
 }
 
 /// `2 -> table` or `received <- table` at statement position.
@@ -1003,19 +1100,19 @@ fn expand_thread_nodes(source: &str, value: &str, body: &[Syntax], first: bool) 
             break;
         }
         let args = split_call_args(source, args_node);
-        // `(-> value, sum(),)` keeps the empty step's trailing comma.
-        // A step that already has arguments does not.
-        let trailing = args.is_empty() && call_args_trail(source, args_node);
+        let empty_step = args.is_empty();
         let mut call_args = Vec::new();
         if first {
             call_args.push(current);
-            call_args.extend(args);
+            call_args.extend(args.clone());
         } else {
             call_args.extend(args);
             call_args.push(current);
         }
         let mut joined = call_args.join(", ");
-        if trailing {
+        // `$next($value, $($argument),*)` keeps the comma when the step
+        // has no arguments of its own: `sum()` becomes `sum(value,)`.
+        if first && empty_step {
             joined.push(',');
         }
         current = format!("{callee}({joined})");

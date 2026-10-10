@@ -1,6 +1,6 @@
 import { tgpu } from 'typegpu';
 import * as d from 'typegpu/data';
-const myFunction =/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgpu.fn([])(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => 0, {
+const myFunction = /*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgpu.fn([])(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => 0, {
   v: 2,
   name: undefined,
   ast: {
@@ -9,7 +9,7 @@ const myFunction =/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgp
   },
   externals: {}
 }) && $.f)({})), "myFunction");
-const myComputeFn =/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {}, {
+const myComputeFn = /*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {}, {
   v: 2,
   name: undefined,
   ast: {
@@ -18,7 +18,7 @@ const myComputeFn =/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tg
   },
   externals: {}
 }) && $.f)({})), "myComputeFn");
-const myVertexFn =/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgpu.vertexFn({ out: { ret: d.i32 } })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => ({ ret: 0 }), {
+const myVertexFn = /*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgpu.vertexFn({ out: { ret: d.i32 } })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => ({ ret: 0 }), {
   v: 2,
   name: undefined,
   ast: {
@@ -29,7 +29,7 @@ const myVertexFn =/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgp
   },
   externals: {}
 }) && $.f)({})), "myVertexFn");
-const myFragmentFn =/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgpu.fragmentFn({
+const myFragmentFn = /*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgpu.fragmentFn({
   in: { position: d.builtin.position },
   out: d.vec4f,
 })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => d.vec4f(), {

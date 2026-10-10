@@ -1,7 +1,0 @@
---- /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-theirs.txt	2026-10-11 02:52:45
-+++ /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-ours.txt	2026-10-11 02:52:45
-@@ -1 +1 @@
--constmap=<In,Out>values:readonlyIn[],f:value:In=>Out:Out[]=>values.mapvalue=>fvalue;constkeep=<T,>values:readonlyT[],f:value:T=>boolean:T[]=>values.filtervalue=>fvalue;constsum=values:readonlynumber[]:number=>values.reduceleft,right=>left+right,0;//Eachsteptakestheresultoftheonebeforeitasitsfirstargument.exportconstanswer:number=sumkeepmap[1,2,3,4,5],value:number=>value*value,value:number=>value>4,;
-\ No newline at end of file
-+constmap=<In,Out>values:readonlyIn[],f:value:In=>Out:Out[]=>values.mapvalue=>fvalue;constkeep=<T,>values:readonlyT[],f:value:T=>boolean:T[]=>values.filtervalue=>fvalue;constsum=values:readonlynumber[]:number=>values.reduceleft,right=>left+right,0;//Eachsteptakestheresultoftheonebeforeitasitsfirstargument.exportconstanswer:number=sumkeepmap[1,2,3,4,5],value:number=>value*value,value:number=>value>4;
-\ No newline at end of file
