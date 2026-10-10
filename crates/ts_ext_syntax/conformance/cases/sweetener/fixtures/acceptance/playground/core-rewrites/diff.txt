@@ -1,0 +1,9 @@
+--- /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-theirs.txt	2026-10-11 00:41:43
++++ /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-ours.txt	2026-10-11 00:41:43
+@@ -1,4 +1,5 @@
+-export function exact(value: number
++export function exact(
++value: number
+ ): number {
+ if (arguments.length !== globalThis.Number(1)) {
+ throw (new globalThis.Error(

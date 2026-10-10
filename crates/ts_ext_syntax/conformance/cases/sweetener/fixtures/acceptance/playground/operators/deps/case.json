@@ -1,0 +1,27 @@
+{
+  "$schema": "../../../../schemas/case.schema.json",
+  "id": "playground/operators",
+  "languageVersion": "legacy-sweetjs",
+  "typescriptVersion": "pinned",
+  "compilerOptions": {
+    "strict": true
+  },
+  "capabilities": [
+    "PLAYGROUND-OPERATORS",
+    "OP-PUNCTUATION",
+    "OP-PREFIX-FIXITY",
+    "OP-INFIX-FIXITY",
+    "OP-PRECEDENCE",
+    "CORE-SHADOW-LEXICAL"
+  ],
+  "entry": "acceptance.sts",
+  "expect": {
+    "expansion": true,
+    "bindings": true,
+    "trace": true,
+    "diagnostics": true,
+    "types": true,
+    "runtime": true
+  },
+  "limits": {}
+}

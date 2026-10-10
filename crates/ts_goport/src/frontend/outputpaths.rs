@@ -114,7 +114,8 @@ pub fn get_output_paths_for_file(
     // #4699: `force.js`, `force.dts` and `force.declaration_map` (Go `ForceEmitPaths`).
     // #4712: a content-mapped file gets no JS output. ts#63936: it keeps its
     // declaration map.
-    if content_mapper.is_empty()
+    // External mappers own their JS. Internal rewrites do not.
+    if crate::ext::precheck::emits_javascript(content_mapper)
         && (force.js || options.emit_declaration_only != Tristate::True)
         && !is_json_emitted_to_same_location
     {

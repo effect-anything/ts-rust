@@ -1,0 +1,31 @@
+{
+  "exports": {
+    "seen": [
+      "start:1",
+      "start:5",
+      "start:7",
+      "start:21",
+      "start:20",
+      "start:10",
+      "start:10",
+      "done:10",
+      "done:42"
+    ],
+    "observed": [
+      "start:1",
+      "start:5",
+      "start:7",
+      "start:21",
+      "start:20",
+      "start:10",
+      "start:10",
+      "done:10",
+      "done:42"
+    ],
+    "assigned": 42,
+    "settled": [
+      42,
+      true
+    ]
+  }
+}

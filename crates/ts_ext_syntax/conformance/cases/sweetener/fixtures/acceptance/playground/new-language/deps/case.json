@@ -1,0 +1,27 @@
+{
+  "$schema": "../../../../schemas/case.schema.json",
+  "id": "playground/new-language",
+  "languageVersion": "legacy-sweetjs",
+  "typescriptVersion": "pinned",
+  "compilerOptions": {
+    "strict": true
+  },
+  "capabilities": [
+    "PLAYGROUND-NEW-LANGUAGE",
+    "EXP-MACRO-COMPOSITION",
+    "BIND-MODULE",
+    "PAT-REP-NESTED",
+    "OP-MEMBER-DISPATCH",
+    "TS-TYPE-MACRO"
+  ],
+  "entry": "acceptance.sts",
+  "expect": {
+    "expansion": true,
+    "bindings": true,
+    "trace": true,
+    "diagnostics": true,
+    "types": true,
+    "runtime": true
+  },
+  "limits": {}
+}

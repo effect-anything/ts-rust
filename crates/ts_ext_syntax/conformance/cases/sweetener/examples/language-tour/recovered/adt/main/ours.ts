@@ -1,0 +1,8 @@
+
+
+data Option<T> = None() | Some(value: T);
+
+export const result = match (Some(3)) {
+  Some(value) => value + 1;
+  None() => 0;
+};

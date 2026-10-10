@@ -1,0 +1,63 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "playground/new-language",
+  "status": "proposed",
+  "legacySources": ["newlang.sweet.js"],
+  "summary": "Compose module, record, extension, and member-dispatch macros into one small language fragment.",
+  "capabilities": [
+    {
+      "id": "PLAYGROUND-NEW-LANGUAGE",
+      "requirement": "Support cooperating declarations and dispatch syntax from the combined playground language."
+    },
+    {
+      "id": "EXP-MACRO-COMPOSITION",
+      "requirement": "Expand record forms that appear inside a module template and dispatch syntax that uses an extension declaration."
+    },
+    {
+      "id": "BIND-MODULE",
+      "requirement": "Introduce a namespace binding whose exported records resolve in later type and value positions."
+    },
+    {
+      "id": "PAT-REP-NESTED",
+      "requirement": "Correlate each record field name with its type while records repeat within a module body."
+    },
+    {
+      "id": "OP-MEMBER-DISPATCH",
+      "requirement": "Rewrite a punctuation dispatch form into a helper call with the receiver as its first argument."
+    },
+    {
+      "id": "TS-TYPE-MACRO",
+      "requirement": "Expand a declaratively defined macro in TypeScript type position, a capability absent from the legacy JavaScript corpus."
+    }
+  ],
+  "syntaxNotes": [
+    "Module bodies expand as item sequences, so nested record forms participate in ordinary recursive expansion.",
+    "Extension methods name their receiver parameter and bind it in the captured body.",
+    "The dispatch operator places the receiver after the punctuation and emits it as the helper's first argument.",
+    "The optional type form expands in type position to a union with undefined."
+  ],
+  "artifacts": {
+    "definition": "declarative.sts",
+    "input": "acceptance.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-COMP-001",
+      "question": "Allow declaration macros to leave nested macro invocations for recursive expansion in the same phase?"
+    }
+  ]
+}

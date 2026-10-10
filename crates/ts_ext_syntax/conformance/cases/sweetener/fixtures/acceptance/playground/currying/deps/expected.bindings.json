@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "introduced": [
+    { "spelling": "add", "space": "value", "kind": "recursive" },
+    { "spelling": "left", "space": "value", "kind": "lexical" },
+    { "spelling": "right", "space": "value", "kind": "lexical" }
+  ],
+  "relationship": "The function is visible to following items; both parameters bind the captured implementation body."
+}

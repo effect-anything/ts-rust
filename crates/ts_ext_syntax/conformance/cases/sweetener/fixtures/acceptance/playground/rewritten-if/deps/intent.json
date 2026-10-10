@@ -1,0 +1,58 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "playground/rewritten-if",
+  "status": "proposed",
+  "legacySources": ["new/if.sjs", "new/helpers.sjs"],
+  "summary": "Intercept a core if statement and lower two return blocks into a lazy conditional helper without procedural token inspection.",
+  "capabilities": [
+    {
+      "id": "PLAYGROUND-REWRITTEN-IF",
+      "requirement": "Support the rewritten if experiment from the playground."
+    },
+    {
+      "id": "CORE-SHADOW-LEXICAL",
+      "requirement": "Intercept if only under an explicit lexical syntax import."
+    },
+    {
+      "id": "PAT-BLOCK-STRUCTURE",
+      "requirement": "Match return statements inside both balanced branch blocks through declarative patterns."
+    },
+    {
+      "id": "ENF-EXPR-EXTENT",
+      "requirement": "Consume the predicate and each returned value as complete expressions."
+    },
+    {
+      "id": "HYG-DEFINITION-REFERENCE",
+      "requirement": "Resolve the emitted IF helper at the macro definition even when the call site binds IF."
+    }
+  ],
+  "syntaxNotes": [
+    "The first contract accepts an if-else whose branches each contain one return statement.",
+    "Both branch values remain lazy arrow-function bodies.",
+    "Later rules may add nested else-if and statement prefixes without procedural expansion hooks."
+  ],
+  "artifacts": {
+    "definition": "declarative.sts",
+    "input": "acceptance.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-CORE-002",
+      "question": "Ship declarative core-form interception in the first release?"
+    }
+  ]
+}

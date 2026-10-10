@@ -1,0 +1,55 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "real-world/jsx-control-flow",
+  "status": "proposed",
+  "summary": "Express conditional and repeated JSX children as blocks spanning several children, so a falsy number cannot reach the output and a list cannot lose its key.",
+  "capabilities": [
+    {
+      "id": "REALWORLD-JSX-CONTROL-FLOW",
+      "requirement": "Provide conditional and iteration blocks over JSX children."
+    },
+    {
+      "id": "EXP-JSX-CHILD-DISPATCH",
+      "requirement": "Resolve a macro whose invocation spans several children of a JSX element."
+    },
+    {
+      "id": "PAT-JSX-CHILD-CLASS",
+      "requirement": "Capture one JSX child, carrying the layout text around it."
+    },
+    {
+      "id": "PAT-OPTIONAL-REPETITION",
+      "requirement": "Capture an optional trailing parameter and emit it only when present."
+    }
+  ],
+  "syntaxNotes": [
+    "A block opens with a braced head naming the macro and closes with `{end}`.",
+    "`when` takes a condition and a child, with an optional `{else}` child.",
+    "`when` without `{else}` yields null, never the condition's own value.",
+    "`each` binds the element and an optional index over its child.",
+    "Layout text around a child belongs to the child, so a block need not mention it."
+  ],
+  "artifacts": {
+    "definition": "macros.sts",
+    "input": "main.stsx",
+    "expansion": "expected.tsx",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.stsx",
+      "expansion": "expected.hygiene.tsx"
+    },
+    "malformed": [
+      {
+        "input": "malformed.stsx",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-JSX-001",
+      "question": "Should block syntax spanning several JSX children be dispatched through the jsxChild category?"
+    }
+  ]
+}

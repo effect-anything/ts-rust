@@ -1,0 +1,28 @@
+{
+  "$schema": "../../../../schemas/case.schema.json",
+  "id": "real-world/match",
+  "languageVersion": "declarative",
+  "typescriptVersion": "pinned",
+  "compilerOptions": {
+    "strict": true
+  },
+  "capabilities": [
+    "REALWORLD-MATCH",
+    "PAT-CLASS-OPTIONAL-FIELD",
+    "PAT-TT-RECURSION",
+    "TPL-INDEX-COUNT",
+    "EXP-EXTENT-EXPR",
+    "HYG-INTRODUCED-RENAME",
+    "EXP-EXHAUSTIVE-MATCH"
+  ],
+  "entry": "main.sts",
+  "expect": {
+    "expansion": true,
+    "bindings": false,
+    "trace": false,
+    "diagnostics": true,
+    "types": true,
+    "runtime": true
+  },
+  "limits": {}
+}

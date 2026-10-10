@@ -1,0 +1,58 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "playground/multi-part-methods",
+  "status": "proposed",
+  "legacySources": ["methods.sweet.js"],
+  "summary": "Declare a multi-part method whose first segment creates a local syntax binding for later mixfix calls.",
+  "capabilities": [
+    {
+      "id": "PLAYGROUND-MIXFIX",
+      "requirement": "Support the multi-part method declaration and call surface from the playground."
+    },
+    {
+      "id": "PAT-MIXFIX",
+      "requirement": "Match newline-spanning calls with fixed identifier segments between argument groups."
+    },
+    {
+      "id": "PAT-REP-NESTED",
+      "requirement": "Preserve the outer segment repetition and each segment's inner parameter repetition."
+    },
+    {
+      "id": "EXP-GENERATED-SYNTAX",
+      "requirement": "Register a syntax binding generated from the first captured segment before later calls."
+    },
+    {
+      "id": "HYG-BINDING-DECLARATION",
+      "requirement": "Bind declaration parameters in the method body without capturing same-spelled call-site names."
+    }
+  ],
+  "syntaxNotes": [
+    "The first segment names the generated syntax binding.",
+    "Later segment names remain literal parts of that generated binding's pattern.",
+    "Calls may place each segment on a separate line."
+  ],
+  "artifacts": {
+    "definition": "declarative.sts",
+    "input": "acceptance.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-GEN-001",
+      "question": "Permit generated syntax bindings in the first public release?"
+    }
+  ]
+}

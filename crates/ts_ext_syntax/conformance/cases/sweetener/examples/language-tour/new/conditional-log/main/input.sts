@@ -1,0 +1,6 @@
+import { logWhen } from "./macros.sts" for syntax;
+
+export function report(verbose: boolean, value: string): string {
+  logWhen(verbose, value);
+  return value;
+}

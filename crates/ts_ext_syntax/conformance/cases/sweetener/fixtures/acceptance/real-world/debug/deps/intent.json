@@ -1,0 +1,53 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "real-world/debug",
+  "status": "proposed",
+  "summary": "Report the source text of an inspected expression and of a failed assertion's operands, which a function cannot reach.",
+  "capabilities": [
+    {
+      "id": "REALWORLD-DEBUG",
+      "requirement": "Print the source text of an expression alongside its value and return the value."
+    },
+    {
+      "id": "TPL-TEXT-SOURCE",
+      "requirement": "Emit the spelling of captured syntax as a string literal."
+    },
+    {
+      "id": "PAT-OPERATOR-DECOMPOSITION",
+      "requirement": "Match around a comparison operator so each operand is captured separately."
+    },
+    {
+      "id": "HYG-INTRODUCED-RENAME",
+      "requirement": "Keep the macro's own temporary from capturing a call-site binding of the same spelling."
+    }
+  ],
+  "syntaxNotes": [
+    "`dbg` wraps one expression, reports it, and evaluates to it.",
+    "`assert` decomposes `===` and `>=` so a failure names both operands.",
+    "An assertion that is not a recognized comparison reports only its source text."
+  ],
+  "artifacts": {
+    "definition": "macros.sts",
+    "input": "main.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-DEBUG-001",
+      "question": "Should `dbg` be erased under a production build flag rather than always emitting?"
+    }
+  ]
+}

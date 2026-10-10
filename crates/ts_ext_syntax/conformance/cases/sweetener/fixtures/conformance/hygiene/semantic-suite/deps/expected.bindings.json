@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "scenarios": [
+    "introduced-binding-renamed-against-call-site",
+    "captured-binding-keeps-call-site-identity",
+    "template-name-resolves-at-the-definition",
+    "introduced-parameter-does-not-escape"
+  ]
+}

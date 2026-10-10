@@ -1,0 +1,62 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "playground/adt",
+  "status": "proposed",
+  "legacySources": ["adt.sweet.js"],
+  "summary": "Generate a discriminated union and constructors, then match constructor patterns that introduce branch-local bindings.",
+  "capabilities": [
+    {
+      "id": "PLAYGROUND-ADT",
+      "requirement": "Support algebraic data declarations and constructor matching from the playground."
+    },
+    {
+      "id": "PAT-REP-NESTED",
+      "requirement": "Preserve constructor repetition and each constructor's field repetition as separate dimensions."
+    },
+    {
+      "id": "TPL-TOKEN-TEXT",
+      "requirement": "Convert a captured constructor identifier into a stable discriminant string."
+    },
+    {
+      "id": "TPL-FOLD",
+      "requirement": "Build ordered constructor field checks and branch bindings without procedural expansion code."
+    },
+    {
+      "id": "BIND-DECLARATION",
+      "requirement": "Introduce the union type and each constructor in their TypeScript namespaces."
+    },
+    {
+      "id": "BIND-PATTERN",
+      "requirement": "Bind lowercase constructor-pattern fields only within the corresponding match branch."
+    }
+  ],
+  "syntaxNotes": [
+    "Constructors use named typed fields so generated TypeScript keeps useful property names.",
+    "Match arms separate with semicolons and source order selects the first matching arm.",
+    "Uppercase pattern fields denote nested constructors; lowercase fields introduce bindings."
+  ],
+  "artifacts": {
+    "definition": "declarative.sts",
+    "input": "acceptance.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-ADT-001",
+      "question": "Use identifier-case refinements for pattern binders or require an explicit binder marker?"
+    }
+  ]
+}

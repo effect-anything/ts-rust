@@ -3443,6 +3443,7 @@ fn source_file_may_be_emitted_worker(
     // Runtime output for content-mapped files is owned by the external content mapper or build tool. Only
     // include them in the emit set when their transformed TypeScript can produce declarations.
     if !source_file_content_mapper(source_file).is_empty()
+        && !crate::ext::precheck::emits_javascript(source_file_content_mapper(source_file))
         && !force_dts_emit
         && !options.get_emit_declarations()
     {

@@ -1,0 +1,7 @@
+--- /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-theirs.txt	2026-10-11 02:42:51
++++ /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-ours.txt	2026-10-11 02:42:51
+@@ -1 +1 @@
+-typeBox<A>={readonlyvalue:A};constbox={of:<A,>value:A:Box<A>=>{value},flatMap:<A,B>source:Box<A>,next:value:A=>Box<B>:Box<B>=>nextsource.value,};exportconstresult=box.flatMapbox.of2,left=>box.flatMapbox.of3,right=>box.ofleft+right;
+\ No newline at end of file
++typeBox<A>={readonlyvalue:A};constbox={of:<A,>value:A:Box<A>=>{value},flatMap:<A,B>source:Box<A>,next:value:A=>Box<B>:Box<B>=>nextsource.value,};exportconstresult=box.flatMapbox.all[left.sources],[left.names]=>box.flatMapbox.all[<-.sources],[<-.names]=>box.flatMapbox.all[box.sources],[box.names]=>box.flatMapbox.all[..sources],[..names]=>box.flatMapbox.all[of.sources],[of.names]=>doStepsbox{2};
+\ No newline at end of file

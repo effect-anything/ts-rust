@@ -190,19 +190,25 @@ pub fn new_parse_cache(options: RefCountCacheOptions) -> Rc<ParseCache> {
             let prefetched =
                 compiler::take_prefetched(&opts, key.script_kind, Some(content.as_str()));
             let file = match prefetched {
-                compiler::Prefetched::Parse(file) => file,
+                compiler::Prefetched::Parse(file) => {
+                    crate::ext::precheck::apply(&opts, file)
+                }
                 // The worker text has the same bytes (a static text: this
                 // host's worker parses are static, see
                 // `CompilerHost::freeable_worker_parses`).
-                compiler::Prefetched::Text(text) => {
-                    parser::parse_source_file(&opts, text, key.script_kind)
-                }
+                compiler::Prefetched::Text(text) => crate::ext::precheck::apply(
+                    &opts,
+                    parser::parse_source_file(&opts, text, key.script_kind),
+                ),
                 compiler::Prefetched::Nothing => {
                     // The text of a freeable version is shared with its
                     // store and goes with the version; another text is
                     // leaked, as in compiler/host.rs (`FileText::new`).
                     let text = FileText::new(content, freeable);
-                    parser::parse_source_file(&opts, text, key.script_kind)
+                    crate::ext::precheck::apply(
+                        &opts,
+                        parser::parse_source_file(&opts, text, key.script_kind),
+                    )
                 }
             };
             // Not in Go: a new version of a published path can be freed. The

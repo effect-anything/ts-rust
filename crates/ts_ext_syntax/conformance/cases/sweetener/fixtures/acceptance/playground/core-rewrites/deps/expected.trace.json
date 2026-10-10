@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    { "macro": "function", "rule": "checked-function", "parent": null },
+    { "macro": "typeof", "rule": "global-NaN", "parent": null }
+  ],
+  "order": "source-order"
+}

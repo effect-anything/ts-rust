@@ -1,0 +1,1 @@
+original(7,1)(15,35): error TS2347: Untyped function calls may not accept type arguments.

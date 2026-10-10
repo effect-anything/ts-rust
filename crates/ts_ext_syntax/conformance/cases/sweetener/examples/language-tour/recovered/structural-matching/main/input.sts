@@ -1,0 +1,25 @@
+import { match } from "./macros.sts" for syntax;
+
+type Event =
+| { kind: "click"; at: { x: number; y: number } }
+| { kind: "key"; key: string }
+| { kind: "scroll"; delta: number };
+
+// Patterns destructure and bind. `x` and `y` below are ordinary bindings the
+// macro introduced from the pattern — look at the generated TypeScript.
+export function describe(event: Event): string {
+  return match (event) {
+    { kind: "click", at: { x: x, y: y } } =>
+    `click at ${String(x)},${String(y)}`,
+    { kind: "key", key: key } if (key === "Escape") => "escape",
+    { kind: "key", key: key } => `key ${key}`,
+    _ => "something else"
+  } ?? "something else";
+}
+
+export const clicked: string = describe({
+    kind: "click",
+    at: { x: 3, y: 4 },
+  });
+export const escaped: string = describe({ kind: "key", key: "Escape" });
+export const typed: string = describe({ kind: "key", key: "a" });

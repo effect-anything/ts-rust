@@ -317,7 +317,11 @@ impl CompilerHost for CompilerHostImpl {
             // bytes, so the file is read once, as in Go. A bundled lib is
             // its embedded text (what `WrappedFs::read_file` copies).
             match take_prefetched(opts, script_kind, None) {
-                Prefetched::Parse(file) => return Some(Rc::new(file)),
+                Prefetched::Parse(file) => {
+                    return Some(Rc::new(crate::ext::precheck::apply(
+                        opts, file,
+                    )));
+                }
                 Prefetched::Text(text) => text,
                 Prefetched::Nothing => match bundled_text(&opts.file_name) {
                     Some(text) => text.into(),
@@ -339,7 +343,11 @@ impl CompilerHost for CompilerHostImpl {
             // OS file system, so a worker result is used only for the same
             // text.
             match take_prefetched(opts, script_kind, Some(text.as_str())) {
-                Prefetched::Parse(file) => return Some(Rc::new(file)),
+                Prefetched::Parse(file) => {
+                    return Some(Rc::new(crate::ext::precheck::apply(
+                        opts, file,
+                    )));
+                }
                 Prefetched::Text(worker_text) => worker_text,
                 Prefetched::Nothing => unpacked_lib_text(&opts.file_name, &text)
                     .unwrap_or_else(|| FileText::new(text, freeable)),
@@ -352,7 +360,10 @@ impl CompilerHost for CompilerHostImpl {
         // `program::mark_freeable_parses` gives it a `FileVersion`. A store
         // that gets none is published static (its nodes are then leaked).
         let _owned_nodes = freeable.then(crate::ast::enter_freeable_parse);
-        Some(Rc::new(parse_source_file(opts, text, script_kind)))
+        Some(Rc::new(crate::ext::precheck::apply(
+            opts,
+            parse_source_file(opts, text, script_kind),
+        )))
     }
 
     // Go: host.go:91 (*compilerHost).GetContentMappedSourceFiles (tsgo#4712)

@@ -1,0 +1,55 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "real-world/signals",
+  "status": "proposed",
+  "summary": "Declare reactive state whose reads and writes are ordinary variable syntax, rewritten to signal accessor calls.",
+  "capabilities": [
+    {
+      "id": "REALWORLD-SIGNALS",
+      "requirement": "Rewrite reads and assignments of a declared reactive binding into accessor calls."
+    },
+    {
+      "id": "EXP-GENERATED-DEFINITIONS-INLINE",
+      "requirement": "Declare macros and ordinary syntax together in one replacement."
+    },
+    {
+      "id": "TPL-METAVAR-DEPTH-ZERO",
+      "requirement": "Name a generated rule's pattern variables outside any template repetition."
+    },
+    {
+      "id": "TPL-JOIN-CONTRACT",
+      "requirement": "Derive the storage name from the declared name and publish it to following code."
+    },
+    {
+      "id": "EXP-EXTENT-EXPR",
+      "requirement": "Claim the assignment that follows a generated name so a write becomes a set."
+    }
+  ],
+  "syntaxNotes": [
+    "`state name = value;` declares the storage and a macro named for the binding.",
+    "A read of the name becomes a get; every assignment operator becomes a set.",
+    "A logical assignment keeps its short circuit, writing only when it would.",
+    "An assignment is an expression whose value is what it wrote.",
+    "Only the declared name is rewritten; every other binding is untouched.",
+    "`effect { ... }` registers a body that re-runs when a signal is set."
+  ],
+  "artifacts": {
+    "definition": "macros.sts",
+    "input": "main.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": []
+}

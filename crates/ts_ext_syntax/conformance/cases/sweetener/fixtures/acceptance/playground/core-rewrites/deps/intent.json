@@ -1,0 +1,58 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "playground/core-rewrites",
+  "status": "proposed",
+  "legacySources": ["allen-robert-new-lang.sjs"],
+  "summary": "Refine typeof for the global NaN binding and add a runtime arity check to opted-in function declarations.",
+  "capabilities": [
+    {
+      "id": "PLAYGROUND-CORE-REWRITE",
+      "requirement": "Support the typeof and function rewrites from the playground."
+    },
+    {
+      "id": "CORE-SHADOW-LEXICAL",
+      "requirement": "Intercept typeof and function only under explicit lexical imports."
+    },
+    {
+      "id": "PAT-BINDING-LITERAL",
+      "requirement": "Match the global NaN binding by identity so a local NaN binding uses ordinary typeof."
+    },
+    {
+      "id": "CTX-FUNCTION-ARITY",
+      "requirement": "Count captured parameters and compare that count with arguments.length inside the generated body."
+    },
+    {
+      "id": "HYG-DEFINITION-REFERENCE",
+      "requirement": "Resolve Number and Error at the definition site when call-site bindings use those names."
+    }
+  ],
+  "syntaxNotes": [
+    "The NaN rule matches the global binding rather than the identifier spelling alone.",
+    "The generic typeof rule delegates to the core operator after suppressing the current macro binding.",
+    "The function rule accepts named declarations with typed parameters and an explicit return type."
+  ],
+  "artifacts": {
+    "definition": "declarative.sts",
+    "input": "acceptance.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-LITERAL-001",
+      "question": "Require authors to declare each identifier literal that matches by binding identity?"
+    }
+  ]
+}

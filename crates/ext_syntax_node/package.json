@@ -1,0 +1,26 @@
+{
+  "name": "ext-syntax",
+  "version": "0.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "bin": {
+    "ext-syntax": "./bin/ext-syntax"
+  },
+  "typescript": {
+    "contentMapper": {
+      "exec": ["./bin/ext-syntax"]
+    }
+  },
+  "napi": {
+    "binaryName": "ext-syntax",
+    "packageName": "ext-syntax"
+  },
+  "scripts": {
+    "build": "napi build --platform --output-dir ."
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.7.1"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "../../../../schemas/case.schema.json",
+  "id": "playground/protocols",
+  "languageVersion": "legacy-sweetjs",
+  "typescriptVersion": "pinned",
+  "compilerOptions": {
+    "strict": true
+  },
+  "capabilities": [
+    "PLAYGROUND-PROTOCOLS",
+    "PAT-CLASS-FIELDS",
+    "PAT-REP-CORRELATED",
+    "BIND-DECLARATION",
+    "OP-INFIX-ITEM"
+  ],
+  "entry": "acceptance.sts",
+  "expect": {
+    "expansion": true,
+    "bindings": true,
+    "trace": true,
+    "diagnostics": true,
+    "types": true,
+    "runtime": true
+  },
+  "limits": {}
+}

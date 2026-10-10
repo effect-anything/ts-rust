@@ -756,6 +756,7 @@ impl Emitter {
         if options.emit_bom.is_true() {
             text = add_utf8_byte_order_mark(text);
         }
+        text = crate::ext::precheck::emit_javascript(js_file_path, &text);
         let mut data = WriteFileData {
             source_map_url_pos,
             build_info: None,

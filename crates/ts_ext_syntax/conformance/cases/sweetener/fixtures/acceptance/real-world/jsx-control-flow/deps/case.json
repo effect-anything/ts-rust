@@ -1,0 +1,28 @@
+{
+  "$schema": "../../../../schemas/case.schema.json",
+  "id": "real-world/jsx-control-flow",
+  "languageVersion": "declarative",
+  "typescriptVersion": "pinned",
+  "compilerOptions": {
+    "strict": true,
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment"
+  },
+  "capabilities": [
+    "REALWORLD-JSX-CONTROL-FLOW",
+    "EXP-JSX-CHILD-DISPATCH",
+    "PAT-JSX-CHILD-CLASS",
+    "PAT-OPTIONAL-REPETITION"
+  ],
+  "entry": "main.stsx",
+  "expect": {
+    "expansion": true,
+    "bindings": false,
+    "trace": false,
+    "diagnostics": true,
+    "types": true,
+    "runtime": true
+  },
+  "limits": {}
+}

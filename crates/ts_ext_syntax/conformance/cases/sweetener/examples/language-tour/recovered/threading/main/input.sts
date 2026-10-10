@@ -1,0 +1,34 @@
+import { (->), (->>) } from "./macros.sts" for syntax;
+
+const map = <A, B>(values: readonly A[], fn: (value: A) => B): B[] =>
+values.map(fn);
+const filter = <A,>(
+  values: readonly A[],
+  predicate: (value: A) => boolean,
+): A[] => values.filter(predicate);
+
+export const threadFirst = (->
+  [1, 2, 3],
+  map((value) => value + 1),
+  filter((value) => value > 2),
+);
+
+const append = <A,>(suffix: readonly A[], values: readonly A[]): A[] => [
+  ...values,
+  ...suffix,
+];
+const mapLast = <A, B>(fn: (value: A) => B, values: readonly A[]): B[] =>
+values.map(fn);
+const filterLast = <A,>(
+  predicate: (value: A) => boolean,
+  values: readonly A[],
+): A[] => values.filter(predicate);
+
+export const threadLast = (->>
+  [1, 2, 3],
+  mapLast((value) => value + 1),
+  filterLast((value) => value > 2),
+  append([5]),
+);
+
+export const result = threadFirst;

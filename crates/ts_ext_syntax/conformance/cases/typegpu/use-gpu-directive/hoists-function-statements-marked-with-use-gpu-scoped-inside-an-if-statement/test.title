@@ -1,0 +1,1 @@
+hoists function statements marked with "use gpu", scoped inside an if statement

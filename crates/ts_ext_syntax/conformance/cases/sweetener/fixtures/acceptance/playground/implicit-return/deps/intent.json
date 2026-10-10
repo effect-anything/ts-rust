@@ -1,0 +1,54 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "playground/implicit-return",
+  "status": "proposed",
+  "legacySources": ["implicit.sweet.js"],
+  "summary": "Rewrite a lexically shadowed function expression so its final expression becomes an explicit return.",
+  "capabilities": [
+    {
+      "id": "PLAYGROUND-IMPLICIT-RETURN",
+      "requirement": "Support the implicit-return function form from the playground."
+    },
+    {
+      "id": "ENF-STMT-THEN-EXPR",
+      "requirement": "Split a function body into a statement prefix and one final expression."
+    },
+    {
+      "id": "CORE-SHADOW-LEXICAL",
+      "requirement": "Let an opted-in lexical syntax binding intercept the core function form."
+    },
+    {
+      "id": "HYG-CAPTURE-PRESERVE",
+      "requirement": "Preserve parameter, statement, and final-expression bindings when inserting return."
+    }
+  ],
+  "syntaxNotes": [
+    "The macro applies to function expressions inside the import's lexical scope.",
+    "A body with an explicit final return passes through the first rule.",
+    "The statement consumer stops before the final expression instead of consuming it as an expression statement."
+  ],
+  "artifacts": {
+    "definition": "declarative.sts",
+    "input": "acceptance.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-CORE-001",
+      "question": "Require each core-form shadow in the import declaration as well as the definition?"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+--- theirs payload
+"ext.comptime": () => ext.comptime,
+"ext.runtime": () => ext.runtime
+
+--- ours payload
+/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
+name: "fn",
+body: [0, [[13, "a", [7, [6, "ext.comptime", []], "x"]], [13, "b", [7, [6, "ext.runtime", []], "y"]]]]
+externals: {
+"ext.comptime": () => ext.comptime,
+"ext.runtime": () => ext.runtime
+(/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgpu.comptime(() => {
+/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
+name: "runtime",
+body: [0, [[10, [6, "d.vec4f", []]]]]
+externals: {
+"d.vec4f": () => d.vec4f
+

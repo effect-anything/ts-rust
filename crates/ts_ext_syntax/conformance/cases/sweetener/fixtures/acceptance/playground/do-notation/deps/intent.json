@@ -1,0 +1,62 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "playground/do-notation",
+  "status": "proposed",
+  "legacySources": ["do-notation.sweet.js"],
+  "summary": "Expand sequential bind clauses into nested flatMap calls and bind each captured name in the remaining clauses.",
+  "capabilities": [
+    {
+      "id": "PLAYGROUND-DO-NOTATION",
+      "requirement": "Support the do-notation surface from the playground."
+    },
+    {
+      "id": "PAT-CLASS-USER",
+      "requirement": "Let a macro author define a reusable bind-clause syntax class."
+    },
+    {
+      "id": "PAT-CLASS-FIELDS",
+      "requirement": "Expose the bind name and source expression as typed fields."
+    },
+    {
+      "id": "ENF-EXPR-EXTENT",
+      "requirement": "Consume the source and final result as complete TypeScript expressions."
+    },
+    {
+      "id": "BIND-SEQUENTIAL",
+      "requirement": "Bind each clause name in later clauses and the final result without capturing outer names."
+    },
+    {
+      "id": "EXP-RECURSION",
+      "requirement": "Expand one bind clause and recurse on the remaining block."
+    }
+  ],
+  "syntaxNotes": [
+    "A semicolon terminates each bind clause and the final return clause.",
+    "The left arrow belongs to the bind-clause syntax class rather than the global operator table.",
+    "The final clause uses return so the block has one visible completion form."
+  ],
+  "artifacts": {
+    "definition": "declarative.sts",
+    "input": "acceptance.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-FIELD-001",
+      "question": "Use dot notation for fields exported by user syntax classes?"
+    }
+  ]
+}

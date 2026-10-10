@@ -1,0 +1,32 @@
+[package]
+name = "ts_ext_syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Sweetener and TypeGPU transforms. Not linked into tsgo."
+
+[[bin]]
+name = "ext-syntax"
+path = "src/bin/ext_syntax.rs"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+ts_goport = { path = "../ts_goport" }
+
+[[example]]
+name = "capture_ours"
+path = "examples/capture_ours.rs"
+
+[[example]]
+name = "check_cases"
+path = "examples/check_cases.rs"
+
+[[example]]
+name = "diff_typegpu"
+path = "examples/diff_typegpu.rs"
+
+[lints]
+workspace = true

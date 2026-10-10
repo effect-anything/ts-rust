@@ -585,7 +585,10 @@ fn file_emit(source_file: Node, target: &EmitterOptions) -> FileEmit {
     let has_js = matches!(emit_only, EmitOnly::All | EmitOnly::Js)
         && !options.emit_declaration_only.is_true()
         && !options.no_emit.is_true()
-        && source_file_content_mapper(source_file).is_empty();
+        && {
+            let mapper = source_file_content_mapper(source_file);
+            crate::ext::precheck::emits_javascript(mapper)
+        };
     if !has_js || js_emit_needs_checker(source_file) {
         return FileEmit::OnChecker;
     }

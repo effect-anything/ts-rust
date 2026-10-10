@@ -1,0 +1,48 @@
+import React from "react";
+import { createRoot } from "react-dom/client";
+import { memoized } from "./fine-jsx.stsx" for syntax;
+
+const DISPLAY = true;
+const styles = { a: "first", b: "has-id", c: "second", d: "display-enabled" };
+
+function identity(value: string, ..._rest: readonly unknown[]): string {
+  return value;
+}
+
+interface FixtureProps {
+  readonly cond?: boolean;
+  readonly id: number;
+}
+
+memoized function Component({ cond = false, id }: FixtureProps) {
+  return (<><div className={identity(styles.a, id !== null ? styles.b : {})}></div>{cond === false && (<div className={identity(styles.c, DISPLAY ? styles.d : {})} />)}</>);
+}
+
+function Demo() {
+  const [id, setId] = React.useState(42);
+  const [cond, setCond] = React.useState(false);
+  const [unrelated, setUnrelated] = React.useState(0);
+  return (
+    <main>
+      <h1>Explicit memoized function</h1>
+      <p>
+        This is React's <code>repro-separate-scopes-for-divs</code> fixture.
+        The macro emits the same four reactive scopes and nine cache slots.
+      </p>
+      <div className="controls">
+        <button onClick={() => setId((value) => value + 1)}>
+          Change ID ({id})
+        </button>
+        <button onClick={() => setCond((value) => !value)}>
+          Toggle condition ({String(cond)})
+        </button>
+        <button onClick={() => setUnrelated((value) => value + 1)}>
+          Unrelated parent render ({unrelated})
+        </button>
+      </div>
+      <Component cond={cond} id={id} />
+    </main>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(<Demo />);

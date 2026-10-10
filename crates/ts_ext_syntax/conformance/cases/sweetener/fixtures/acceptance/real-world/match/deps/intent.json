@@ -1,0 +1,63 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "real-world/match",
+  "status": "proposed",
+  "summary": "Match a value against object, array, literal, and wildcard patterns with optional guards, binding pattern names for the arm body and leaving an uncovered case to the compiler.",
+  "capabilities": [
+    {
+      "id": "REALWORLD-MATCH",
+      "requirement": "Support pattern matching as an expression over discriminated unions."
+    },
+    {
+      "id": "PAT-CLASS-OPTIONAL-FIELD",
+      "requirement": "Let a syntax class declare a field that only some of its rules bind."
+    },
+    {
+      "id": "PAT-TT-RECURSION",
+      "requirement": "Consume a pattern as token trees and recur into its nested patterns."
+    },
+    {
+      "id": "TPL-INDEX-COUNT",
+      "requirement": "Emit the position and length of a captured repetition as numeric literals."
+    },
+    {
+      "id": "EXP-EXTENT-EXPR",
+      "requirement": "Claim an expression macro whose extent reaches past the expression, such as a trailing block."
+    },
+    {
+      "id": "HYG-INTRODUCED-RENAME",
+      "requirement": "Rename the subject temporary so it cannot capture a call-site binding."
+    },
+    {
+      "id": "EXP-EXHAUSTIVE-MATCH",
+      "requirement": "Report an uncovered case where the match is written, rather than throwing when one arrives."
+    }
+  ],
+  "syntaxNotes": [
+    "An arm is a pattern, an optional `if (...)` guard, `=>`, and an expression.",
+    "A lowercase identifier in a pattern binds; any other literal compares.",
+    "An object pattern may use shorthand `{ x }` to bind the property of that name.",
+    "`_` matches anything and binds nothing, and answers every remaining case.",
+    "Arms are tested in source order and the first match returns.",
+    "Without a wildcard the arms must answer the whole subject, which the compiler checks."
+  ],
+  "artifacts": {
+    "definition": "macros.sts",
+    "input": "main.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": []
+}

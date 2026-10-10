@@ -247,6 +247,13 @@ fn parse_result_with(
             canonical_source_file: Some(source_file.clone()),
         });
     }
+    // Internal rewrites after the mapper map is attached.
+    if let Some(canonical) = files.canonical.clone() {
+        files.canonical = Some(Rc::new(crate::ext::precheck::apply(
+            &parse_options,
+            (*canonical).clone(),
+        )));
+    }
     Ok(files)
 }
 

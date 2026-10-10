@@ -974,6 +974,7 @@ pub fn source_file_may_be_emitted(
     // include them in the emit set when their transformed TypeScript can produce declarations.
     // tsgo#4712
     if !source_file.content_mapper().is_empty()
+        && !crate::ext::precheck::emits_javascript(source_file.content_mapper())
         && !force_dts_emit
         && !options.get_emit_declarations()
     {

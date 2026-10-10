@@ -1,0 +1,27 @@
+{
+  "$schema": "../../../../schemas/case.schema.json",
+  "id": "playground/do-notation",
+  "languageVersion": "legacy-sweetjs",
+  "typescriptVersion": "pinned",
+  "compilerOptions": {
+    "strict": true
+  },
+  "capabilities": [
+    "PLAYGROUND-DO-NOTATION",
+    "PAT-CLASS-USER",
+    "PAT-CLASS-FIELDS",
+    "ENF-EXPR-EXTENT",
+    "BIND-SEQUENTIAL",
+    "EXP-RECURSION"
+  ],
+  "entry": "acceptance.sts",
+  "expect": {
+    "expansion": true,
+    "bindings": true,
+    "trace": true,
+    "diagnostics": true,
+    "types": true,
+    "runtime": true
+  },
+  "limits": {}
+}

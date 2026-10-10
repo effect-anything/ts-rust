@@ -1,0 +1,58 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "playground/protocols",
+  "status": "proposed",
+  "legacySources": ["protocol.sweet.js"],
+  "summary": "Declare a typed protocol and attach a correlated set of method implementations to a class.",
+  "capabilities": [
+    {
+      "id": "PLAYGROUND-PROTOCOLS",
+      "requirement": "Support protocol declarations and class implementations from the playground."
+    },
+    {
+      "id": "PAT-CLASS-FIELDS",
+      "requirement": "Expose each method name, parameters, and return type as syntax-class fields."
+    },
+    {
+      "id": "PAT-REP-CORRELATED",
+      "requirement": "Keep each repeated method aligned with its parameter list, return type, and implementation body."
+    },
+    {
+      "id": "BIND-DECLARATION",
+      "requirement": "Introduce the protocol's type and value bindings for later implementations and calls."
+    },
+    {
+      "id": "OP-INFIX-ITEM",
+      "requirement": "Recognize an implements form between a class name and protocol application at item scope."
+    }
+  ],
+  "syntaxNotes": [
+    "Protocol methods use TypeScript parameter and return-type syntax.",
+    "The implements form appears after the class declaration and registers one implementation object.",
+    "Method dispatch uses the protocol value binding produced by the declaration."
+  ],
+  "artifacts": {
+    "definition": "declarative.sts",
+    "input": "acceptance.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-OP-001",
+      "question": "Permit identifier operators such as implements in item context?"
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+import { (#) } from "./macros.sts" for syntax;
+
+export const vector = #[3, 5, 8];

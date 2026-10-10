@@ -1,0 +1,58 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "playground/currying",
+  "status": "proposed",
+  "legacySources": ["curry.sweet.js"],
+  "summary": "Rewrite a two-parameter function declaration into typed direct-call and partial-application overloads.",
+  "capabilities": [
+    {
+      "id": "PLAYGROUND-CURRYING",
+      "requirement": "Support the automatic currying behavior from the playground."
+    },
+    {
+      "id": "CORE-SHADOW-LEXICAL",
+      "requirement": "Intercept a core function declaration only in an opted-in lexical scope."
+    },
+    {
+      "id": "PAT-REP-CORRELATED",
+      "requirement": "Keep parameter names and types aligned when the macro emits signatures and implementation code."
+    },
+    {
+      "id": "TPL-GENERATED-OVERLOADS",
+      "requirement": "Emit overload declarations that preserve direct and partial call types."
+    },
+    {
+      "id": "HYG-BINDING-DECLARATION",
+      "requirement": "Bind the delayed parameter in the returned closure without capturing an outer same-spelled name."
+    }
+  ],
+  "syntaxNotes": [
+    "The first contract accepts named functions with two typed parameters and an explicit return type.",
+    "One argument returns a unary function; two arguments execute the body.",
+    "The implementation checks the second argument against undefined, so an explicit undefined follows partial-call behavior."
+  ],
+  "artifacts": {
+    "definition": "declarative.sts",
+    "input": "acceptance.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-CORE-003",
+      "question": "Permit a lexical function shadow to emit TypeScript overload declarations?"
+    }
+  ]
+}

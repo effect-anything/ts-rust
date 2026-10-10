@@ -1,0 +1,62 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "playground/operators",
+  "status": "proposed",
+  "legacySources": ["ideas.sjs"],
+  "summary": "Compose a punctuation prefix form with user-defined infix operators under declared precedence and lexical core shadowing.",
+  "capabilities": [
+    {
+      "id": "PLAYGROUND-OPERATORS",
+      "requirement": "Support the punctuation and operator experiments from the playground."
+    },
+    {
+      "id": "OP-PUNCTUATION",
+      "requirement": "Resolve imported bindings headed by punctuation that TypeScript does not assign to expressions."
+    },
+    {
+      "id": "OP-PREFIX-FIXITY",
+      "requirement": "Let a prefix vector form consume one balanced bracket group."
+    },
+    {
+      "id": "OP-INFIX-FIXITY",
+      "requirement": "Let pipeline and equality bindings consume left and right expressions."
+    },
+    {
+      "id": "OP-PRECEDENCE",
+      "requirement": "Group the vector prefix before pipeline and group pipeline before equality."
+    },
+    {
+      "id": "CORE-SHADOW-LEXICAL",
+      "requirement": "Replace built-in equality only within an opted-in lexical scope."
+    }
+  ],
+  "syntaxNotes": [
+    "The vector form uses a hash followed by a bracket group.",
+    "Pipeline passes its left operand as the first call argument.",
+    "Custom equality delegates to Object.is and declares core shadowing."
+  ],
+  "artifacts": {
+    "definition": "declarative.sts",
+    "input": "acceptance.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-PUNCT-002",
+      "question": "Allow hash-prefixed macro forms despite TypeScript private-name syntax?"
+    }
+  ]
+}

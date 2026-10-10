@@ -1,0 +1,57 @@
+--- /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-theirs.txt	2026-10-11 00:41:43
++++ /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-ours.txt	2026-10-11 00:41:43
+@@ -1,28 +1,27 @@
+-type Option<T> = {
+-readonly tag: "None";
+-} | {
+-readonly tag: "Some";
+-value: T;
++type Option<T> =
++{
++readonly tag: "None()";
++None().fields.name: None().fields.valueType;
++}|{
++readonly tag: "Some(value: T)";
++Some(value: T).fields.name: Some(value: T).fields.valueType;
+ };
+-const None = (<T,>(): Option<T> => ({
+-tag: "None"
+-}));
+-const Some = (<T,>(value: T
++const None().name = <T>(
++None().fields.name: None().fields.valueType
+ ): Option<T> => ({
+-tag: "Some"
+-, value
+-}));
+-export const result = ({
+-value: Some(3),
+-run() { if (this.value.tag === "Some") {
+-const { value } = this.value;
+-return (value + 1);
+-} if (this.value.tag === "None") {
+-return 0;
++tag: "None()"
++{
++, None().fields.name
+ }
+-const unmatched: never = this.value;
+-throw new globalThis.Error(
+-"No match for " + globalThis.JSON.stringify(unmatched),
+-);
+-},
+-}).run();
+\ No newline at end of file
++});const Some(value: T).name = <T>(
++Some(value: T).fields.name: Some(value: T).fields.valueType
++): Option<T> => ({
++tag: "Some(value: T)"
++{
++, Some(value: T).fields.name
++}
++});
++export const result = match (Some(3)) {
++Some(value) => value + 1;
++None() => 0;
++};
+\ No newline at end of file

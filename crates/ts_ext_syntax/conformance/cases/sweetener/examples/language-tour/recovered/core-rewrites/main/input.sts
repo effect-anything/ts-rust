@@ -1,0 +1,15 @@
+import { function, typeof } from "./macros.sts" for syntax shadows core;
+
+export function exact(value: number): number {
+  return value;
+}
+
+export const nanKind = typeof NaN;
+let rejectedExtraArgument = false;
+try {
+  (exact as (...values: number[]) => number)(1, 2);
+} catch {
+  rejectedExtraArgument = true;
+}
+
+export const result = { nanKind, rejectedExtraArgument };

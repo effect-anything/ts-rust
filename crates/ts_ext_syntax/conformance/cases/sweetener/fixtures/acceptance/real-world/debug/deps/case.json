@@ -1,0 +1,25 @@
+{
+  "$schema": "../../../../schemas/case.schema.json",
+  "id": "real-world/debug",
+  "languageVersion": "declarative",
+  "typescriptVersion": "pinned",
+  "compilerOptions": {
+    "strict": true
+  },
+  "capabilities": [
+    "REALWORLD-DEBUG",
+    "TPL-TEXT-SOURCE",
+    "PAT-OPERATOR-DECOMPOSITION",
+    "HYG-INTRODUCED-RENAME"
+  ],
+  "entry": "main.sts",
+  "expect": {
+    "expansion": true,
+    "bindings": false,
+    "trace": false,
+    "diagnostics": true,
+    "types": true,
+    "runtime": true
+  },
+  "limits": {}
+}

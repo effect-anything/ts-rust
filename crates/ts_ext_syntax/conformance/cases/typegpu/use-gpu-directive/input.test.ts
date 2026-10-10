@@ -1,0 +1,1 @@
+../../../../../../vendor/TypeGPU/packages/unplugin-typegpu/test/use-gpu-directive.test.ts

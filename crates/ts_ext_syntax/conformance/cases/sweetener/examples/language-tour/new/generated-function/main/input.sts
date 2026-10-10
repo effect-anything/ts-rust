@@ -1,0 +1,4 @@
+import { getter } from "./macros.sts" for syntax;
+
+getter meaning(42);
+export const answer: number = meaning();

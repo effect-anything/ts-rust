@@ -1,0 +1,25 @@
+{
+  "$schema": "../../../../schemas/case.schema.json",
+  "id": "playground/implicit-return",
+  "languageVersion": "legacy-sweetjs",
+  "typescriptVersion": "pinned",
+  "compilerOptions": {
+    "strict": true
+  },
+  "capabilities": [
+    "PLAYGROUND-IMPLICIT-RETURN",
+    "ENF-STMT-THEN-EXPR",
+    "CORE-SHADOW-LEXICAL",
+    "HYG-CAPTURE-PRESERVE"
+  ],
+  "entry": "acceptance.sts",
+  "expect": {
+    "expansion": true,
+    "bindings": true,
+    "trace": true,
+    "diagnostics": true,
+    "types": true,
+    "runtime": true
+  },
+  "limits": {}
+}

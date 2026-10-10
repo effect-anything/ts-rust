@@ -1,0 +1,30 @@
+
+
+// One line each. The union type and both constructors are generated —
+// look at the TypeScript on the right.
+data Result<T> = Ok(value: T) | Err(message: string);
+
+export const parsed: Result<number> = Ok(42);
+export const failed: Result<number> = Err("not a number");
+
+export const describe = (result: Result<number>): string =>
+match (result) {
+  Ok(value) => `ok: ${value}`;
+  Err(message) => `failed: ${message}`;
+};
+
+export const good: string = describe(parsed);
+export const bad: string = describe(failed);
+
+// A recursive type: `Tree` refers to itself inside its own declaration.
+data Tree<T> = Leaf() | Node(left: Tree<T>, value: T, right: Tree<T>);
+
+export const total = (tree: Tree<number>): number =>
+match (tree) {
+  Leaf() => 0;
+  Node(left, value, right) => total(left) + value + total(right);
+};
+
+export const sum: number = total(
+  Node(Node(Leaf(), 1, Leaf()), 2, Node(Leaf(), 3, Leaf())),
+);

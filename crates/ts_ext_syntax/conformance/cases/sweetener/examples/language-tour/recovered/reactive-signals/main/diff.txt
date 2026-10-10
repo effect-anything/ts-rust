@@ -1,0 +1,7 @@
+--- /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-theirs.txt	2026-10-11 02:33:50
++++ /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-ours.txt	2026-10-11 02:33:50
+@@ -1 +1 @@
+-import{createEffect,createSignal}from"./runtime.js";//Reactivestatethatreadsandwriteslikeaplainvariable.constcountSignal=createSignal1;constlabelSignal=createSignal"start";exportconstseen:string[]=[];//Re-runswheneverasignalitreadhasbeenwritten.createEffect=>{seen.push`${labelSignal.get}:${countSignal.get}`;};countSignal.set5;countSignal.setcountSignal.get+2;labelSignal.set"done";exportconstobserved:readonlystring[]=[...seen];exportconsttotal:number=countSignal.get;
+\ No newline at end of file
++import{createEffect,createSignal}from"./runtime.js";//Reactivestatethatreadsandwriteslikeaplainvariable.constcountSignal=createSignal1;#syntax{syntaxcount:expr{rule{count=:expr}=>{countSignal.set}rule{count+=:expr}=>{countSignal.setcountSignal.get+}rule{count-=:expr}=>{countSignal.setcountSignal.get-}//Anythingelseisaread.rule{count}=>{countSignal.get}}}constlabelSignal=createSignal"start";#syntax{syntaxlabel:expr{rule{label=:expr}=>{labelSignal.set}rule{label+=:expr}=>{labelSignal.setlabelSignal.get+}rule{label-=:expr}=>{labelSignal.setlabelSignal.get-}//Anythingelseisaread.rule{label}=>{labelSignal.get}}}exportconstseen:string[]=[];//Re-runswheneverasignalitreadhasbeenwritten.createEffect=>{seen.push`${label}:${count}`;}count=5;count+=2;label="done";exportconstobserved:readonlystring[]=[...seen];exportconsttotal:number=count;
+\ No newline at end of file

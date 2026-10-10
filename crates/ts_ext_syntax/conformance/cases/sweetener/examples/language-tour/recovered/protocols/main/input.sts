@@ -1,0 +1,17 @@
+import { implements, protocol } from "./macros.sts" for syntax;
+
+protocol Equal<T> {
+  equals(left: T, right: T): boolean;
+}
+
+class User {
+  constructor(readonly id: number) {}
+}
+
+User implements Equal<User> {
+  equals(left: User, right: User): boolean {
+    return left.id === right.id;
+  }
+}
+
+export const result = Equal.equals(new User(1), new User(1));

@@ -1,0 +1,1 @@
+Live session.transform (mode test, tsconfig files: declarative.sts + acceptance.sts, pin 2e78489) differs from deps/expected.ts by two leading newlines. Diagnostics were empty. Their fixture oracle is stale relative to the program; theirs.ts is the program.

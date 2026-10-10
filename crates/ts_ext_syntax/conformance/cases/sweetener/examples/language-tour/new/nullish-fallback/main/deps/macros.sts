@@ -1,0 +1,3 @@
+export syntax fallback:expr {
+  rule { fallback($value:expr, $backup:expr) } => { $value ?? $backup }
+}

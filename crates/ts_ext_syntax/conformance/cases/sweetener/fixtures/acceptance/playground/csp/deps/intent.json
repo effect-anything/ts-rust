@@ -1,0 +1,58 @@
+{
+  "$schema": "../../../../schemas/acceptance-intent.schema.json",
+  "schemaVersion": 1,
+  "fixtureId": "playground/csp",
+  "status": "proposed",
+  "legacySources": ["csp.sweet.js"],
+  "summary": "Expand send and receive operators into contextual yield expressions while the receive form introduces a lexical binding.",
+  "capabilities": [
+    {
+      "id": "PLAYGROUND-CSP",
+      "requirement": "Support the CSP send and receive surface from the playground."
+    },
+    {
+      "id": "OP-PUNCTUATION",
+      "requirement": "Bind multi-token punctuation heads for send and receive forms."
+    },
+    {
+      "id": "OP-INFIX-FIXITY",
+      "requirement": "Use declared infix extent for the value and channel operands."
+    },
+    {
+      "id": "BIND-OPERATOR",
+      "requirement": "Let the receive form introduce its captured name into following statements."
+    },
+    {
+      "id": "CTX-YIELD",
+      "requirement": "Emit yield only when expansion occurs inside a generator body."
+    }
+  ],
+  "syntaxNotes": [
+    "Both operators terminate with semicolons and expand as statements.",
+    "The receive operator treats its left operand as a binding pattern rather than an expression.",
+    "The expander rejects either operator outside a generator context."
+  ],
+  "artifacts": {
+    "definition": "declarative.sts",
+    "input": "acceptance.sts",
+    "expansion": "expected.ts",
+    "types": "types.ts",
+    "runtime": "expected.runtime.json",
+    "hygiene": {
+      "input": "hygiene.sts",
+      "expansion": "expected.hygiene.ts"
+    },
+    "malformed": [
+      {
+        "input": "malformed.sts",
+        "diagnostics": "expected.malformed.diagnostics.json"
+      }
+    ]
+  },
+  "openDecisions": [
+    {
+      "id": "OPEN-PUNCT-001",
+      "question": "Reserve arrow punctuation for imported macro bindings before TypeScript tokenization?"
+    }
+  ]
+}

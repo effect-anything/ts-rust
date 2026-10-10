@@ -1,0 +1,26 @@
+{
+  "$schema": "../../../../schemas/case.schema.json",
+  "id": "real-world/signals",
+  "languageVersion": "declarative",
+  "typescriptVersion": "pinned",
+  "compilerOptions": {
+    "strict": true
+  },
+  "capabilities": [
+    "REALWORLD-SIGNALS",
+    "EXP-GENERATED-DEFINITIONS-INLINE",
+    "TPL-METAVAR-DEPTH-ZERO",
+    "TPL-JOIN-CONTRACT",
+    "EXP-EXTENT-EXPR"
+  ],
+  "entry": "main.sts",
+  "expect": {
+    "expansion": true,
+    "bindings": false,
+    "trace": false,
+    "diagnostics": true,
+    "types": true,
+    "runtime": true
+  },
+  "limits": {}
+}

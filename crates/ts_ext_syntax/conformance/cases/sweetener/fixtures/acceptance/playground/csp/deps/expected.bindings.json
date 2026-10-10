@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "introduced": [
+    { "spelling": "received", "space": "value", "kind": "sequential" }
+  ],
+  "relationship": "The receive operator introduces its left binding only into following statements; the send operator introduces no bindings."
+}

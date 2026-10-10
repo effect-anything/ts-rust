@@ -1,0 +1,7 @@
+export syntax invariant:expr {
+  rule { invariant($condition:expr, $message:expr) } => {
+    ($condition) ? true : (() => {
+        throw new globalThis.Error($message);
+      })()
+  }
+}

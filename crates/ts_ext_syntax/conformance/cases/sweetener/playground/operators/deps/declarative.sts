@@ -1,0 +1,27 @@
+export operator (#):expr {
+  fixity prefix;
+  precedence 90;
+  rule { #[$($element:expr),*] }
+  expect "expression after comma"
+  => {
+    vector($($element),*)
+  }
+}
+
+export operator (|>):expr {
+  fixity infix;
+  associativity left;
+  precedence 40;
+  rule { $value:expr |> $callee:ident } => {
+    $callee($value)
+  }
+}
+
+export operator (==):expr shadows core {
+  fixity infix;
+  associativity none;
+  precedence 30;
+  rule { $left:expr == $right:expr } => {
+    globalThis.Object.is($left, $right)
+  }
+}

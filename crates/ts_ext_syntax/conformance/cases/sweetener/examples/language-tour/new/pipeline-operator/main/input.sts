@@ -1,0 +1,5 @@
+import { (|>) } from "./macros.sts" for syntax;
+
+const trim = (value: string) => value.trim();
+const shout = (value: string) => value.toUpperCase();
+export const result = "  hello  " |> trim |> shout;

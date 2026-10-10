@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    {
+      "macro": "method",
+      "rule": "generated-mixfix-definition",
+      "parent": null
+    },
+    { "macro": "between", "rule": "lower-upper-call", "parent": null }
+  ],
+  "order": "source-order"
+}

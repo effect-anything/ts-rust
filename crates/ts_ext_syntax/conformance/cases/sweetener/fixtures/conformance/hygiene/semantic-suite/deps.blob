@@ -1,0 +1,6 @@
+ENTRY input.sts 1f53a4bda721a8eefd5d16919bb8f26ebfa6fa73
+case.json fbddc375dd50ead0efbb24cccdf8d96e9978a48f
+expected.bindings.json ece9b89ebf37042764aa59ae6ef2d516ba161cc7
+expected.trace.json 583cb0c06b065b9f40b56e965133a5be739cfc68
+macros.sts 2d0cfa620f12bbec6382e1d4165ea9db21226249
+runtime.ts 591a4d836d1be99d7133a4c5227eedfd7017ea12
