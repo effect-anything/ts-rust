@@ -298,6 +298,9 @@ impl<'a> Printer<'a> {
                 // The rendered text is the binding that must not collide.
                 self.define_syntax(&rule.template, &matched.captures);
                 let introduced = introduced_names(&rule.introduced, &replacement, &matched.captures);
+                if name == "Functor" {
+                    eprintln!("introduced={introduced:?} user={:?} hygiene={:?}", self.user_names, self.hygiene);
+                }
                 let plan = self.hygiene_plan(&introduced);
                 if let Some(plan) = &plan {
                     replacement = apply_plan(&replacement, plan);
@@ -2894,6 +2897,9 @@ fn collect_introduced_source(source: &str, nodes: &[Syntax], names: &mut Vec<Str
                 names.push(name);
             }
         }
+        if let Some(params) = type_param_names(nodes, index) {
+            names.extend(params);
+        }
         if let Syntax::Group { delimiter: Delimiter::Paren, children, .. } = &nodes[index] {
             if paren_is_arrow_params(nodes, index) {
                 names.extend(param_names(children));
@@ -2904,6 +2910,37 @@ fn collect_introduced_source(source: &str, nodes: &[Syntax], names: &mut Vec<Str
         }
         index += 1;
     }
+}
+
+/// `type F<Inner>` and `map<A, B>` introduce the names between `<` and `>`.
+fn type_param_names(nodes: &[Syntax], index: usize) -> Option<Vec<String>> {
+    if !operator_is(nodes.get(index), "<") {
+        return None;
+    }
+    let mut names = Vec::new();
+    let mut cursor = index + 1;
+    let mut depth = 1i32;
+    while cursor < nodes.len() && depth > 0 {
+        if operator_is(nodes.get(cursor), "<") {
+            depth += 1;
+        } else if operator_is(nodes.get(cursor), ">") {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        } else if depth == 1 {
+            if let Syntax::Token { raw, .. } = &nodes[cursor] {
+                if is_ident_text(raw) && !is_type_name(raw) && raw != "extends" && raw != "keyof" {
+                    names.push(raw.clone());
+                }
+            }
+        }
+        cursor += 1;
+        if cursor > index + 24 {
+            break;
+        }
+    }
+    if names.is_empty() { None } else { Some(names) }
 }
 
 fn arrow_params(nodes: &[Syntax], index: usize) -> Option<Vec<String>> {

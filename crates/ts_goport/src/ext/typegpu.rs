@@ -850,8 +850,9 @@ fn join_export_default(text: &str) -> String {
         // text, including its own parentheses, stays as printed.
         let line = head.rfind('\n').unwrap_or(0);
         let close_line = head[line..].trim();
-        if close_line == ")" {
-            flat.push_str(head[..line].trim_end());
+        let above = head[..line].trim_end();
+        if close_line == ")" && above.ends_with(',') {
+            flat.push_str(above);
         } else {
             flat.push_str(head);
         }
@@ -878,8 +879,7 @@ fn join_export_default(text: &str) -> String {
         if join {
             let indent = lines[index].chars().take_while(|c| *c == ' ').count();
             let head = if export_default { "export default" } else { trimmed.trim() };
-            let gap = if next.starts_with("/*#__PURE__*/") { "" } else { " " };
-            lines[index] = format!("{}{head}{gap}{next}", " ".repeat(indent));
+            lines[index] = format!("{}{head} {next}", " ".repeat(indent));
             lines.remove(index + 1);
             continue;
         }

@@ -809,6 +809,23 @@ fn split_each_args(args: &str) -> Option<(&str, &str, Option<&str>)> {
     Some((items.trim(), item, index))
 }
 
+fn call_args_trail(source: &str, node: &Syntax) -> bool {
+    let Some(children) = group_children(Some(node), Delimiter::Paren) else {
+        return false;
+    };
+    let Some(last) = children.last() else {
+        return source
+            .get(node_start(node)..node_end(node))
+            .is_some_and(|text| text.trim_end().ends_with(",)") || text.trim_end().ends_with(", )"));
+    };
+    if operator_is(Some(last), ",") {
+        return true;
+    }
+    source
+        .get(node_end(last)..node_end(node))
+        .is_some_and(|text| text.contains(','))
+}
+
 fn split_call_args(source: &str, node: &Syntax) -> Vec<String> {
     let Some(children) = group_children(Some(node), Delimiter::Paren) else {
         return Vec::new();
@@ -986,6 +1003,9 @@ fn expand_thread_nodes(source: &str, value: &str, body: &[Syntax], first: bool) 
             break;
         }
         let args = split_call_args(source, args_node);
+        // `(-> value, sum(),)` keeps the empty step's trailing comma.
+        // A step that already has arguments does not.
+        let trailing = args.is_empty() && call_args_trail(source, args_node);
         let mut call_args = Vec::new();
         if first {
             call_args.push(current);
@@ -994,7 +1014,11 @@ fn expand_thread_nodes(source: &str, value: &str, body: &[Syntax], first: bool) 
             call_args.extend(args);
             call_args.push(current);
         }
-        current = format!("{callee}({})", call_args.join(", "));
+        let mut joined = call_args.join(", ");
+        if trailing {
+            joined.push(',');
+        }
+        current = format!("{callee}({joined})");
         index += 2;
     }
     current

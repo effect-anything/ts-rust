@@ -8,9 +8,4 @@ const sum = (values: readonly number[]): number =>
 values.reduce((left, right) => left + right, 0);
 
 // Each step takes the result of the one before it as its first argument.
-export const answer: number = (->
-  [1, 2, 3, 4, 5],
-  map((value: number) => value * value),
-  keep((value: number) => value > 4),
-  sum(),
-);
+export const answer: number = sum(keep(map([1, 2, 3, 4, 5], (value: number) => value * value), (value: number) => value > 4));
