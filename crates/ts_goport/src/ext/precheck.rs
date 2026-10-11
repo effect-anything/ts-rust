@@ -16,7 +16,7 @@ use crate::frontend::parser::{ParsedSourceFile, SourceFileParseOptions};
 /// Run the internal rewrites. Content mapping has already happened.
 #[must_use]
 pub fn apply(opts: &SourceFileParseOptions, file: ParsedSourceFile) -> ParsedSourceFile {
-    crate::ext::typegpu::rewrite_after_parse(opts, file)
+    crate::ext::tsover::rewrite_after_parse(opts, file)
 }
 
 /// Runtime wrappers for emitted JavaScript. Check does not call this.
@@ -35,5 +35,5 @@ pub fn emits_javascript(content_mapper: &str) -> bool {
 }
 
 fn is_internal(content_mapper: &str) -> bool {
-    content_mapper == crate::ext::typegpu::MAPPER_NAME
+    content_mapper == crate::ext::MAPPER_NAME
 }

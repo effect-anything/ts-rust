@@ -175,3 +175,79 @@ oracle is `conformance/cases/typegpu/use-gpu-directive/*/theirs.ts`.
 It does not change the parser, binder, or checker. It does not register
 `.ts` as a content-mapper extension. It does not replace `wgslGenerator.ts`.
 A missing payload is a failed plugin, even when the operators were rewritten.
+
+## Upstream coverage
+
+Two tools answer "what does the pinned plugin do here" without waiting for a
+captured case:
+
+```sh
+node scripts/ext-bench/upstream-typegpu.mjs <dir>          # the pinned plugin
+cargo run -q --example transform_probe -- <dir>            # this port
+```
+
+They read the same one-`*.ts`-per-behaviour directory.
+`scripts/ext-bench/typegpu-probes/` is that directory; add a snippet there
+when a behaviour needs checking. `--cases <conformance/cases/typegpu>` runs the
+plugin over the captured cases instead, and `--no-autonaming` turns
+upstream's `autoNamingEnabled` off.
+
+Where each behaviour is implemented, and the snippet that shows it:
+
+The operator rewrite itself is the `tsover` layer
+(`crates/ts_goport/src/ext/tsover.rs`; tests in `tests/tsover.rs`). This file
+is the consumer: it decides *where* a `"use gpu"` scope is, wraps it, and
+records the tinyest AST.
+
+| pinned plugin (`unplugin-typegpu`) | this port | snippet |
+| --- | --- | --- |
+| `tgpu` aliases come from an `import ... from 'typegpu'` only: default, `{ tgpu as x }`, `* as x` giving `x.tgpu` | `gather_aliases` | `no-import-shell.ts`, `other-source-import.ts`, `alias-*.ts` |
+| `isTgpu` walks the member path and skips a `["~unstable"]` step | `is_tgpu_alias` | `unstable-access.ts` |
+| naming positions: `VariableDeclarator`, `ObjectProperty`, `ClassProperty`, `ClassPrivateProperty`, `AssignmentExpression` | `labelled` | `auto-naming/*` cases |
+| a shell implementation is a named resource whatever the tgpu object is called | `contains_resource` | `aliased-shell.ts`, `shell-unmarked.ts` |
+| `$name(...)` ends the resource chain | `contains_resource` | `dollar-name.ts` |
+| the directive must be the first statement of the body | `function_marked` | `directive-not-first.ts` |
+| operators `+ - * / %` and their assignments, inside a `"use gpu"` scope | `Walk` with `tsover::name` | `pow-*.ts`, `bitwise.ts` |
+| `**` is not in the plugin's table, so it stays `a ** b` (the pin's runtime does install `__tsover_pow`) | `"use gpu"` keeps `**`; only `"use tsover"` rewrites it (`tsover::name_with_pow`) | `pow-operator.ts`, `pow-assign.ts` |
+| tinyest node kinds: 1 binary, 2 assignment, 3 logical, and the operator text | `operator_text`, `is_assignment`, `is_logical` | `assign-kinds`, `bitwise.ts` |
+| hoisting: a named declaration moves to the top, `export { name }` (or `export default name;`) stays behind | `hoist_edit`, `apply_wraps` | `hoists-*` cases |
+| `earlyPruneRegex` (on by default) skips a file that mentions none of `"use gpu"`, `tgpu` | `pruned` in the emit hook; a bundler session uses `embed_metadata_unpruned` | `works-with-properties` case |
+| `autoNamingEnabled` is an option: the plugin defaults it on, its test helper off | `TransformSession::build_with_auto_naming`; the corpus passes the setting its capture used | `aliasing/*` (off), `auto-naming/*` (on) |
+
+The tinyest AST is what the runtime's WGSL printer reads, so its node kinds
+are part of the plugin's contract. `NodeTypeCatalog`
+(`tinyest/src/nodes.ts`) has 24 kinds and this port emits all of them.
+The kinds the pinned plugin prints are captured as
+`conformance/cases/typegpu/tinyest/` (`sources: "probe"`: the input is the
+snippet in `scripts/ext-bench/typegpu-probes/ast-*.ts`, and `theirs.ts` is a
+live run of the pin's `babelTransform`, not one of its test files).
+A numeric literal is recorded as its value, not the author's spelling
+(`0x10` is `[5, "16"]`), because the runtime prints that text into WGSL.
+
+Where the plugin throws, there is no `theirs.ts` to capture. This port
+refuses the same way and says so, and `tests/typegpu.rs` locks the message:
+`Unsupported JS functionality: <Kind>`, `Arrow functions are not supported
+inside TGSL.`, `` `var` declarations are not supported. ``, `Prefix update
+expressions are not supported in WGSL.`, `Spread elements are not supported
+in TGSL.`. A template literal, a spread, a `do/while`, `for...in` and a
+prefix update all end in an unprintable body (`body: [0, []]`, no externals).
+The snippets stay in `typegpu-probes/` (`ast-var.ts`, `ast-template.ts`,
+`ast-spread.ts`, `ast-do-while.ts`, `ast-update.ts`).
+
+`conformance/cases/typegpu` compares with `ts_ext_syntax::structure::same`:
+the syntax tree, so whitespace, a trailing comma, a redundant pair of
+parentheses, a comment and a numeric literal form are shape, while a node
+kind, a name, an operator or a statement order is not.
+
+## Open differences
+
+- A nested function inside a `"use gpu"` body: the plugin throws
+  (`Arrow functions are not supported inside TGSL.`, `Unsupported JS
+  functionality: FunctionDeclaration`). This port keeps the wrapper, marks the
+  body unprintable (`ast` body `[0, []]`, no externals), and reports the same
+  text in `Transformed::diagnostics` with the whole file as the span, because
+  the payload carries no positions. The compiler emit hook returns text only,
+  so it marks the body unprintable and reports nothing.
+  Snippets: `typegpu-probes/nested-arrow.ts`, `nested-function-decl.ts`.
+- `unstable_obfuscate` is not implemented. The pin's default is off, and it
+  refuses to run with auto-naming on.

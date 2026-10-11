@@ -691,6 +691,17 @@ impl<'a> Printer<'a> {
                 // `#core(...)` hides its binders from the template tree.
                 // The rendered text is the binding that must not collide.
                 self.define_syntax(&rule.template, &matched.captures);
+                if std::env::var("SD").is_ok() && name == "machine" {
+                    fn dump(v: &Capture, d: usize) {
+                        let pad = " ".repeat(d);
+                        match v {
+                            Capture::Text(t) => eprintln!("{pad}Text({t:?})"),
+                            Capture::Record { text, fields, .. } => { eprintln!("{pad}Record({text:?})"); for (k, val) in fields { eprintln!("{pad}  .{k}:"); dump(val, d+4); } }
+                            Capture::Many(rows) => { eprintln!("{pad}Many({})", rows.len()); for r in rows { eprintln!("{pad} row:"); for (k, val) in r { eprintln!("{pad}  [{k}]"); dump(val, d+5); } } }
+                        }
+                    }
+                    for (k, v) in &matched.captures { eprintln!("CAP {k}:"); dump(v, 1); }
+                }
                 let introduced = introduced_names(&rule.introduced, &replacement, &matched.captures);
                 let plan = self.hygiene_plan(&introduced);
                 if let Some(plan) = &plan {
@@ -5896,15 +5907,6 @@ fn render_rep(
     while !path.is_empty() {
         if let Some(found) = capture_sequence(captures, path) {
             if !found.is_empty() {
-                // `$field.name` names a field of the `field` sequence.
-                // Scope the row under that sequence, not under the field.
-                if captures.get(path).is_none_or(|have| !matches!(have, Capture::Many(_))) {
-                    if let Some((head, _)) = path.rsplit_once('.') {
-                        if matches!(captures.get(head), Some(Capture::Many(_))) {
-                            path = head;
-                        }
-                    }
-                }
                 rows = found;
                 break;
             }
@@ -6390,14 +6392,6 @@ fn capture_field<'a>(fields: &'a HashMap<String, Capture>, name: &str) -> Option
 fn capture_sequence(captures: &HashMap<String, Capture>, path: &str) -> Option<Vec<Vec<(String, Capture)>>> {
     if let Some(Capture::Many(rows)) = captures.get(path) {
         return Some(rows.clone());
-    }
-    // `$field.name` is a field of the `field` sequence, not its own sequence.
-    let mut parent = path;
-    while let Some((head, _)) = parent.rsplit_once('.') {
-        if let Some(Capture::Many(rows)) = captures.get(head) {
-            return Some(rows.clone());
-        }
-        parent = head;
     }
     let (root, rest) = path.split_once('.')?;
     let mut value = captures.get(root)?.clone();

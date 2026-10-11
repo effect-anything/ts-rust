@@ -1,6 +1,16 @@
 # tsover
 
-Operator overloading lives in this compiler. It is not a fork of `tsc`, and
+Operator overloading lives in this compiler. It is the lower layer:
+`crates/ts_goport/src/ext/tsover.rs` owns the operator table, the two
+directives, the rewrite walk, the prelude and the span-map segments.
+`ext::typegpu` is a consumer: it wraps marked functions and records the
+tinyest AST of what this layer produced.
+
+Its tests are `crates/ts_ext_syntax/tests/tsover.rs` (the table, both
+directives, scope, prelude, span map, nesting). The consumer's are in
+`tests/typegpu.rs`. `scripts/ext-bench/tsover-probes/` holds snippets with no
+upstream oracle (the pinned TypeGPU plugin has no `"use tsover"`).
+ It is not a fork of `tsc`, and
 it is not part of TypeGPU. TypeGPU and typenet are consumers. A library that
 declares `Symbol.operatorPlus` on its types can use the same path.
 

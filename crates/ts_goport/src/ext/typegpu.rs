@@ -28,190 +28,63 @@ use crate::frontend::parser::{
 use crate::scanner_util::skip_trivia;
 use crate::spanmap::{self, Feature, Kind, Segment};
 
+use super::tsover::{is_named_directive, is_use_gpu, overload, parse_without_rewrite};
+
 pub const MAPPER_NAME: &str = "typegpu";
-const MAPPER: &str = MAPPER_NAME;
-const PRELUDE: &str = super::tsover::PRELUDE;
-const NESTING: &str = "Nesting 'use gpu' functions is not allowed";
-
-/// Virtual text, span-map tuples, and original-file diagnostics for a
-/// host outside `tsc`. `None` when `code` has no directive. A plugin calls
-/// this after Sweetener expansion, or alone for an ordinary file.
-#[must_use]
-pub fn rewrite_text(filename: &str, code: &str) -> Option<Rewrite> {
-    if !super::tsover::enabled(code) {
-        return None;
-    }
-    let file_name = if filename.starts_with('/') {
-        filename.to_owned()
-    } else {
-        format!("/{filename}")
-    };
-    let opts = SourceFileParseOptions {
-        file_name,
-        ..SourceFileParseOptions::default()
-    };
-    let kind = if filename.ends_with(".tsx") || filename.ends_with(".jsx") {
-        ScriptKind::TSX
-    } else {
-        ScriptKind::TS
-    };
-    let leaked: &'static str = Box::leak(code.to_owned().into_boxed_str());
-    let file = parse_source_file_unexpanded(&opts, leaked, kind);
-    let (virtual_code, segments, nesting) = walk_file(&file, code)?;
-    Some(Rewrite {
-        code: virtual_code,
-        segments,
-        diagnostics: nesting
-            .into_iter()
-            .map(|(start, end)| RewriteDiagnostic {
-                message: NESTING.to_owned(),
-                start,
-                end,
-            })
-            .collect(),
-    })
-}
-
-/// Result of [`rewrite_text`]. Offsets are bytes of the input text.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Rewrite {
-    pub code: String,
-    pub segments: Vec<Segment>,
-    pub diagnostics: Vec<RewriteDiagnostic>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RewriteDiagnostic {
-    pub message: String,
-    pub start: u32,
-    pub end: u32,
-}
-
-/// Rewrite `file` when its text contains `"use gpu"`. Otherwise return it.
-#[must_use]
-pub fn rewrite_after_parse(
-    opts: &SourceFileParseOptions,
-    file: ParsedSourceFile,
-) -> ParsedSourceFile {
-    if rewriting() || !super::tsover::enabled(&file.text) {
-        return file;
-    }
-    let current = file.text.to_string();
-    let Some((code, segments, nesting)) = walk_file(&file, &current) else {
-        return file;
-    };
-    let _guard = RewriteGuard::enter();
-    // The calls are not declared by `tsover-runtime`'s types. Ordinary
-    // check and LSP only see a name after this prelude. It is synthesized,
-    // so it is not in the span map and does not move the author's text.
-    let code = format!("{PRELUDE}{code}");
-    let shift = PRELUDE.len() as i32;
-    let segments = segments
-        .into_iter()
-        .map(|mut segment| {
-            segment.virtual_start += shift;
-            segment.virtual_end += shift;
-            segment
-        })
-        .collect::<Vec<_>>();
-    let leaked: &'static str = Box::leak(code.into_boxed_str());
-    let parsed = parse_source_file(opts, leaked, file.script_kind);
-    if !file.content_mapper().is_empty() {
-        // The mapper already set info on `file`. The rewritten parse is a
-        // new file, so attaching the composed map once is the first set.
-        let prior = crate::ast::source_file_span_map(file.root);
-        let composed = compose_maps(prior, &segments);
-        let original = crate::ast::source_file_original_text(file.root).to_string();
-        if parsed.content_mapper().is_empty() {
-            parsed.set_content_mapper_info(ContentMapperSourceFileInfo {
-                content_mapper: file.content_mapper().to_owned(),
-                transform_identity: file.content_mapper().to_owned(),
-                parse_options: opts.clone(),
-                virtual_file_name: opts.file_name.clone(),
-                original_text: original,
-                span_map: Some(std::sync::Arc::new(composed)),
-                diagnostic_directives: Vec::new(),
-                supplemental_source_files: Vec::new(),
-                canonical_source_file: None,
-            });
-        }
-        return parsed;
-    }
-    if !nesting.is_empty() {
-        let mut diagnostics = parsed.diagnostics.clone();
-        for (start, end) in nesting {
-            diagnostics.push(new_external_diagnostic(
-                parsed.root,
-                TextRange::new(start as i32, end as i32),
-                MAPPER,
-                Category::Error,
-                0,
-                NESTING,
-            ));
-        }
-        set_source_file_diagnostics(parsed.root, diagnostics);
-    }
-    parsed.set_content_mapper_info(ContentMapperSourceFileInfo {
-        content_mapper: MAPPER.to_owned(),
-        transform_identity: MAPPER.to_owned(),
-        parse_options: opts.clone(),
-        virtual_file_name: opts.file_name.clone(),
-        original_text: current,
-        span_map: Some(std::sync::Arc::new(spanmap::new(&segments))),
-        diagnostic_directives: Vec::new(),
-        supplemental_source_files: Vec::new(),
-        canonical_source_file: None,
-    });
-    parsed
-}
-
-fn compose_maps(prior: Option<&crate::spanmap::SpanMap>, next: &[Segment]) -> crate::spanmap::SpanMap {
-    let Some(prior) = prior else {
-        return spanmap::new(next);
-    };
-    let composed = next
-        .iter()
-        .filter_map(|segment| {
-            let (original, _) = crate::spanmap::SpanMap::virtual_to_original_span(
-                Some(prior),
-                crate::ast::TextRange::new(segment.original_start, segment.original_end),
-            );
-            Some(Segment {
-                virtual_start: segment.virtual_start,
-                virtual_end: segment.virtual_end,
-                original_start: original.pos(),
-                original_end: original.end(),
-                kind: segment.kind,
-                features: segment.features,
-            })
-        })
-        .collect::<Vec<_>>();
-    spanmap::new(&composed)
-}
-
-fn parse_source_file_unexpanded(
-    opts: &SourceFileParseOptions,
-    text: &'static str,
-    kind: ScriptKind,
-) -> ParsedSourceFile {
-    parse_without_rewrite(opts, text, kind)
-}
 
 /// Build output only. Check and LSP stop at [`rewrite_text`].
 ///
 /// This is the unplugin-typegpu replacement: hoist a marked function
 /// statement, wrap it with `__TYPEGPU_META__` (format version 2), and embed
 /// the tinyest AST. A function that already has the wrapper is left alone.
+/// Upstream `earlyPruneRegex`: a file with none of these cannot ask for a
+/// wrap, so the hook returns it without parsing.
+fn pruned(code: &str) -> bool {
+    !code.contains("use gpu") && !code.contains("tgpu") && !code.contains("typegpu")
+}
+
 /// A `tgpu.{fn,vertexFn,fragmentFn,computeFn}(...)(implementation)` call
 /// also wraps an implementation that has no directive. A labelled
 /// `tgpu.*` resource constructor is wrapped with `__TYPEGPU_AUTONAME__`.
+///
+/// This is the compiler emit hook, so it prunes like the upstream plugin's
+/// `earlyPruneRegex`: it runs on every emitted file. A bundler calls
+/// [`embed_metadata_unpruned`] instead.
 #[must_use]
 pub fn embed_metadata(filename: &str, code: &str) -> String {
-    if code.contains("__TYPEGPU_META__") {
+    if pruned(code) {
         return code.to_owned();
     }
-    if !code.contains("use gpu") && !code.contains("tgpu") && !code.contains("typegpu") {
-        return code.to_owned();
+    // Upstream's plugin default is auto-naming on (`defaultOptions`), so the
+    // compiler hook names a labelled resource.
+    embed_metadata_unpruned(filename, code, true)
+}
+
+/// Build output for a caller that already chose the file.
+///
+/// Upstream's early prune is `["use gpu", /t(ype)?gpu/]` and it defaults on,
+/// but the plugin's own tests call the visitor directly with that filter off,
+/// so a snippet whose only marker is an aliased `d` still gets its metadata.
+/// A bundler session is that visitor. `auto_name` is upstream's
+/// `autoNamingEnabled`: the plugin defaults it on, and its test helper
+/// defaults it off, so a caller that compares against those snapshots passes
+/// the setting per file.
+#[must_use]
+pub fn embed_metadata_unpruned(filename: &str, code: &str, auto_name: bool) -> String {
+    embed_metadata_reports(filename, code, auto_name).0
+}
+
+/// [`embed_metadata_unpruned`] plus the messages for a body upstream's
+/// transpiler refuses. The text is upstream's, and the body of that function
+/// is marked unprintable (`[0, []]`) instead of holding a wrong tree.
+#[must_use]
+pub fn embed_metadata_reports(
+    filename: &str,
+    code: &str,
+    auto_name: bool,
+) -> (String, Vec<String>) {
+    if code.contains("__TYPEGPU_META__") {
+        return (code.to_owned(), Vec::new());
     }
     // One stable name. An absolute caller path makes the printer refuse
     // a node whose file name is the other parse.
@@ -235,13 +108,7 @@ pub fn embed_metadata(filename: &str, code: &str) -> String {
         eprintln!("ALIASES {aliases:?}");
     }
     let mut edits = Vec::new();
-    collect_wraps(
-        file.root,
-        leaked,
-        &aliases,
-        auto_name_for(filename),
-        &mut edits,
-    );
+    let unsupported = collect_wraps(file.root, leaked, &aliases, auto_name, &mut edits);
     if std::env::var("DBG").is_ok() {
         eprintln!("EDITS {}", edits.len());
         for edit in &edits {
@@ -249,9 +116,9 @@ pub fn embed_metadata(filename: &str, code: &str) -> String {
         }
     }
     if edits.is_empty() {
-        return code.to_owned();
+        return (code.to_owned(), unsupported);
     }
-    apply_wraps(leaked, edits)
+    (apply_wraps(leaked, edits), unsupported)
 }
 
 /// Babel reprints the file at 2-space indent and drops the captured-test banner.
@@ -328,6 +195,9 @@ struct WrapEdit {
     text: String,
     /// Set when a hoisted `export function name` becomes `export { name }`.
     export_name: Option<String>,
+    /// `export default name;` instead of `export { name };` for a hoisted
+    /// `export default function name`.
+    export_default: bool,
 }
 
 fn collect_wraps(
@@ -336,9 +206,10 @@ fn collect_wraps(
     aliases: &std::collections::BTreeSet<String>,
     auto_name: bool,
     edits: &mut Vec<WrapEdit>,
-) {
+) -> Vec<String> {
     let mut work = Build::new(code, aliases.clone(), auto_name);
     walk_wraps(root, &mut work, edits);
+    work.unsupported
 }
 
 fn walk_wraps(node: Node, work: &mut Build, edits: &mut Vec<WrapEdit>) {
@@ -465,13 +336,18 @@ fn edit_for_function(node: Node, work: &mut Build, marked: bool) -> Option<WrapE
             // The declaration already owns `const name =`. Reprinting it
             // inside the replacement wrote `const fn = const fn =`.
             let body = indent_continuations(&wrapper, column_at(work.code.as_str(), column));
+            // `export default function (...)` keeps its `export default `
+            // prefix and an anonymous declaration has no semicolon of its
+            // own. Upstream writes one after the wrapper.
+            let close = if anonymous_default { ";" } else { "" };
             if parent.kind() == SyntaxKind::ExportAssignment {
-                format!(" {body}")
+                format!(" {body}{close}")
             } else {
-                body
+                format!("{body}{close}")
             }
         },
         export_name: None,
+        export_default: false,
     })
 }
 
@@ -502,10 +378,25 @@ fn hoist_edit(
         String::new()
     };
     let named_export = is_named_export(parent);
+    // `export function name` carries the keyword as a modifier of the
+    // declaration, not as an enclosing ExportDeclaration. The hoist removes
+    // the keyword with the declaration, so the export has to come back in
+    // the plugin's `export { name }` form. `export default` keeps its own
+    // path below.
+    let export_modifier = !named_export
+        && parent.kind() == SyntaxKind::SourceFile
+        && node
+            .modifier_flags()
+            .intersects(crate::flags::ModifierFlags::EXPORT)
+        && !node
+            .modifier_flags()
+            .intersects(crate::flags::ModifierFlags::DEFAULT);
     let export_assignment = parent.kind() == SyntaxKind::ExportAssignment && !parent.is_export_equals();
-    // `export default function name` is the declaration itself. It hoists
-    // to `const name = ...; export default name` but stays where it was:
-    // the `export` keyword is not a parent node to climb past.
+    // `export default function name` is the declaration itself. Upstream
+    // hoists the `const` to the top of the scope like a named export and
+    // leaves `export default name;` where the declaration was. One edit
+    // cannot insert twice, so the export is appended with the others; an
+    // ESM export declaration is hoisted, so the program is the same.
     let default_modifier = parent.kind() == SyntaxKind::SourceFile
         && node
             .modifier_flags()
@@ -517,7 +408,7 @@ fn hoist_edit(
     } else {
         comment_start
     };
-    let insert_at = if default_modifier {
+    let insert_at = if export_assignment {
         remove_start
     } else {
         scope_top(node, work.code.as_str()).unwrap_or(remove_start)
@@ -534,7 +425,7 @@ fn hoist_edit(
     // A hoist has to bring its own, or it would run into the next statement.
     let newline = "";
     let decl = format!("{comment_text}const {name} = {wrapper};{newline}");
-    let text = if default_export {
+    let text = if default_export && !default_modifier {
         let sep = if decl.ends_with('\n') { "" } else { "\n" };
         format!("{decl}{sep}export default {name};")
     } else {
@@ -569,7 +460,8 @@ fn hoist_edit(
         remove_end: end,
         insert_at,
         text,
-        export_name: named_export.then(|| name.to_owned()),
+        export_name: (named_export || export_modifier || default_modifier).then(|| name.to_owned()),
+        export_default: default_modifier,
     })
 }
 
@@ -665,6 +557,7 @@ fn edit_for_autoname(expression: Node, name: &str, work: &mut Build) -> Option<W
         insert_at: start,
         text,
         export_name: None,
+        export_default: false,
     })
 }
 
@@ -798,11 +691,16 @@ fn apply_wraps(code: &str, mut edits: Vec<WrapEdit>) -> String {
     // unwrapped callback. Fold the callback wrap into that copy. Applying
     // both ranges would cover the same bytes twice.
     compose_nested_edits(code, &mut edits);
-    // Walk order is source order. The plugin hoists later functions first.
+    // Walk order is source order. The hoisted consts stack in reverse so the
+    // first function ends up lowest, but the `export { name }` lines keep
+    // source order, as the plugin writes them.
     let exports = edits
         .iter()
-        .rev()
-        .filter_map(|edit| edit.export_name.clone())
+        .filter_map(|edit| {
+            edit.export_name
+                .clone()
+                .map(|name| (name, edit.export_default))
+        })
         .collect::<Vec<_>>();
     let mut pieces: Vec<(usize, String)> = Vec::new();
     let mut covered = vec![false; code.len()];
@@ -874,11 +772,15 @@ fn apply_wraps(code: &str, mut edits: Vec<WrapEdit>) -> String {
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    for name in exports {
+    for (name, default) in exports {
         if !out.ends_with('\n') {
             out.push('\n');
         }
-        out.push_str(&format!("export {{ {name} }};\n"));
+        if default {
+            out.push_str(&format!("export default {name};\n"));
+        } else {
+            out.push_str(&format!("export {{ {name} }};\n"));
+        }
     }
     // A wrapped `export default function` is split across two lines by the
     // reprint. The captured form keeps them on one line.
@@ -952,6 +854,8 @@ fn join_export_default(text: &str) -> String {
 }
 
 struct Build {
+    /// One message per function whose body upstream's transpiler refuses.
+    unsupported: Vec<String>,
     factory: crate::ast::NodeFactory,
     emit: std::rc::Rc<crate::printer::EmitContext>,
     code: String,
@@ -965,6 +869,7 @@ struct Build {
 impl Build {
     fn new(code: &str, aliases: std::collections::BTreeSet<String>, auto_name: bool) -> Self {
         Self {
+            unsupported: Vec::new(),
             factory: crate::ast::NodeFactory::new(),
             emit: crate::printer::new_emit_context(),
             code: code.to_owned(),
@@ -984,18 +889,22 @@ impl Build {
     }
 
     fn list(&self, nodes: &[Node]) -> crate::ast::NodeList {
-        // A required list with an undefined range panics when the printer
-        // reads its location. Zero is a real range.
-        self.factory
-            .new_node_list_with_loc(nodes, crate::ast::TextRange::new(0, 0))
+        // Go's `ast.NewNodeList` leaves the range undefined, and
+        // `NodeList.HasTrailingComma` is then `last.End() < End()`, i.e.
+        // false for synthetic nodes. A range of `0..0` makes the same
+        // comparison true and prints a comma the oracle does not have.
+        self.factory.new_node_list(nodes)
     }
 
     fn empty(&self) -> crate::ast::NodeList {
         self.list(&[])
     }
 
+    /// Go's `nil` list, not an empty one. The printer distinguishes them:
+    /// an empty `typeParameters` list makes it print `($) =>` where Go
+    /// prints `$ =>`.
     fn nil_list(&self) -> crate::ast::NodeList {
-        self.empty()
+        crate::ast::NodeList::NIL
     }
 }
 
@@ -1354,6 +1263,9 @@ fn wrap_function(node: Node, work: &mut Build, marked: bool) -> Node {
     work.changed = true;
     let name = function_name(node, work);
     let ast = transpile_marked(node, &work.code);
+    if let Some(message) = ast.unsupported.clone() {
+        work.unsupported.push(message);
+    }
     let _ = marked;
     // The runtime reads the author's operators from this function. The AST
     // already names them. Rebuilding the body would turn `+` into a call.
@@ -2362,13 +2274,6 @@ const RESOURCE_CONSTRUCTORS: &[&str] = &[
     "createTexture", "createSampler", "createComparisonSampler", "struct", "unstruct", "createView",
 ];
 
-/// `shells/` and `use-gpu-directive/` snapshots have no autoname wrapper.
-/// Every other directory, including `auto-naming/`, keeps it on.
-fn auto_name_for(filename: &str) -> bool {
-    let path = filename.replace('\\', "/");
-    !path.contains("/shells/") && !path.contains("/use-gpu-directive/")
-}
-
 fn auto_name(node: Node, work: &mut Build) -> Option<Node> {
     if !work.auto_name {
         return None;
@@ -2388,15 +2293,20 @@ fn labelled(node: Node) -> Option<(String, Node)> {
         {
             Some((node.name().text().to_owned(), node.initializer()))
         }
-        SyntaxKind::BinaryExpression
-            if node.operator_token().kind() == SyntaxKind::EqualsToken
-                && node.right().kind() == SyntaxKind::CallExpression =>
-        {
+        SyntaxKind::BinaryExpression if node.operator_token().kind() == SyntaxKind::EqualsToken => {
             let name = try_identifier(node.left())?;
             Some((name, node.right()))
         }
         SyntaxKind::PropertyAssignment if node.name().kind() == SyntaxKind::Identifier => {
             Some((node.name().text().to_owned(), node.initializer()))
+        }
+        // A class property: `class C { myBuffer = root.createUniform(d.u32) }`,
+        // also the private `#const = tgpu.const(d.u32, 1)`. Upstream names both
+        // (`ClassProperty` and `ClassPrivateProperty`), the private one
+        // without its `#`.
+        SyntaxKind::PropertyDeclaration if !node.initializer().is_nil() => {
+            let name = try_identifier(node.name())?;
+            Some((name, node.initializer()))
         }
         _ => None,
     }
@@ -2412,27 +2322,22 @@ fn try_identifier(node: Node) -> Option<String> {
 }
 
 fn contains_resource(node: Node, work: &Build) -> bool {
+    // Go upstream: `containsResourceConstructorCall` also descends through a
+    // tagged template's tag, so `tgpu.fn(...)`\`wgsl\`.$uses({...})` is one
+    // resource.
+    if node.kind() == SyntaxKind::TaggedTemplateExpression {
+        return contains_resource(node.tag(), work);
+    }
     if node.kind() != SyntaxKind::CallExpression {
         return false;
     }
-    // An aliased shell is metadata only. The canonical `tgpu.*` shell is
-    // still a named resource, so it keeps autoname around that metadata.
+    // A shell implementation is a named resource whatever the tgpu object is
+    // called. Upstream returns true here before it looks at the callee, so
+    // `g.fn([])(impl)` is named as `tgpu.fn([])(impl)` is.
     if is_shell_implementation(node, work) {
-        let mut callee = unwrap_parens(node.expression());
-        if callee.kind() == SyntaxKind::CallExpression {
-            callee = unwrap_parens(callee.expression());
-        }
-        if callee.kind() == SyntaxKind::PropertyAccessExpression {
-            let object = callee.expression();
-            if object.kind() != SyntaxKind::Identifier || object.text() != "tgpu" {
-                return false;
-            }
-        }
+        return true;
     }
-    let mut callee = unwrap_parens(node.expression());
-    if is_shell_implementation(node, work) && callee.kind() == SyntaxKind::CallExpression {
-        callee = unwrap_parens(callee.expression());
-    }
+    let callee = unwrap_parens(node.expression());
     if callee.kind() == SyntaxKind::Identifier {
         return RESOURCE_CONSTRUCTORS.contains(&callee.text());
     }
@@ -2577,12 +2482,17 @@ fn is_tgpu_alias(node: Node, work: &Build) -> bool {
     let mut path = String::new();
     let mut tail = unwrap_parens(node);
     loop {
+        if tail.kind() == SyntaxKind::ElementAccessExpression
+            && tail.argument_expression().kind() == SyntaxKind::StringLiteral
+            && tail.argument_expression().text() == "~unstable"
+        {
+            // `tgpu["~unstable"]` bypasses that step of the path, as
+            // upstream's `isTgpu` does.
+            tail = tail.expression();
+            continue;
+        }
         if tail.kind() == SyntaxKind::PropertyAccessExpression {
             let property = tail.name();
-            if property.kind() == SyntaxKind::StringLiteral && property.text() == "~unstable" {
-                tail = tail.expression();
-                continue;
-            }
             if property.kind() != SyntaxKind::Identifier {
                 break;
             }
@@ -2603,7 +2513,9 @@ fn is_tgpu_alias(node: Node, work: &Build) -> bool {
             break;
         }
     }
-    work.aliases.contains(&path) || path == "tgpu"
+    // Only an alias gathered from an `import ... from 'typegpu'` counts, as
+    // upstream gathers it. A bare `tgpu` name is not a typegpu object.
+    work.aliases.contains(&path)
 }
 
 fn is_shell_implementation(node: Node, work: &Build) -> bool {
@@ -2729,6 +2641,9 @@ struct Tinyest {
     params: Vec<String>,
     body: String,
     externals: Vec<String>,
+    /// Upstream's transpiler throws on a shape it cannot express. The text is
+    /// the error a caller should surface; the body is empty then.
+    unsupported: Option<String>,
 }
 
 impl Tinyest {
@@ -2791,6 +2706,7 @@ fn transpile_marked(node: Node, code: &str) -> Tinyest {
     let mut ctx = TinyCtx {
         declared: params.clone(),
         externals: Vec::new(),
+        unsupported: None,
     };
     let statements = if body.kind() == SyntaxKind::Block {
         body.statements()
@@ -2803,16 +2719,29 @@ fn transpile_marked(node: Node, code: &str) -> Tinyest {
     } else {
         Vec::new()
     };
+    if let Some(message) = ctx.unsupported.clone() {
+        // `typegpu.md`: an empty `ast` means this shader cannot be printed.
+        return Tinyest {
+            params,
+            body: "[0, []]".to_owned(),
+            externals: Vec::new(),
+            unsupported: Some(message),
+        };
+    }
     Tinyest {
         params,
         body: format!("[0, [{}]]", statements.join(", ")),
         externals: ctx.externals,
+        unsupported: None,
     }
 }
 
 struct TinyCtx {
     declared: Vec<String>,
     externals: Vec<String>,
+    /// Set when a nested function or another shape upstream's transpiler
+    /// refuses was found. The body cannot be printed then.
+    unsupported: Option<String>,
 }
 
 fn is_directive(statement: Node) -> bool {
@@ -2834,6 +2763,15 @@ fn transpile_statement(node: Node, code: &str, ctx: &mut TinyCtx) -> Option<Stri
         }
         SyntaxKind::VariableStatement => {
             let list = node.declaration_list();
+            // Upstream: "`var` declarations are not supported." The tinyest
+            // catalog has `let` and `const` only, and WGSL has `let`.
+            if !list.flags().intersects(crate::flags::NodeFlags::CONST)
+                && !list.flags().intersects(crate::flags::NodeFlags::LET)
+            {
+                ctx.unsupported
+                    .get_or_insert_with(|| "`var` declarations are not supported.".to_owned());
+                return None;
+            }
             let decl = list.declarations().nodes().get(0);
             if decl.is_nil() {
                 return None;
@@ -2898,8 +2836,74 @@ fn transpile_statement(node: Node, code: &str, ctx: &mut TinyCtx) -> Option<Stri
                 statement_or_block(node.statement(), code, ctx)
             ))
         }
+        SyntaxKind::ContinueStatement => Some("[16]".to_owned()),
+        SyntaxKind::BreakStatement => Some("[17]".to_owned()),
+        SyntaxKind::ForOfStatement => {
+            // [18, declaration, iterable, body]. Upstream records the binding
+            // as a const/let without an initializer.
+            let init = node.initializer();
+            let declaration = if init.kind() == SyntaxKind::VariableDeclarationList {
+                let list = init;
+                let decl = list.declarations().nodes().get(0);
+                let kind = if list.flags().intersects(crate::flags::NodeFlags::CONST) {
+                    13
+                } else {
+                    12
+                };
+                if decl.is_nil() {
+                    format!("[{kind}]")
+                } else {
+                    let name = decl.name();
+                    let name = if name.kind() == SyntaxKind::Identifier {
+                        name.text().to_owned()
+                    } else {
+                        slice_node(code, name)
+                    };
+                    ctx.declared.push(name.clone());
+                    format!("[{kind}, \"{name}\"]")
+                }
+            } else {
+                transpile_expr(init, code, ctx)
+            };
+            Some(format!(
+                "[18, {declaration}, {}, {}]",
+                transpile_expr(node.expression(), code, ctx),
+                statement_or_block(node.statement(), code, ctx)
+            ))
+        }
+        SyntaxKind::SwitchStatement => {
+            // [19, expression, [[test, [statements]], ..., [null, []]]].
+            let mut clauses = Vec::new();
+            for clause in node.case_block().clauses().nodes() {
+                let test = if clause.kind() == SyntaxKind::DefaultClause {
+                    "null".to_owned()
+                } else {
+                    transpile_expr(clause.expression(), code, ctx)
+                };
+                let mut statements = Vec::new();
+                for statement in clause.statements().iter() {
+                    if let Some(text) = transpile_statement(statement, code, ctx) {
+                        statements.push(text);
+                    }
+                }
+                clauses.push(format!("[{test}, [{}]]", statements.join(", ")));
+            }
+            Some(format!(
+                "[19, {}, [{}]]",
+                transpile_expr(node.expression(), code, ctx),
+                clauses.join(", ")
+            ))
+        }
         SyntaxKind::Block => Some(transpile_block(node, code, ctx)),
-        _ => None,
+        // A statement the tinyest AST has no node for. Upstream's transpiler
+        // throws ("Unsupported JS functionality: FunctionDeclaration"), so
+        // skipping it silently would print a shader that is missing work.
+        _ => {
+            // Upstream: `Unsupported JS functionality: ${node.type}`.
+            ctx.unsupported
+                .get_or_insert_with(|| format!("Unsupported JS functionality: {:?}", node.kind()));
+            None
+        }
     }
 }
 
@@ -2986,6 +2990,17 @@ fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
             format!("[{kind}, {left}, \"{op}\", {right}]")
         }
         SyntaxKind::PrefixUnaryExpression => {
+            if matches!(
+                node.operator(),
+                SyntaxKind::PlusPlusToken | SyntaxKind::MinusMinusToken
+            ) {
+                // Upstream: "Prefix update expressions are not supported in
+                // WGSL." `a++` is catalog kind 102 and stays supported.
+                ctx.unsupported.get_or_insert_with(|| {
+                    "Prefix update expressions are not supported in WGSL.".to_owned()
+                });
+                return format!("\"{}\"", slice_node(code, node));
+            }
             format!(
                 "[4, \"{}\", {}]",
                 operator_text(node.operator()),
@@ -3068,7 +3083,20 @@ fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
             format!("[104, {{ {} }}]", props.join(", "))
         }
         SyntaxKind::ParenthesizedExpression => transpile_expr(node.expression(), code, ctx),
-        _ => format!("\"{}\"", slice_node(code, node)),
+        // Upstream's transpiler throws here ("Arrow functions are not
+        // supported inside TGSL", "Unsupported JS functionality: ..."), so a
+        // body it cannot express must not claim to be printable. A nested
+        // function is the common case: a text blob is not an expression.
+        _ => {
+            ctx.unsupported.get_or_insert_with(|| {
+                if node.kind() == SyntaxKind::ArrowFunction {
+                    "Arrow functions are not supported inside TGSL.".to_owned()
+                } else {
+                    format!("Unsupported JS functionality: {:?}", node.kind())
+                }
+            });
+            format!("\"{}\"", slice_node(code, node))
+        }
     }
 }
 
@@ -3199,6 +3227,10 @@ fn is_assignment(kind: SyntaxKind) -> bool {
             | SyntaxKind::AsteriskEqualsToken
             | SyntaxKind::SlashEqualsToken
             | SyntaxKind::PercentEqualsToken
+            | SyntaxKind::AsteriskAsteriskEqualsToken
+            | SyntaxKind::AmpersandAmpersandEqualsToken
+            | SyntaxKind::BarBarEqualsToken
+            | SyntaxKind::QuestionQuestionEqualsToken
             | SyntaxKind::AmpersandEqualsToken
             | SyntaxKind::BarEqualsToken
             | SyntaxKind::CaretEqualsToken
@@ -3219,22 +3251,36 @@ fn is_logical(kind: SyntaxKind) -> bool {
 
 fn operator_text(kind: SyntaxKind) -> &'static str {
     match kind {
-        SyntaxKind::PlusToken | SyntaxKind::PlusEqualsToken => {
-            if kind == SyntaxKind::PlusEqualsToken {
-                "+="
-            } else {
-                "+"
-            }
-        }
+        SyntaxKind::PlusToken => "+",
         SyntaxKind::MinusToken => "-",
-        SyntaxKind::MinusEqualsToken => "-=",
         SyntaxKind::AsteriskToken => "*",
-        SyntaxKind::AsteriskEqualsToken => "*=",
         SyntaxKind::SlashToken => "/",
-        SyntaxKind::SlashEqualsToken => "/=",
         SyntaxKind::PercentToken => "%",
-        SyntaxKind::PercentEqualsToken => "%=",
+        SyntaxKind::AsteriskAsteriskToken => "**",
+        SyntaxKind::AmpersandToken => "&",
+        SyntaxKind::BarToken => "|",
+        SyntaxKind::CaretToken => "^",
+        SyntaxKind::LessThanLessThanToken => "<<",
+        SyntaxKind::GreaterThanGreaterThanToken => ">>",
+        SyntaxKind::GreaterThanGreaterThanGreaterThanToken => ">>>",
         SyntaxKind::EqualsToken => "=",
+        SyntaxKind::PlusEqualsToken => "+=",
+        SyntaxKind::MinusEqualsToken => "-=",
+        SyntaxKind::AsteriskEqualsToken => "*=",
+        SyntaxKind::SlashEqualsToken => "/=",
+        SyntaxKind::PercentEqualsToken => "%=",
+        SyntaxKind::AsteriskAsteriskEqualsToken => "**=",
+        SyntaxKind::AmpersandEqualsToken => "&=",
+        SyntaxKind::BarEqualsToken => "|=",
+        SyntaxKind::CaretEqualsToken => "^=",
+        SyntaxKind::LessThanLessThanEqualsToken => "<<=",
+        SyntaxKind::GreaterThanGreaterThanEqualsToken => ">>=",
+        SyntaxKind::GreaterThanGreaterThanGreaterThanEqualsToken => ">>>=",
+        SyntaxKind::AmpersandAmpersandEqualsToken => "&&=",
+        SyntaxKind::BarBarEqualsToken => "||=",
+        SyntaxKind::QuestionQuestionEqualsToken => "??=",
+        SyntaxKind::InKeyword => "in",
+        SyntaxKind::InstanceOfKeyword => "instanceof",
         SyntaxKind::EqualsEqualsToken => "==",
         SyntaxKind::EqualsEqualsEqualsToken => "===",
         SyntaxKind::ExclamationEqualsToken => "!=",
@@ -3245,25 +3291,49 @@ fn operator_text(kind: SyntaxKind) -> &'static str {
         SyntaxKind::GreaterThanEqualsToken => ">=",
         SyntaxKind::AmpersandAmpersandToken => "&&",
         SyntaxKind::BarBarToken => "||",
+        SyntaxKind::QuestionQuestionToken => "??",
+        SyntaxKind::TildeToken => "~",
+        SyntaxKind::QuestionToken => "?",
         SyntaxKind::PlusPlusToken => "++",
         SyntaxKind::MinusMinusToken => "--",
         SyntaxKind::ExclamationToken => "!",
+        // Upstream's transpiler throws on a shape it does not know. This
+        // table keeps every operator the tinyest AST records, so `?` means a
+        // kind was added upstream and not here.
         _ => "?",
     }
 }
 
+/// The literal's value, as the plugin records it (`numericLiteral.value`),
+/// not the author's spelling: `0x10` is 16, `1e3` is 1000 and `1_000` is
+/// 1000. The runtime prints this text into WGSL, where none of those forms is
+/// a literal.
 fn numeric_text(node: Node, code: &str) -> String {
     let raw = slice_node(code, node);
-    if raw.contains('.') || raw.contains('e') || raw.contains('E') || raw.starts_with("0") && raw.len() > 1 && matches!(raw.as_bytes().get(1), Some(b'x' | b'X')) {
-        return raw;
-    }
-    let trimmed = raw.trim_start_matches('0');
-    if trimmed.is_empty() {
-        "0".to_owned()
-    } else {
-        trimmed.to_owned()
-    }
+    js_number_text(crate::jsnum::from_string(&raw).value())
 }
+
+/// JavaScript's `String(number)` for the values a literal can hold. Rust
+/// never prints an exponent, so a magnitude of 1e21 or more spells out its
+/// digits where JavaScript writes `1e+21`; the value is the same and the
+/// runtime parses either.
+fn js_number_text(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "-Infinity".to_owned()
+        } else {
+            "Infinity".to_owned()
+        };
+    }
+    if value == value.trunc() && value.abs() < 9_007_199_254_740_992.0 {
+        return format!("{}", value as i64);
+    }
+    format!("{value}")
+}
+
 
 fn slice_node(code: &str, node: Node) -> String {
     let start = usize::try_from(skip_trivia(code, node.pos()).max(0)).unwrap_or(0);
@@ -3273,375 +3343,7 @@ fn slice_node(code: &str, node: Node) -> String {
     code[start..end].to_owned()
 }
 
-/// Parse without the `"use gpu"` operator rewrite. The build wrapper needs
-/// the original function text, not the rewritten operators.
-pub fn parse_without_rewrite(
-    opts: &SourceFileParseOptions,
-    text: &'static str,
-    kind: ScriptKind,
-) -> ParsedSourceFile {
-    let _guard = RewriteGuard::enter();
-    parse_source_file(opts, text, kind)
-}
 
-fn walk_file(file: &ParsedSourceFile, original: &str) -> Option<(String, Vec<Segment>, Vec<(u32, u32)>)> {
-    let mut walk = Walk::default();
-    walk.visit(file.root);
-    if walk.edits.is_empty() && walk.nesting.is_empty() {
-        return None;
-    }
-    let (code, segments) = apply_edits(original, &walk.edits);
-    Some((code, segments, walk.nesting))
-}
 
-#[derive(Default)]
-struct Walk {
-    depth: u32,
-    edits: Vec<Edit>,
-    nesting: Vec<(u32, u32)>,
-}
 
-struct Edit {
-    start: i32,
-    end: i32,
-    text: String,
-    op_start: i32,
-    op_end: i32,
-}
-
-impl Walk {
-    fn visit(&mut self, node: Node) {
-        if node.is_nil() {
-            return;
-        }
-        if node.kind() == SyntaxKind::StringLiteral && is_use_tsover(node) {
-            let root = get_source_file_of_node(node);
-            root.for_each_child(|child| {
-                if child != root {
-                    self.visit_gpu(child);
-                }
-                false
-            });
-            return;
-        }
-        if node.kind() == SyntaxKind::StringLiteral && is_use_gpu(node) {
-            if let Some(body) = gpu_body(node) {
-                if self.depth > 0 {
-                    self.nesting.push((node.pos() as u32, node.end() as u32));
-                } else {
-                    self.depth += 1;
-                    note_nested(body, &mut self.nesting);
-                    body.for_each_child(|child| {
-                        if child != body {
-                            self.visit_gpu(child);
-                        }
-                        false
-                    });
-                    self.depth -= 1;
-                }
-                return;
-            }
-        }
-        node.for_each_child(|child| {
-            if child != node {
-                self.visit(child);
-            }
-            false
-        });
-    }
-
-    fn visit_gpu(&mut self, node: Node) {
-        if node.is_nil() || (node.kind() == SyntaxKind::StringLiteral && is_use_gpu(node)) {
-            return;
-        }
-        if node.kind() == SyntaxKind::BinaryExpression
-            && let Some((name, assign)) = overload(node.operator_token().kind())
-        {
-            self.rewrite_binary(node, name, assign);
-            return;
-        }
-        node.for_each_child(|child| {
-            if child != node {
-                self.visit_gpu(child);
-            }
-            false
-        });
-    }
-
-    fn rewrite_binary(&mut self, node: Node, name: &str, assign: bool) {
-        let before = self.edits.len();
-        self.visit_gpu(node.left());
-        self.visit_gpu(node.right());
-        let nested = self.edits.split_off(before);
-        let left = rewritten_slice(node, node.left(), &nested);
-        let right = rewritten_slice(node, node.right(), &nested);
-        let op = node.operator_token();
-        let text = if assign {
-            format!("{left} = {name}({left}, {right})")
-        } else {
-            format!("{name}({left}, {right})")
-        };
-        let file_text = source_file_text(get_source_file_of_node(node));
-        self.edits.push(Edit {
-            start: skip_trivia(file_text.as_ref(), node.pos()),
-            end: node.end(),
-            text,
-            op_start: skip_trivia(file_text.as_ref(), op.pos()),
-            op_end: op.end(),
-        });
-    }
-}
-
-fn overload(kind: SyntaxKind) -> Option<(&'static str, bool)> {
-    super::tsover::name(kind)
-}
-
-fn apply_edits(original: &str, edits: &[Edit]) -> (String, Vec<Segment>) {
-    let mut ordered = edits.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|edit| edit.start);
-    let mut code = String::new();
-    let mut segments = Vec::new();
-    let mut cursor = 0i32;
-    for edit in ordered {
-        if edit.start < cursor || edit.end < edit.start {
-            continue;
-        }
-        push_verbatim(&mut code, &mut segments, original, cursor, edit.start);
-        let v0 = i32::try_from(code.len()).unwrap_or(i32::MAX);
-        code.push_str(&edit.text);
-        let v1 = i32::try_from(code.len()).unwrap_or(i32::MAX);
-        if v1 > v0 {
-            segments.push(Segment {
-                virtual_start: v0,
-                virtual_end: v1,
-                original_start: edit.op_start,
-                original_end: edit.op_end,
-                kind: Kind::ATOM,
-                features: Feature::ALL,
-            });
-        }
-        cursor = edit.end;
-    }
-    push_verbatim(
-        &mut code,
-        &mut segments,
-        original,
-        cursor,
-        i32::try_from(original.len()).unwrap_or(i32::MAX),
-    );
-    (code, segments)
-}
-
-fn push_verbatim(code: &mut String, segments: &mut Vec<Segment>, original: &str, from: i32, to: i32) {
-    if to <= from {
-        return;
-    }
-    let v0 = i32::try_from(code.len()).unwrap_or(i32::MAX);
-    let end = usize::try_from(to).unwrap_or(original.len()).min(original.len());
-    let start = usize::try_from(from).unwrap_or(0).min(end);
-    code.push_str(&original[start..end]);
-    let v1 = i32::try_from(code.len()).unwrap_or(i32::MAX);
-    if let Some(prev) = segments.last_mut()
-        && prev.kind == Kind::VERBATIM
-        && prev.virtual_end == v0
-        && prev.original_end == from
-    {
-        prev.virtual_end = v1;
-        prev.original_end = to;
-        return;
-    }
-    segments.push(Segment {
-        virtual_start: v0,
-        virtual_end: v1,
-        original_start: from,
-        original_end: to,
-        kind: Kind::VERBATIM,
-        features: Feature::ALL,
-    });
-}
-
-fn node_slice(owner: Node, node: Node) -> String {
-    let text = source_file_text(get_source_file_of_node(owner));
-    let start = usize::try_from(skip_trivia(text.as_ref(), node.pos()).max(0)).unwrap_or(0);
-    let end = usize::try_from(node.end().max(node.pos())).unwrap_or(text.len());
-    text[start.min(end.min(text.len()))..end.min(text.len())].to_string()
-}
-
-fn rewritten_slice(owner: Node, node: Node, nested: &[Edit]) -> String {
-    let raw = node_slice(owner, node);
-    let text = source_file_text(get_source_file_of_node(owner));
-    let origin = skip_trivia(text.as_ref(), node.pos());
-    let local = nested
-        .iter()
-        .filter(|edit| edit.start >= origin && edit.end <= node.end())
-        .map(|edit| Edit {
-            start: edit.start - origin,
-            end: edit.end - origin,
-            text: edit.text.clone(),
-            op_start: edit.op_start,
-            op_end: edit.op_end,
-        })
-        .collect::<Vec<_>>();
-    if local.is_empty() {
-        raw
-    } else {
-        apply_edits(&raw, &local).0
-    }
-}
-
-fn note_nested(body: Node, nesting: &mut Vec<(u32, u32)>) {
-    body.for_each_child(|child| {
-        if child != body && is_function_like_declaration(child) {
-            let inner = child.body();
-            if inner.kind() == SyntaxKind::Block {
-                for statement in inner.statements().iter() {
-                    if statement.kind() != SyntaxKind::ExpressionStatement {
-                        break;
-                    }
-                    let literal = statement.expression();
-                    if is_use_gpu(literal) {
-                        nesting.push((literal.pos() as u32, literal.end() as u32));
-                    }
-                }
-            }
-        }
-        false
-    });
-}
-
-#[cfg(test)]
-fn payload_lines(text: &str) -> String {
-    let mut out = String::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with("name:")
-            || line.starts_with("body:")
-            || line.starts_with("externals:")
-            || line.contains("() =>")
-        {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod dump_case {
-    #[test]
-    fn one() {
-        let root = std::env::var("ROOT").unwrap_or_default();
-        if root.is_empty() {
-            return;
-        }
-        fn walk(dir: &std::path::Path) {
-            let theirs = dir.join("theirs.ts");
-            let input = dir.join("input.ts");
-            if theirs.is_file() && input.is_file() {
-                let only = std::env::var("ONLY").unwrap_or_default();
-                if !only.is_empty()
-                    && dir.file_name().and_then(|name| name.to_str()) != Some(only.as_str())
-                {
-                    return;
-                }
-                let code = std::fs::read_to_string(&input).unwrap();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    super::embed_metadata("input.ts", &code)
-                }));
-                let want = std::fs::read_to_string(&theirs).unwrap();
-                match result {
-                    Ok(out) if super::payload_lines(&out) == super::payload_lines(&want) => {
-                        eprintln!("SHAPE {}", dir.file_name().unwrap().to_string_lossy());
-                        std::fs::write("/tmp/ours-now.ts", &out).ok();
-                    }
-                    Ok(out) => {
-                        eprintln!("DIFF {}", dir.file_name().unwrap().to_string_lossy());
-                        std::fs::write("/tmp/ours-now.ts", &out).ok();
-                        std::fs::write("/tmp/theirs-now.ts", &want).ok();
-                        std::fs::write("/tmp/ours-payload.txt", super::payload_lines(&out)).ok();
-                        std::fs::write("/tmp/theirs-payload.txt", super::payload_lines(&want)).ok();
-                    }
-                    Err(payload) => {
-                        let message = payload
-                            .downcast_ref::<String>()
-                            .map(String::as_str)
-                            .or_else(|| payload.downcast_ref::<&str>().copied())
-                            .unwrap_or("panic");
-                        eprintln!("PANIC {} {message}", dir.file_name().unwrap().to_string_lossy());
-                    }
-                }
-            } else if theirs.is_file() {
-                eprintln!("NOINPUT {}", dir.display());
-            }
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    if entry.path().is_dir() {
-                        walk(&entry.path());
-                    }
-                }
-            }
-        }
-        walk(std::path::Path::new(&root));
-    }
-}
-
-fn is_use_gpu(node: Node) -> bool {
-    is_named_directive(node, "gpu")
-}
-
-fn is_use_tsover(node: Node) -> bool {
-    is_named_directive(node, "tsover")
-}
-
-fn is_named_directive(node: Node, name: &str) -> bool {
-    let directive = format!("use {name}");
-    let quoted = format!("\"{directive}\"");
-    let single = format!("'{directive}'");
-    node.text() == directive || node.text() == quoted || node.text() == single
-}
-
-fn gpu_body(literal: Node) -> Option<Node> {
-    let statement = literal.parent();
-    if statement.kind() != SyntaxKind::ExpressionStatement {
-        return None;
-    }
-    let body = statement.parent();
-    if body.kind() != SyntaxKind::Block {
-        return None;
-    }
-    for stmt in body.statements().iter() {
-        if stmt == statement {
-            return Some(body);
-        }
-        if stmt.kind() != SyntaxKind::ExpressionStatement
-            || stmt.expression().kind() != SyntaxKind::StringLiteral
-        {
-            return None;
-        }
-    }
-    None
-}
-
-std::thread_local! {
-    static REWRITING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-fn rewriting() -> bool {
-    REWRITING.with(|flag| flag.get())
-}
-
-struct RewriteGuard;
-
-impl RewriteGuard {
-    fn enter() -> Self {
-        REWRITING.with(|flag| flag.set(true));
-        Self
-    }
-}
-
-impl Drop for RewriteGuard {
-    fn drop(&mut self) {
-        REWRITING.with(|flag| flag.set(false));
-    }
-}
 
