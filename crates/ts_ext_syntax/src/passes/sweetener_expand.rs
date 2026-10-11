@@ -717,9 +717,6 @@ impl<'a> Printer<'a> {
     }
 
     fn expand_head(&mut self, nodes: &[Syntax], index: usize, name: &str) -> usize {
-        if std::env::var("SD").is_ok() {
-            eprintln!("HEAD {name} idx={index}");
-        }
         let head = &nodes[index];
         let head_span = node_span(head);
         self.copy_until(head_span.start as usize);
@@ -1728,9 +1725,6 @@ impl<'a> Printer<'a> {
     }
 
     fn fail_macro(&mut self, nodes: &[Syntax], index: usize, name: &str, rules: &[Rule]) {
-        if std::env::var("SD").is_ok() {
-            eprintln!("FAIL {name} idx={index}");
-        }
         let (span, expect) = self.rule_failure(nodes, index, rules);
         self.failed = true;
         // `module { record Cons(head:, tail) }` fails inside `record`.
@@ -3617,7 +3611,7 @@ fn match_pats_fail(
                         take_expr(source, nodes, *cursor)
                             .or_else(|| take_ident(source, nodes, *cursor))
                     } else {
-                        take_hole(source, nodes, *cursor, kind)
+                        take_hole(source, nodes, *cursor, kind, false)
                     };
                     if taken.is_none() {
                         // The hole wanted a token that is not here. The next
@@ -4479,6 +4473,21 @@ fn match_pats(
     captures: &mut HashMap<String, Capture>,
     classes: &[SyntaxClass],
 ) -> Option<usize> {
+    match_pats_in(source, nodes, cursor, pattern, captures, classes, false)
+}
+
+/// `in_rep` is true while matching the inner pattern of a `Pat::Rep`. A
+/// `$($rest:tt)+` step spans a call (`map(...)`); a standalone `$marker:token`
+/// is exactly one token, so it must not swallow the `/` after it.
+fn match_pats_in(
+    source: &str,
+    nodes: &[Syntax],
+    cursor: &mut usize,
+    pattern: &[Pat],
+    captures: &mut HashMap<String, Capture>,
+    classes: &[SyntaxClass],
+    in_rep: bool,
+) -> Option<usize> {
     let start_end = nodes.get(*cursor).map(node_start).unwrap_or(0);
     let mut last_end = start_end;
     for (pat_index, pat) in pattern.iter().enumerate() {
@@ -4583,7 +4592,7 @@ fn match_pats(
                     } else if *kind == HoleKind::Expr {
                         take_expr_until(source, nodes, *cursor, stop)
                     } else {
-                        take_hole(source, nodes, *cursor, kind)
+                        take_hole(source, nodes, *cursor, kind, in_rep)
                     };
                     let (text, end, next) = taken?;
                     captures.insert(name.clone(), Capture::Text(text));
@@ -4597,7 +4606,7 @@ fn match_pats(
                 loop {
                     let saved = *cursor;
                     let mut one = HashMap::new();
-                    if match_pats(source, nodes, cursor, inner, &mut one, classes).is_none() {
+                    if match_pats_in(source, nodes, cursor, inner, &mut one, classes, true).is_none() {
                         *cursor = saved;
                         break;
                     }
@@ -4737,8 +4746,7 @@ fn take_class(
     for rule in &class_.rules {
         let mut child = index;
         let mut raw = HashMap::new();
-        let Some(end) = match_pats(source, nodes, &mut child, &rule.pattern, &mut raw, classes)
-        else {
+        let Some(end) = match_pats(source, nodes, &mut child, &rule.pattern, &mut raw, classes) else {
             continue;
         };
         let text = sweetener_reader::slice_range(source, start, end).to_owned();
@@ -4777,6 +4785,7 @@ fn take_hole(
     nodes: &[Syntax],
     cursor: usize,
     kind: &HoleKind,
+    in_rep: bool,
 ) -> Option<(String, usize, usize)> {
     let mut index = cursor;
     skip_comments(nodes, &mut index);
@@ -4849,9 +4858,14 @@ fn take_hole(
         HoleKind::Type => take_type(source, nodes, index),
         HoleKind::TokenTree => {
             // `$($rest:tt)+` is the remaining steps of a thread, which start
-            // with an identifier (`map(...)`). A token-tree hole is one
-            // token or group; an identifier is that token.
-            take_token_tree(source, nodes, index).or_else(|| take_ident(source, nodes, index))
+            // with an identifier (`map(...)`). A repetition step spans a
+            // whole call; a standalone `$marker:token` is exactly one token
+            // and must not swallow the `/` after it.
+            if in_rep {
+                take_token_tree(source, nodes, index).or_else(|| take_ident(source, nodes, index))
+            } else {
+                take_ident(source, nodes, index).or_else(|| take_one_token(source, nodes, index))
+            }
         }
         HoleKind::Expr => {
             // One primary, then tight postfix, then infix operators whose
@@ -4964,6 +4978,18 @@ fn take_token_tree(
     }
     let end = node_end(&nodes[end_index - 1]);
     Some((source[start..end].to_owned(), end, end_index))
+}
+
+/// One token or group, whatever its kind. A standalone `token` hole uses
+/// this; the greedy [`take_token_tree`] is only for a repetition step.
+fn take_one_token(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, usize, usize)> {
+    let mut index = cursor;
+    skip_comments(nodes, &mut index);
+    let node = nodes.get(index)?;
+    if is_expr_stop(node) {
+        return None;
+    }
+    Some((sweetener_reader::slice(source, node).to_owned(), node_end(node), index + 1))
 }
 
 fn take_expr(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, usize, usize)> {
@@ -7090,6 +7116,16 @@ fn capture_sequence(
 ) -> Option<Vec<Vec<(String, Capture)>>> {
     if let Some(Capture::Many(rows)) = captures.get(path) {
         return Some(rows.clone());
+    }
+    // `$segment.marker` names a field of the `segment` sequence. Walk to the
+    // nearest ancestor that is a sequence, so a repetition over the marked
+    // segments still sees the literal ones (`users`, `posts`).
+    let mut parent = path;
+    while let Some((head, _)) = parent.rsplit_once('.') {
+        if let Some(Capture::Many(rows)) = captures.get(head) {
+            return Some(rows.clone());
+        }
+        parent = head;
     }
     let (root, rest) = path.split_once('.')?;
     let mut value = captures.get(root)?.clone();
