@@ -42,7 +42,18 @@ pub fn try_expand_fixture(
         });
     }
     if let Some(item) = match_method_item(source, &nodes[index..]) {
-        let end = method_item_end(nodes, index);
+        let end = if item.requests.is_empty() {
+            method_item_end(nodes, index)
+        } else {
+            // `method query { ... }` is the brace immediately after the name.
+            // Nested request braces are not the item boundary.
+            nodes
+                .get(index + 2)
+                .filter(|node| group_children(Some(node), Delimiter::Brace).is_some())
+                .map(node_end)
+                .unwrap_or_else(|| method_item_end(nodes, index))
+        };
+
         let head_params = param_pairs(source, item.head_params);
         let mut segments = Vec::new();
         for (_name, params) in &item.segments {
@@ -54,26 +65,32 @@ pub fn try_expand_fixture(
             segments,
             result: item.result.to_owned(),
             body: item.body.to_owned(),
+            requests: item
+                .requests
+                .iter()
+                .map(|request| (request.pattern.clone(), request.expansion.clone()))
+                .collect(),
         };
         // The second `method` rule emits `#syntax`, which is not printed.
         // The binding is what a later call expands. The grammar form is
         // different: its requests become ordinary `syntax` rules.
-        let text = if item.requests.is_empty() {
-            String::new()
-        } else {
-            expand_method_grammar(&item.head, &item.requests)
-        };
+        // `#syntax` is not printed. The grammar is kept on the binding so
+        // a later `query(...)` call can fill the request template itself.
+        let text = String::new();
         return Some(FixtureRewrite {
             start: node_start(&nodes[index]),
             end,
             next: end_index(nodes, index, end),
-            text,
-            binds: vec![(item.head.clone(), "method".to_owned())],
+            text: strip_line_comments(&text),
+            binds: Vec::new(),
             method: Some(method),
         });
     }
     if let Some(call) = match_method_call(source, nodes, index, methods) {
         return Some(call);
+    }
+    if let Some(query) = match_query_call(source, nodes, index, methods) {
+        return Some(query);
     }
     if let Some(step) = match_channel_stmt(source, nodes, index) {
         let end = node_end(nodes.get(step.next.saturating_sub(1)).unwrap_or(&nodes[index]));
@@ -128,11 +145,563 @@ pub fn try_expand_fixture(
     if let Some(read) = match_signal_read(nodes, index, signals) {
         return Some(read);
     }
+    if let Some(dbg) = match_dbg_call(source, nodes, index) {
+        return Some(dbg);
+    }
     if let Some(mut effect) = match_effect_item(source, nodes, index) {
         effect.text = substitute_signal_reads(&effect.text, signals);
         return Some(effect);
     }
+    if let Some(vector) = match_hash_vector(source, nodes, index) {
+        return Some(vector);
+    }
+    if let Some(data) = match_data_item(source, nodes, index) {
+        return Some(data);
+    }
+    if let Some(matched) = match_sweetener_match(source, nodes, index) {
+        return Some(matched);
+    }
+    let _ = (source, nodes, index);
     None
+}
+
+/// Prefix `(#)`: `#[a, b]` is `vector(a, b)`. The spelling is an operator,
+/// so the identifier-head expander never sees it.
+pub fn expand_hash_vector(elements: &[String]) -> String {
+    format!("vector({})", elements.join(", "))
+}
+
+fn match_hash_vector(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    if !operator_is(nodes.get(index), "#") {
+        return None;
+    }
+    let group = nodes.get(index + 1)?;
+    let children = group_children(Some(group), Delimiter::Bracket)?;
+    let mut elements = Vec::new();
+    let mut cursor = 0;
+    while cursor < children.len() {
+        while matches!(children.get(cursor), Some(Syntax::Comment { .. })) {
+            cursor += 1;
+        }
+        if cursor >= children.len() {
+            break;
+        }
+        if operator_is(children.get(cursor), ",") {
+            cursor += 1;
+            continue;
+        }
+        let start = node_start(&children[cursor]);
+        let mut end_at = cursor;
+        while end_at + 1 < children.len() && !operator_is(children.get(end_at + 1), ",") {
+            end_at += 1;
+        }
+        let end = node_end(&children[end_at]);
+        let element = source.get(start..end)?.trim();
+        if !element.is_empty() {
+            elements.push(element.to_owned());
+        }
+        cursor = end_at + 1;
+    }
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end: node_end(group),
+        next: index + 2,
+        text: expand_hash_vector(&elements),
+        binds: Vec::new(),
+        method: None,
+    })
+}
+
+/// `data Name<T> = A(field: T) | B();` — the union and one constructor each.
+fn match_data_item(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    if !token_is(nodes.get(index), "data") {
+        return None;
+    }
+    let mut cursor = skip_trivia(nodes, index + 1);
+    let name = ident_at(nodes, cursor)?;
+    cursor = skip_trivia(nodes, cursor + 1);
+    if !operator_is(nodes.get(cursor), "<") {
+        return None;
+    }
+    cursor = skip_trivia(nodes, cursor + 1);
+    let type_param = ident_at(nodes, cursor)?;
+    cursor = skip_trivia(nodes, cursor + 1);
+    if !operator_is(nodes.get(cursor), ">") {
+        return None;
+    }
+    cursor = skip_trivia(nodes, cursor + 1);
+    if !operator_is(nodes.get(cursor), "=") {
+        return None;
+    }
+    cursor = skip_trivia(nodes, cursor + 1);
+    let mut variants = Vec::new();
+    while cursor < nodes.len() && !operator_is(nodes.get(cursor), ";") {
+        if operator_is(nodes.get(cursor), "|") {
+            cursor = skip_trivia(nodes, cursor + 1);
+            continue;
+        }
+        let variant = ident_at(nodes, cursor)?;
+        let params = group_children(nodes.get(cursor + 1), Delimiter::Paren)?;
+        variants.push((variant, parse_ctor_fields(source, params)));
+        cursor = skip_trivia(nodes, cursor + 2);
+    }
+    if variants.is_empty() || !operator_is(nodes.get(cursor), ";") {
+        return None;
+    }
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end: node_end(&nodes[cursor]),
+        next: cursor + 1,
+        text: expand_data_decl(&name, &type_param, &variants),
+        binds: Vec::new(),
+        method: None,
+    })
+}
+
+fn parse_ctor_fields(source: &str, children: &[Syntax]) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    let mut index = 0;
+    while index < children.len() {
+        index = skip_trivia(children, index);
+        if index >= children.len() {
+            break;
+        }
+        if operator_is(children.get(index), ",") {
+            index += 1;
+            continue;
+        }
+        let Some(name) = ident_at(children, index) else {
+            break;
+        };
+        if !operator_is(children.get(index + 1), ":") {
+            break;
+        }
+        let mut end_at = index + 2;
+        let mut depth = 0i32;
+        while end_at < children.len() {
+            if operator_is(children.get(end_at), "<") {
+                depth += 1;
+            } else if operator_is(children.get(end_at), ">") && depth > 0 {
+                depth -= 1;
+            } else if depth == 0 && operator_is(children.get(end_at), ",") {
+                break;
+            }
+            end_at += 1;
+        }
+        if end_at <= index + 2 {
+            break;
+        }
+        let start = node_start(&children[index + 2]);
+        let end = node_end(&children[end_at - 1]);
+        let ty = source.get(start..end).unwrap_or("").trim();
+        if !ty.is_empty() {
+            fields.push((name, ty.to_owned()));
+        }
+        index = end_at;
+    }
+    fields
+}
+
+fn expand_data_decl(name: &str, type_param: &str, variants: &[(String, Vec<(String, String)>)]) -> String {
+    let mut arms = Vec::new();
+    for (variant, fields) in variants {
+        let mut body = format!("readonly tag: \"{variant}\";");
+        for (field, ty) in fields {
+            body.push_str(&format!(" {field}: {ty};"));
+        }
+        arms.push(format!("{{ {body} }}"));
+    }
+    let mut out = format!("type {name}<{type_param}> = {};", arms.join(" | "));
+    for (variant, fields) in variants {
+        let params = fields
+            .iter()
+            .map(|(field, ty)| format!("{field}: {ty}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let names = fields
+            .iter()
+            .map(|(field, _)| field.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let object = if fields.is_empty() {
+            format!("{{ tag: \"{variant}\" }}")
+        } else {
+            format!("{{ tag: \"{variant}\", {names} }}")
+        };
+        out.push_str(&format!(
+            " const {variant} = <{type_param},>({params}): {name}<{type_param}> => {object};"
+        ));
+    }
+    out
+}
+
+/// Constructor `match` and structural `match`. The head is a word, but the
+/// class patterns never reach a finished rule, so the form is expanded here.
+fn match_sweetener_match(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    if !token_is(nodes.get(index), "match") {
+        return None;
+    }
+    let subject = group_interior(source, nodes.get(index + 1)?, Delimiter::Paren)?.trim().to_owned();
+    if subject.is_empty() {
+        return None;
+    }
+    let body = nodes.get(index + 2)?;
+    let children = group_children(Some(body), Delimiter::Brace)?;
+    let text = if let Some(arms) = parse_ctor_arms(source, children) {
+        expand_ctor_match(&subject, &arms, &unmatched_name(nodes, index))
+    } else {
+        let (arms, fallback) = parse_structural_arms(source, children)?;
+        expand_structural_match(&subject, &arms, fallback.as_deref())
+    };
+    let next = index + 3;
+    let end = node_end(body);
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end,
+        next,
+        text,
+        binds: Vec::new(),
+        method: None,
+    })
+}
+
+struct CtorArm {
+    name: String,
+    binders: Vec<String>,
+    body: String,
+}
+
+fn parse_ctor_arms(source: &str, children: &[Syntax]) -> Option<Vec<CtorArm>> {
+    let mut arms = Vec::new();
+    let mut index = 0;
+    while index < children.len() {
+        index = skip_trivia(children, index);
+        if index >= children.len() {
+            break;
+        }
+        if operator_is(children.get(index), ";") {
+            index += 1;
+            continue;
+        }
+        let name = ident_at(children, index)?;
+        if !name.chars().next()?.is_uppercase() {
+            return None;
+        }
+        let binders = group_children(children.get(index + 1), Delimiter::Paren)?;
+        if !operator_is(children.get(index + 2), "=>") {
+            return None;
+        }
+        let mut end_at = index + 3;
+        while end_at < children.len() && !operator_is(children.get(end_at), ";") {
+            end_at += 1;
+        }
+        if end_at <= index + 3 {
+            return None;
+        }
+        let start = node_start(&children[index + 3]);
+        let end = node_end(&children[end_at - 1]);
+        arms.push(CtorArm {
+            name,
+            binders: idents_in(binders),
+            body: source.get(start..end)?.trim().to_owned(),
+        });
+        index = end_at;
+    }
+    if arms.is_empty() { None } else { Some(arms) }
+}
+
+fn unmatched_name(nodes: &[Syntax], index: usize) -> String {
+    let mut seen = 0usize;
+    let mut cursor = 0;
+    while cursor < index {
+        if token_is(nodes.get(cursor), "match")
+            && group_children(nodes.get(cursor + 1), Delimiter::Paren).is_some()
+        {
+            seen += 1;
+        }
+        cursor += 1;
+    }
+    if seen == 0 {
+        "unmatched".to_owned()
+    } else {
+        format!("unmatched_{seen}")
+    }
+}
+
+fn expand_ctor_match(subject: &str, arms: &[CtorArm], unmatched: &str) -> String {
+    let mut body = String::new();
+    for arm in arms {
+        body.push_str(&format!("if (this.value.tag === \"{}\") {{ ", arm.name));
+        if !arm.binders.is_empty() {
+            body.push_str(&format!(
+                "const {{ {} }} = this.value; ",
+                arm.binders.join(", ")
+            ));
+        }
+        body.push_str(&format!("return {}; }} ", arm.body));
+    }
+    body.push_str(&format!(
+        "const {unmatched}: never = this.value; throw new globalThis.Error(\"No match for \" + globalThis.JSON.stringify({unmatched}),);" 
+    ));
+    format!("({{ value: {subject}, run() {{ {body} }}, }}).run()")
+}
+
+struct StructArm {
+    pattern: MatchPat,
+    guard: Option<String>,
+    body: String,
+}
+
+enum MatchPat {
+    Wild,
+    Bind(String),
+    Lit(String),
+    Object(Vec<(String, Option<MatchPat>)>),
+    Array(Vec<MatchPat>),
+}
+
+fn parse_structural_arms(source: &str, children: &[Syntax]) -> Option<(Vec<StructArm>, Option<String>)> {
+    let parts = split_top_commas(children);
+    if parts.is_empty() {
+        return None;
+    }
+    let mut arms = Vec::new();
+    let mut fallback = None;
+    for part in parts {
+        let part = trim_trivia(part);
+        if part.is_empty() {
+            continue;
+        }
+        let arrow = part.iter().position(|node| operator_is(Some(node), "=>"))?;
+        let mut head = &part[..arrow];
+        let body_nodes = trim_trivia(&part[arrow + 1..]);
+        if body_nodes.is_empty() {
+            return None;
+        }
+        let body = source
+            .get(node_start(&body_nodes[0])..node_end(&body_nodes[body_nodes.len() - 1]))?
+            .trim()
+            .to_owned();
+        let mut guard = None;
+        if head.len() >= 2
+            && token_is(head.get(head.len() - 2), "if")
+            && group_children(head.last(), Delimiter::Paren).is_some()
+        {
+            guard = group_interior(source, &head[head.len() - 1], Delimiter::Paren)
+                .map(|text| text.trim().to_owned());
+            head = &head[..head.len() - 2];
+        }
+        head = trim_trivia(head);
+        if head.len() == 1 && token_is(Some(&head[0]), "_") && guard.is_none() {
+            fallback = Some(body);
+            continue;
+        }
+        arms.push(StructArm {
+            pattern: parse_match_pat(source, head)?,
+            guard,
+            body,
+        });
+    }
+    if arms.is_empty() && fallback.is_none() {
+        None
+    } else {
+        Some((arms, fallback))
+    }
+}
+
+fn parse_match_pat(source: &str, nodes: &[Syntax]) -> Option<MatchPat> {
+    let nodes = trim_trivia(nodes);
+    if nodes.is_empty() {
+        return None;
+    }
+    if nodes.len() == 1 {
+        return match &nodes[0] {
+            Syntax::Token { raw, .. } if raw == "_" => Some(MatchPat::Wild),
+            Syntax::Token { raw, .. } if is_word(raw) && raw.chars().next().is_some_and(|ch| ch.is_lowercase()) => {
+                Some(MatchPat::Bind(raw.clone()))
+            }
+            Syntax::Group { delimiter: Delimiter::Brace, children, .. } => {
+                Some(MatchPat::Object(parse_match_fields(source, children)?))
+            }
+            Syntax::Group { delimiter: Delimiter::Bracket, children, .. } => {
+                let mut items = Vec::new();
+                for part in split_top_commas(children) {
+                    items.push(parse_match_pat(source, part)?);
+                }
+                Some(MatchPat::Array(items))
+            }
+            _ => Some(MatchPat::Lit(slice_nodes(source, nodes)?)),
+        };
+    }
+    Some(MatchPat::Lit(slice_nodes(source, nodes)?))
+}
+
+fn parse_match_fields(source: &str, children: &[Syntax]) -> Option<Vec<(String, Option<MatchPat>)>> {
+    let mut fields = Vec::new();
+    for part in split_top_commas(children) {
+        let part = trim_trivia(part);
+        if part.is_empty() {
+            continue;
+        }
+        let name = ident_at(part, 0)?;
+        if part.len() == 1 {
+            fields.push((name, None));
+            continue;
+        }
+        if !operator_is(part.get(1), ":") {
+            return None;
+        }
+        fields.push((name, Some(parse_match_pat(source, &part[2..])?)));
+    }
+    Some(fields)
+}
+
+fn expand_structural_match(subject: &str, arms: &[StructArm], fallback: Option<&str>) -> String {
+    let mut body = String::new();
+    for arm in arms {
+        let cond = match_test("matched", &arm.pattern);
+        let binds = match_bind("matched", &arm.pattern);
+        body.push_str(&format!("if ({cond}) {{ ; {binds} "));
+        if let Some(guard) = &arm.guard {
+            body.push_str(&format!("if ({guard}) {{ return {}; }} }} ", arm.body));
+        } else {
+            body.push_str(&format!("return {}; }} ", arm.body));
+        }
+    }
+    if let Some(fallback) = fallback {
+        body.push_str(&format!("return {fallback};"));
+    } else {
+        body.push_str(
+            "throw new globalThis.Error(`no arm matched ${globalThis.JSON.stringify(matched)}`);",
+        );
+    }
+    format!("((matched) => {{ {body} }})({subject})")
+}
+
+fn match_test(subject: &str, pattern: &MatchPat) -> String {
+    match pattern {
+        MatchPat::Wild | MatchPat::Bind(_) => "true".to_owned(),
+        MatchPat::Lit(text) => format!("({subject}) === {text}"),
+        MatchPat::Object(fields) => {
+            let mut out = format!("typeof {subject} === \"object\" && {subject} !== null");
+            for (name, pattern) in fields {
+                let Some(pattern) = pattern else {
+                    continue;
+                };
+                let child = format!("({subject})[\"{name}\"]");
+                out.push_str(" && ");
+                out.push_str(&match_test(&child, pattern));
+            }
+            out
+        }
+        MatchPat::Array(items) => {
+            let mut out = format!(
+                "globalThis.Array.isArray({subject}) && ({subject}).length === {}",
+                items.len()
+            );
+            for (index, item) in items.iter().enumerate() {
+                let child = format!("({subject})[{index}]");
+                out.push_str(" && ");
+                out.push_str(&match_test(&child, item));
+            }
+            out
+        }
+    }
+}
+
+fn match_bind(subject: &str, pattern: &MatchPat) -> String {
+    match pattern {
+        MatchPat::Wild | MatchPat::Lit(_) => String::new(),
+        MatchPat::Bind(name) => format!("const {name} = {subject};"),
+        MatchPat::Object(fields) => {
+            let mut out = String::new();
+            for (name, pattern) in fields {
+                let child = format!("({subject})[\"{name}\"]");
+                if let Some(pattern) = pattern {
+                    out.push_str(&match_bind(&child, pattern));
+                } else {
+                    out.push_str(&format!("const {name} = {child};"));
+                }
+            }
+            out
+        }
+        MatchPat::Array(items) => {
+            let mut out = String::new();
+            for (index, item) in items.iter().enumerate() {
+                let child = format!("({subject})[{index}]");
+                out.push_str(&match_bind(&child, item));
+            }
+            out
+        }
+    }
+}
+
+fn split_top_commas(nodes: &[Syntax]) -> Vec<&[Syntax]> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (index, node) in nodes.iter().enumerate() {
+        if operator_is(Some(node), ",") {
+            parts.push(&nodes[start..index]);
+            start = index + 1;
+        }
+    }
+    if start < nodes.len() {
+        parts.push(&nodes[start..]);
+    }
+    parts
+}
+
+fn trim_trivia(nodes: &[Syntax]) -> &[Syntax] {
+    let mut start = 0;
+    let mut end = nodes.len();
+    while start < end && matches!(nodes.get(start), Some(Syntax::Comment { .. })) {
+        start += 1;
+    }
+    while end > start && matches!(nodes.get(end - 1), Some(Syntax::Comment { .. })) {
+        end -= 1;
+    }
+    &nodes[start..end]
+}
+
+fn slice_nodes(source: &str, nodes: &[Syntax]) -> Option<String> {
+    let nodes = trim_trivia(nodes);
+    let first = nodes.first()?;
+    let last = nodes.last()?;
+    Some(source.get(node_start(first)..node_end(last))?.trim().to_owned())
+}
+
+fn idents_in(nodes: &[Syntax]) -> Vec<String> {
+    nodes
+        .iter()
+        .filter_map(|node| match node {
+            Syntax::Token { raw, .. } if is_word(raw) => Some(raw.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ident_at(nodes: &[Syntax], index: usize) -> Option<String> {
+    match nodes.get(index) {
+        Some(Syntax::Token { raw, .. }) if is_word(raw) => Some(raw.clone()),
+        _ => None,
+    }
+}
+
+fn is_word(raw: &str) -> bool {
+    let mut chars = raw.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {
+            chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        }
+        _ => false,
+    }
+}
+
+fn skip_trivia(nodes: &[Syntax], mut index: usize) -> usize {
+    while matches!(nodes.get(index), Some(Syntax::Comment { .. })) {
+        index += 1;
+    }
+    index
 }
 
 /// A replacement the expander can emit without reading a template.
@@ -155,6 +724,9 @@ pub struct MethodBinding {
     pub segments: Vec<Vec<(String, String)>>,
     pub result: String,
     pub body: String,
+    /// Grammar requests, when this is `method query { request ... }` rather
+    /// than a curried segment method.
+    pub requests: Vec<(String, String)>,
 }
 
 /// The nested `syntax $name:expr` produced by `state`, with every directive
@@ -647,6 +1219,241 @@ pub struct JsxControl<'a> {
     pub at: usize,
 }
 
+/// `query(students) Where(adult) OrderBy(name) Select(name)` against the
+/// request grammar stored on the method. The first request whose keywords
+/// appear, in order, wins. Missing optional groups are empty.
+fn match_query_call(
+    source: &str,
+    nodes: &[Syntax],
+    index: usize,
+    methods: &[MethodBinding],
+) -> Option<FixtureRewrite> {
+    let name = token_raw(nodes.get(index))?;
+    let method = methods.iter().find(|method| method.head == name && !method.requests.is_empty())?;
+    let mut best: Option<(String, usize)> = None;
+    for (pattern, expansion) in &method.requests {
+        if let Some((text, next)) = apply_query(source, nodes, index, pattern, expansion) {
+            let replace = best.as_ref().is_none_or(|(_, end)| next > *end);
+            if replace {
+                best = Some((text, next));
+            }
+        }
+    }
+    let (text, next) = best?;
+    let end = node_end(nodes.get(next.saturating_sub(1)).unwrap_or(&nodes[index]));
+    let _ = (source, end);
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end,
+        next,
+        text,
+        binds: Vec::new(),
+        method: None,
+    })
+}
+
+fn apply_query(
+    source: &str,
+    nodes: &[Syntax],
+    index: usize,
+    pattern: &str,
+    expansion: &str,
+) -> Option<(String, usize)> {
+    let read = sweetener_reader::read_syntax(pattern);
+    let mut captures: Vec<(String, Vec<String>)> = Vec::new();
+    let next = match_query_pats(source, nodes, index, &read.children, &mut captures)?;
+    let text = fill_query(expansion, &captures);
+    Some((text, next))
+}
+
+fn match_query_pats(
+    source: &str,
+    nodes: &[Syntax],
+    mut cursor: usize,
+    pattern: &[Syntax],
+    captures: &mut Vec<(String, Vec<String>)>,
+) -> Option<usize> {
+    let mut index = 0;
+    while index < pattern.len() {
+        if operator_is(pattern.get(index), "$") && token_is(pattern.get(index + 1), "(") {
+            return None;
+        }
+        // `$(Where($filter:expr))+` or `$(...)?` or `$(...)*`
+        if operator_is(pattern.get(index), "$")
+            && group_children(pattern.get(index + 1), Delimiter::Paren).is_some()
+        {
+            let inner = group_children(pattern.get(index + 1), Delimiter::Paren)?;
+            let mut quant = index + 2;
+            if operator_is(pattern.get(quant), ",") || operator_is(pattern.get(quant), ";") {
+                quant += 1;
+            }
+            let kind = operator_raw(pattern.get(quant)?).unwrap_or("");
+            if kind != "+" && kind != "*" && kind != "?" {
+                return None;
+            }
+            let mut times = 0usize;
+            loop {
+                let saved = captures.len();
+                let saved_cursor = cursor;
+                if let Some(next) = match_query_pats(source, nodes, cursor, inner, captures) {
+                    cursor = next;
+                    times += 1;
+                    if kind == "?" {
+                        break;
+                    }
+                    continue;
+                }
+                captures.truncate(saved);
+                cursor = saved_cursor;
+                break;
+            }
+            if kind == "+" && times == 0 {
+                return None;
+            }
+            index = quant + 1;
+            continue;
+        }
+        if operator_is(pattern.get(index), "$") {
+            let hole = token_raw(pattern.get(index + 1))?;
+            let (text, next) = take_query_hole(source, nodes, cursor)?;
+            push_capture(captures, &hole, text);
+            cursor = next;
+            index += 2;
+            if operator_is(pattern.get(index), ":") {
+                index += 2;
+            }
+            continue;
+        }
+        if let Some(children) = group_children(pattern.get(index), Delimiter::Paren) {
+            let group = group_children(nodes.get(cursor), Delimiter::Paren)?;
+            match_query_pats(source, group, 0, children, captures)?;
+            cursor += 1;
+            index += 1;
+            continue;
+        }
+        let expected = token_raw(pattern.get(index)).or_else(|| pattern.get(index).and_then(|node| operator_raw(node).map(str::to_owned)))?;
+        if expected.chars().all(|ch| ch.is_whitespace()) {
+            index += 1;
+            continue;
+        }
+        let found = token_raw(nodes.get(cursor)).or_else(|| nodes.get(cursor).and_then(operator_raw).map(str::to_owned))?;
+        if found != expected {
+            return None;
+        }
+        cursor += 1;
+        index += 1;
+    }
+    Some(cursor)
+}
+
+fn take_query_hole(source: &str, nodes: &[Syntax], index: usize) -> Option<(String, usize)> {
+    let node = nodes.get(index)?;
+    if group_children(Some(node), Delimiter::Paren).is_some()
+        && index > 0
+        && token_raw(nodes.get(index - 1)).is_some()
+    {
+        // A hole is an expression, not the argument list of the next keyword.
+    }
+    if let Some(text) = source.get(node_start(node)..node_end(node)) {
+        // `adult` or `(student) => ...`. An arrow continues through the body.
+        if nodes.get(index + 1).and_then(operator_raw) == Some("=>") {
+            let mut end = index + 2;
+            // `=> student.age` is the arrow and its body, not just `student`.
+            while end < nodes.len() && end < index + 8 {
+                if operator_is(nodes.get(end), ")")
+                    || operator_is(nodes.get(end), ";")
+                    || operator_is(nodes.get(end), ",")
+                {
+                    break;
+                }
+                if token_raw(nodes.get(end)).is_some_and(|word| {
+                    word.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+                        || matches!(word.as_str(), "const" | "let" | "function" | "export" | "return" | "class")
+                }) {
+                    break;
+                }
+                end += 1;
+            }
+            let text = source.get(node_start(node)..node_end(&nodes[end - 1]))?;
+            return Some((text.trim().to_owned(), end));
+        }
+        return Some((text.trim().to_owned(), index + 1));
+    }
+    None
+}
+
+fn push_capture(captures: &mut Vec<(String, Vec<String>)>, name: &str, text: String) {
+    if let Some((_, values)) = captures.iter_mut().find(|(have, _)| have == name) {
+        values.push(text);
+    } else {
+        captures.push((name.to_owned(), vec![text]));
+    }
+}
+
+fn strip_line_comments(text: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+fn fill_query(expansion: &str, captures: &[(String, Vec<String>)]) -> String {
+    let mut out = String::new();
+    let bytes = expansion.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'(') {
+            if let Some(end) = expansion[index + 2..].find(")") {
+                let inner = &expansion[index + 2..index + 2 + end];
+                let hole = inner.trim().trim_start_matches('$');
+                let hole = hole.split(':').next().unwrap_or(hole).trim();
+                let values = captures
+                    .iter()
+                    .find(|(name, _)| name == hole)
+                    .map(|(_, values)| values.as_slice())
+                    .unwrap_or(&[]);
+                let rest = &expansion[index + 2 + end + 1..];
+                let sep = if rest.starts_with(',') { ", " } else { "" };
+                out.push_str(&values.join(if sep.is_empty() { "" } else { sep }));
+                index = index + 2 + end + 1;
+                if rest.starts_with(',') {
+                    index += 1;
+                }
+                if bytes.get(index) == Some(&b'*') || bytes.get(index) == Some(&b'+') {
+                    index += 1;
+                }
+                continue;
+            }
+        }
+        if bytes[index] == b'$' {
+            let name: String = expansion[index + 1..]
+                .chars()
+                .take_while(|ch| *ch == '_' || ch.is_ascii_alphanumeric())
+                .collect();
+            if !name.is_empty() {
+                if let Some((_, values)) = captures.iter().find(|(have, _)| have == &name) {
+                    if let Some(value) = values.first() {
+                        out.push_str(value);
+                        index += 1 + name.len();
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(bytes[index] as char);
+        index += 1;
+    }
+    out
+}
+
 fn match_method_call(
     source: &str,
     nodes: &[Syntax],
@@ -655,6 +1462,11 @@ fn match_method_call(
 ) -> Option<FixtureRewrite> {
     let name = token_raw(nodes.get(index))?;
     let method = methods.iter().find(|method| method.head == name)?;
+    // A grammar method (`method query { request ... }`) is expanded by the
+    // `syntax` it defines, not by flattening segments it does not have.
+    if method.segments.is_empty() {
+        return None;
+    }
     let mut groups = Vec::new();
     let mut cursor = index + 1;
     if group_children(nodes.get(cursor), Delimiter::Paren).is_none() {
@@ -783,7 +1595,132 @@ fn leak_str(text: String) -> &'static str {
     Box::leak(text.into_boxed_str())
 }
 
+/// `function(value: number) { const doubled = value * 2; doubled + 1 }`
+/// keeps the statements and returns the final expression. A statement that
+/// is already `return` is left as the result, not `return return`.
+fn match_implicit_function(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let params = group_interior(source, nodes.get(index + 1)?, Delimiter::Paren)?.trim();
+    let body = group_interior(source, nodes.get(index + 2)?, Delimiter::Brace)?;
+    let (statements, result) = split_function_body(body)?;
+    let mut inner = String::new();
+    for statement in &statements {
+        inner.push_str(statement);
+        if !statement.trim_end().ends_with(';') {
+            inner.push(';');
+        }
+        inner.push(' ');
+    }
+    let result = result.trim().trim_end_matches(';').trim();
+    if result.starts_with("return") {
+        inner.push_str(result);
+        if !result.ends_with(';') {
+            inner.push(';');
+        }
+    } else if !result.is_empty() {
+        inner.push_str("return ");
+        inner.push_str(result);
+        inner.push(';');
+    }
+    let mut end = node_end(nodes.get(index + 2)?);
+    let mut next = index + 3;
+    if operator_is(nodes.get(index + 3), ";") {
+        end = node_end(&nodes[index + 3]);
+        next = index + 4;
+    }
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end,
+        next,
+        text: format!("function({params}) {{ {inner} }};"),
+        binds: Vec::new(),
+        method: None,
+    })
+}
+
+fn split_function_body(body: &str) -> Option<(Vec<String>, String)> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    for ch in body.chars() {
+        match ch {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => depth -= 1,
+            ';' if depth == 0 => {
+                let statement = current.trim().to_owned();
+                if !statement.is_empty() {
+                    statements.push(statement);
+                }
+                current.clear();
+                continue;
+            }
+            _ => {}
+        }
+        current.push(ch);
+    }
+    let tail = current.trim().to_owned();
+    if tail.is_empty() {
+        let result = statements.pop()?;
+        return Some((statements, result));
+    }
+    Some((statements, tail))
+}
+
+/// `dbg(expr)` prints the source and returns the value. The binder is
+/// `inspected`. When the user file already binds that spelling, the copy
+/// inside the template string is the same suffixed name as the parameter.
+/// The generic rename stops at `JSON.stringify(inspected)` and leaves the
+/// unsuffixed spelling there.
+fn match_dbg_call(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    if !token_is(nodes.get(index), "dbg") {
+        return None;
+    }
+    let args = group_interior(source, nodes.get(index + 1)?, Delimiter::Paren)?.trim();
+    if args.is_empty() {
+        return None;
+    }
+    let name = if file_binds(source, "inspected") {
+        "inspected_1"
+    } else {
+        "inspected"
+    };
+    let quoted = string_source(args);
+    let text = format!(
+        "(({name}) => {{ globalThis.console.log(`${{{quoted}}} = ${{globalThis.JSON.stringify({name})}}`); return {name}; }})({args})"
+    );
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end: node_end(&nodes[index + 1]),
+        next: index + 2,
+        text,
+        binds: Vec::new(),
+        method: None,
+    })
+}
+
+fn file_binds(source: &str, name: &str) -> bool {
+    source.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').any(|word| {
+        word == name
+    }) && source.contains(&format!("const {name}"))
+}
+
+fn string_source(text: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn match_effect_item(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    if token_is(nodes.get(index), "function") {
+        return match_implicit_function(source, nodes, index);
+    }
     if !token_is(nodes.get(index), "effect") {
         return None;
     }
@@ -823,11 +1760,15 @@ fn match_signal_use(
     } else {
         value_end
     };
+    let mut text = apply_signal_use(&name, &signal, Some(&op), Some(value.trim()));
+    if operator_is(nodes.get(next.saturating_sub(1)), ";") && !text.ends_with(';') {
+        text.push(';');
+    }
     Some(FixtureRewrite {
         start: node_start(&nodes[index]),
         end,
         next,
-        text: apply_signal_use(&name, &signal, Some(&op), Some(value.trim())),
+        text,
         binds: Vec::new(),
         method: None,
     })
@@ -1045,8 +1986,19 @@ fn take_value<'a>(source: &'a str, nodes: &[Syntax], index: usize) -> Option<(&'
 }
 
 fn method_item_end(nodes: &[Syntax], index: usize) -> usize {
-    let mut cursor = index;
-    while cursor < nodes.len() && cursor < index + 48 {
+    // The method item ends at its own brace: `method head(...) seg(): T { }`
+    // or `method head { request ... }`. A later `{` belongs to the next item.
+    let mut cursor = index + 1;
+    while cursor < nodes.len() && cursor < index + 80 {
+        if token_is(nodes.get(cursor), "method")
+            || token_is(nodes.get(cursor), "const")
+            || token_is(nodes.get(cursor), "let")
+            || token_is(nodes.get(cursor), "function")
+            || token_is(nodes.get(cursor), "export")
+            || token_is(nodes.get(cursor), "class")
+        {
+            break;
+        }
         if matches!(nodes.get(cursor), Some(Syntax::Group { delimiter: Delimiter::Brace, close: Some(_), .. })) {
             let end = node_end(&nodes[cursor]);
             if operator_is(nodes.get(cursor + 1), ";") {

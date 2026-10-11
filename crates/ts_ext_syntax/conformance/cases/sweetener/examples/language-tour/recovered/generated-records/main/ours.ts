@@ -3,27 +3,27 @@
 // One line each. The class, its fields, its constructor, and a printer are
 // all generated — and TypeScript type-checks the result as ordinary code.
 export class Point {
-      readonly x.name: x.kind;
+      readonly x: number;readonly y: number;
 
-      constructor(x.name: x.kind) {
-        this.x.name = x.name;
+      constructor(x: number, y: number) {
+        this.x = x;this.y = y;
       }
 
       // Generated alongside the class, from the same declaration.
       toString(): string {
-        return `${"Point"}(${[$(String(this.x.name)),*].join(", ")})`;
+        return `${"Point"}(${[String(this.x), String(this.y)].join(", ")})`;
       }
     }
 export class Named {
-      readonly label.name: label.kind;
+      readonly label: string;readonly at: Point;
 
-      constructor(label.name: label.kind) {
-        this.label.name = label.name;
+      constructor(label: string, at: Point) {
+        this.label = label;this.at = at;
       }
 
       // Generated alongside the class, from the same declaration.
       toString(): string {
-        return `${"Named"}(${[$(String(this.label.name)),*].join(", ")})`;
+        return `${"Named"}(${[String(this.label), String(this.at)].join(", ")})`;
       }
     }
 

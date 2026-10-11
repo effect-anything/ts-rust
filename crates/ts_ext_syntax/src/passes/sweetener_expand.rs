@@ -312,7 +312,13 @@ impl<'a> Printer<'a> {
                     replacement = apply_plan(&replacement, plan);
                 }
                 replacement = strip_already_printed(self.source, head_span.start as usize, &replacement);
-                let expanded = self.expand_replacement(&replacement);
+                // `#core` is ordinary TypeScript. Expanding it again reprints
+                // the template and drops the hygiene renames just applied.
+                let expanded = if template_is_core(&rule.template) {
+                    replacement
+                } else {
+                    self.expand_replacement(&replacement)
+                };
                 self.printing_core = was_core;
                 self.emit(head_span.start, u32_at(matched.end), &expanded, SegmentKind::Atom);
                 self.last_original = matched.end;
@@ -339,7 +345,6 @@ impl<'a> Printer<'a> {
                     let mut found = HashMap::new();
                     collect_macros(&rendered, &read.children, &mut found);
                     self.classes.extend(collect_classes(&read.children));
-                    eprintln!("defined from {rendered:?} found={:?}", found.keys().collect::<Vec<_>>());
                     for macro_ in found.into_values() {
                         if let Some(existing) = self.macros.iter_mut().find(|have| have.name == macro_.name) {
                             existing.rules.extend(macro_.rules);
@@ -348,10 +353,13 @@ impl<'a> Printer<'a> {
                         }
                     }
                 }
-                Tpl::Core(inner) | Tpl::Rep { inner, .. } | Tpl::If { then_body: inner, .. } => {
-                    self.define_syntax(inner, captures);
+                Tpl::Core(inner) | Tpl::Rep { inner, .. } => self.define_syntax(inner, captures),
+                Tpl::If { then_body, else_body, .. } => {
+                    self.define_syntax(then_body, captures);
+                    if let Some(else_body) = else_body {
+                        self.define_syntax(else_body, captures);
+                    }
                 }
-                Tpl::If { else_body: Some(inner), .. } => self.define_syntax(inner, captures),
                 _ => {}
             }
         }
@@ -471,6 +479,7 @@ impl<'a> Printer<'a> {
         // spelling when nothing in the user file has it.
         let mut plan: Vec<(String, String)> = Vec::new();
         let mut used = self.user_names.clone();
+
         let mut seen = HashMap::<String, usize>::new();
         for name in introduced {
             let nth = seen.get(name).copied().unwrap_or(0);
@@ -486,6 +495,7 @@ impl<'a> Printer<'a> {
             }
             if !used.contains(name) {
                 used.insert(name.clone());
+
                 self.user_names.insert(name.clone());
                 continue;
             }
@@ -2019,16 +2029,19 @@ fn match_pats(
                 // including the newlines between the braces.
                 if sep.is_none() {
                     if let Some(name) = many.iter().find_map(|one| one.first().map(|(name, _)| name.clone())) {
-                        if let (Some(start_node), Some(end_node)) = (
-                            nodes.get(saved_start),
-                            cursor.checked_sub(1).and_then(|at| nodes.get(at)),
-                        ) {
-                            let text = sweetener_reader::slice_range(
-                                source,
-                                node_start(start_node),
-                                node_end(end_node),
-                            );
-                            captures.insert(name, Capture::Text(text.to_owned()));
+                        let class_rows = many.iter().all(|one| matches!(one.first(), Some((_, Capture::Record { .. }))));
+                        if !class_rows {
+                            if let (Some(start_node), Some(end_node)) = (
+                                nodes.get(saved_start),
+                                cursor.checked_sub(1).and_then(|at| nodes.get(at)),
+                            ) {
+                                let text = sweetener_reader::slice_range(
+                                    source,
+                                    node_start(start_node),
+                                    node_end(end_node),
+                                );
+                                captures.insert(name, Capture::Text(text.to_owned()));
+                            }
                         }
                     }
                 }
@@ -2427,7 +2440,7 @@ fn apply_plan_nodes(
     while index < nodes.len() {
         match &nodes[index] {
             Syntax::Token { span, raw } if !dotted && is_ident_text(raw) => {
-                let binder = is_binder_at(nodes, index);
+                let binder = is_binder_at(nodes, index) || in_type_params(nodes, index);
                 if let Some(printed) = planned(raw, binder, plan, seen) {
                     push_until(source, out, cursor, span.start as usize);
                     out.push_str(&printed);
@@ -2447,6 +2460,16 @@ fn apply_plan_nodes(
             Syntax::Group { children, .. } => {
                 if let Some(_params) = arrow_params(nodes, index) {
                     if let Syntax::Group { span, children, .. } = &nodes[index] {
+                        // `map<A, B>(a: A)` — the type parameters are binders
+                        // of this arrow. Count them before the parameter list
+                        // or `a` takes `A`'s suffix. Do not rewrite here; the
+                        // prefix is still copied by the caller.
+                        if let Some(params) = nodes[..index].iter().position(|node| operator_is(Some(node), "<")).and_then(|angle| type_param_names(nodes, angle)) {
+                            for name in params {
+                                let n = seen.get(&name).copied().unwrap_or(0);
+                                seen.insert(name, n + 1);
+                            }
+                        }
                         push_until(source, out, cursor, span.start as usize);
                         let mut local_cursor = span.start as usize;
                         apply_arrow_params(source, children, plan, seen, out, &mut local_cursor);
@@ -2518,14 +2541,18 @@ fn apply_arrow_params(
     while index < children.len() {
         if let Syntax::Token { span, raw } = &children[index] {
             let after_colon = index > 0 && operator_is(children.get(index - 1), ":");
-            if is_ident_text(raw) && !after_colon && !is_type_name(raw) {
-                if let Some(printed) = planned(raw, true, plan, seen) {
+            if is_ident_text(raw) && !is_type_name(raw) {
+                // A name after `:` is a type reference, not a new binder.
+                let binder = !after_colon;
+                if let Some(printed) = planned(raw, binder, plan, seen) {
                     push_until(source, out, cursor, span.start as usize);
                     out.push_str(&printed);
                     *cursor = span.end as usize;
                 }
-                let n = seen.get(raw).copied().unwrap_or(0);
-                seen.insert(raw.clone(), n + 1);
+                if binder {
+                    let n = seen.get(raw).copied().unwrap_or(0);
+                    seen.insert(raw.clone(), n + 1);
+                }
             }
         }
         index += 1;
@@ -2620,7 +2647,13 @@ fn skip_comments(nodes: &[Syntax], cursor: &mut usize) {
 }
 
 fn push_until(source: &str, out: &mut String, cursor: &mut usize, until: usize) {
-    if until >= *cursor && until <= source.len() {
+    if until < *cursor {
+        // A nested walk started past this token. The caller is about to
+        // write the token itself, so do not also copy it from source.
+        *cursor = until;
+        return;
+    }
+    if until <= source.len() {
         out.push_str(&source[*cursor..until]);
         *cursor = until;
     }
@@ -2837,10 +2870,15 @@ fn unknown_directives(template: &[Tpl]) -> Vec<(String, usize)> {
     for part in template {
         match part {
             Tpl::Unknown { name, at } => found.push((name.clone(), *at)),
-            Tpl::Core(inner) | Tpl::Rep { inner, .. } | Tpl::Define(inner) | Tpl::If { then_body: inner, .. } => {
+            Tpl::Core(inner) | Tpl::Rep { inner, .. } | Tpl::Define(inner) => {
                 found.extend(unknown_directives(inner));
             }
-            Tpl::If { else_body: Some(inner), .. } => found.extend(unknown_directives(inner)),
+            Tpl::If { then_body, else_body, .. } => {
+                found.extend(unknown_directives(then_body));
+                if let Some(else_body) = else_body {
+                    found.extend(unknown_directives(else_body));
+                }
+            }
             _ => {}
         }
     }
@@ -2865,7 +2903,10 @@ fn introduced_of(source: &str, nodes: &[Syntax]) -> Vec<String> {
 fn introduced_names(declared: &[String], rendered: &str, captures: &HashMap<String, Capture>) -> Vec<String> {
     let read = sweetener_reader::read_syntax(rendered);
     let mut names = introduced_of(rendered, &read.children);
-    if names.is_empty() {
+    // An empty replacement introduced nothing. Falling back to the template
+    // source would count binders inside `#syntax`, which belong to the
+    // generated macro, not this expansion.
+    if names.is_empty() && !rendered.trim().is_empty() {
         names.extend(declared.iter().cloned());
     }
     // A capture such as `$name` is the user's spelling. Renaming `Seconds`
@@ -2914,6 +2955,39 @@ fn collect_introduced_source(source: &str, nodes: &[Syntax], names: &mut Vec<Str
         }
         index += 1;
     }
+}
+
+/// True when `index` is an identifier inside the first type-parameter
+/// list, `map<A, B>`, not a later argument such as `F<A>`.
+fn in_type_params(nodes: &[Syntax], index: usize) -> bool {
+    let mut depth = 0i32;
+    let mut open = None;
+    for (at, node) in nodes.iter().enumerate().take(index + 1) {
+        if operator_is(Some(node), "<") {
+            if depth == 0 {
+                open = Some(at);
+            }
+            depth += 1;
+        } else if operator_is(Some(node), ">") && depth > 0 {
+            depth -= 1;
+            if depth == 0 {
+                open = None;
+            }
+        }
+    }
+    let Some(open) = open else {
+        return false;
+    };
+    if depth == 0 || open == 0 {
+        return false;
+    }
+    matches!(nodes.get(open - 1), Some(Syntax::Token { raw, .. }) if is_ident_text(raw))
+        && type_param_names(nodes, open).is_some_and(|params| {
+            nodes.get(index).and_then(|node| match node {
+                Syntax::Token { raw, .. } => Some(raw),
+                _ => None,
+            }).is_some_and(|raw| params.iter().any(|name| name == raw))
+        })
 }
 
 /// `type F<Inner>` and `map<A, B>` introduce the names between `<` and `>`.
@@ -3110,8 +3184,17 @@ fn render(
                         }
                     }
                     let mut scoped = captures.clone();
+                    let mut texts = Vec::new();
                     for (name, value) in row {
-                        scoped.insert(name.clone(), value.clone());
+                        if matches!(value, Capture::Text(_)) {
+                            texts.push((name.clone(), value.clone()));
+                        } else {
+                            scoped.insert(name.clone(), value.clone());
+                        }
+                    }
+                    // Field text wins over a class record stored on the same path.
+                    for (name, value) in texts {
+                        scoped.insert(name, value);
                     }
                     render(out, inner, &scoped, classes);
                 }
@@ -3237,13 +3320,26 @@ fn substitute_template_literal(raw: &str, captures: &HashMap<String, Capture>) -
                 }
             }
         }
+        if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'(') {
+            if let Some(end) = matching_paren(&raw[index + 2..]) {
+                let body = &raw[index + 2..index + 2 + end];
+                let after = index + 2 + end + 1;
+                let (sep, quant_end) = template_rep_tail(&raw[after..]);
+                let repeated = render_text_rep(body, sep.as_deref(), captures);
+                if !repeated.is_empty() || quant_end > 0 {
+                    out.push_str(&repeated);
+                    index = after + quant_end;
+                    continue;
+                }
+            }
+        }
         if bytes[index] == b'$' {
             let rest = &raw[index + 1..];
             let name: String = rest
                 .chars()
-                .take_while(|ch| *ch == '_' || ch.is_ascii_alphanumeric())
+                .take_while(|ch| *ch == '_' || ch.is_ascii_alphanumeric() || *ch == '.')
                 .collect();
-            if !name.is_empty() {
+            if !name.is_empty() && name != "." {
                 if let Some(value) = capture_text(captures, &name) {
                     out.push_str(value.trim());
                     index += 1 + name.len();
@@ -3253,6 +3349,41 @@ fn substitute_template_literal(raw: &str, captures: &HashMap<String, Capture>) -
         }
         out.push(bytes[index] as char);
         index += 1;
+    }
+    out
+}
+
+/// `,$` or `*` after `$(...)` inside a template literal.
+fn template_rep_tail(after: &str) -> (Option<String>, usize) {
+    let bytes = after.as_bytes();
+    if bytes.first() == Some(&b',') && bytes.get(1) == Some(&b'*') {
+        return (Some(",".to_owned()), 2);
+    }
+    if bytes.first() == Some(&b'*') || bytes.first() == Some(&b'+') {
+        return (None, 1);
+    }
+    (None, 0)
+}
+
+fn render_text_rep(body: &str, sep: Option<&str>, captures: &HashMap<String, Capture>) -> String {
+    let read = sweetener_reader::read_syntax(body);
+    let inner = tpls_from(&read.children, String::new());
+    let rows = rep_rows(&inner, captures);
+    let mut out = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            if let Some(sep) = sep {
+                out.push_str(sep);
+                if sep == "," {
+                    out.push(' ');
+                }
+            }
+        }
+        let mut scoped = captures.clone();
+        for (name, value) in row {
+            scoped.insert(name.clone(), value.clone());
+        }
+        out.push_str(&substitute_template_literal(body, &scoped));
     }
     out
 }
@@ -3333,13 +3464,32 @@ fn string_literal(text: &str) -> String {
 }
 
 fn capture_text<'a>(captures: &'a HashMap<String, Capture>, name: &str) -> Option<&'a str> {
-    capture_at(captures, name).and_then(capture_spelling)
+    let value = capture_at(captures, name)?;
+    if name.contains('.') {
+        if let Capture::Text(text) = value {
+            return Some(text.as_str());
+        }
+        if let Capture::Record { fields, .. } = value {
+            if let Some(leaf) = name.rsplit('.').next() {
+                if let Some(field) = fields.get(leaf) {
+                    return capture_spelling(field);
+                }
+            }
+        }
+    }
+    capture_spelling(value)
 }
 
 fn capture_spelling(value: &Capture) -> Option<&str> {
     match value {
         Capture::Text(text) => Some(text.as_str()),
-        Capture::Record { text, .. } => Some(text.as_str()),
+        Capture::Record { fields, text } => {
+            // A field path that stopped on the record wants the field, not
+            // the whole form. Callers that want the form use the text only
+            // when no field was asked. This branch is the form itself.
+            let _ = fields;
+            Some(text.as_str())
+        }
         Capture::Many(rows) => rows.first().and_then(|row| {
             row.iter().find_map(|(_, value)| capture_spelling(value))
         }),
@@ -3366,6 +3516,15 @@ fn capture_at<'a>(captures: &'a HashMap<String, Capture>, path: &str) -> Option<
     for field in rest.split('.') {
         value = match value {
             Capture::Record { fields, .. } => fields.get(field)?,
+            Capture::Text(_) => {
+                return captures.get(path).filter(|found| matches!(found, Capture::Text(_))).or(Some(value));
+            }
+            Capture::Record { .. } => {
+                if let Some(Capture::Text(_)) = captures.get(path) {
+                    return captures.get(path);
+                }
+                return Some(value);
+            }
             Capture::Many(rows) => {
                 // `$state.moves.event` while `moves` is still the sequence:
                 // the field lives on each element. Callers that repeat on
@@ -3491,25 +3650,75 @@ fn rep_rows(inner: &[Tpl], captures: &HashMap<String, Capture>) -> Vec<Vec<(Stri
     // A nested field (`$state.moves.event`) repeats on the sequence it
     // walks through, not on the leaf. The longest path that is a sequence
     // is that repetition.
-    let mut best: Option<(&str, &Vec<Vec<(String, Capture)>>)> = None;
+    let mut best: Option<(&str, &Vec<Vec<(String, Capture)>>, usize)> = None;
     for name in &names {
         let mut path = name.as_str();
         while !path.is_empty() {
             if let Some(Capture::Many(rows)) = capture_at(captures, path) {
-                let longer = best.is_none_or(|(_, have)| rows.len() >= have.len() && path.len() >= best.unwrap().0.len());
-                if longer {
-                    best = Some((path, rows));
+                let covers = names.iter().filter(|name| name.starts_with(path) || path.starts_with(name.as_str())).count();
+                let better = best.is_none_or(|(have_path, _have, have_covers)| {
+                    // The longest sequence the template names is the one
+                    // this repetition walks. `$state.moves.event` repeats
+                    // moves, not states, even when both cover the names.
+                    path.len() > have_path.len() || (path.len() == have_path.len() && covers > have_covers)
+                });
+                if better {
+                    best = Some((path, rows, covers));
                 }
                 break;
             }
             path = path.rsplit_once('.').map(|(parent, _)| parent).unwrap_or("");
         }
     }
-    if let Some((path, rows)) = best {
-        return rows
+    if let Some((path, rows, _)) = best {
+        let scoped: Vec<Vec<(String, Capture)>> = rows
             .iter()
             .map(|row| scope_rep_row(path, row))
             .collect();
+        // `$state.moves.event` while repeating `$state` is still a sequence
+        // on each row. Repeat that sequence too, one element per row.
+        if names.iter().any(|name| name.starts_with(path) && name.len() > path.len()) {
+            if let Some(field) = names.iter().find_map(|name| {
+                let rest = name.strip_prefix(path)?.strip_prefix('.')?;
+                rest.split('.').next().map(str::to_owned)
+            }) {
+                let nested_path = names.iter().find_map(|name| {
+                    let rest = name.strip_prefix(path)?.strip_prefix('.')?;
+                    let head = rest.split('.').next()?;
+                    if head == field {
+                        Some(format!("{path}.{field}"))
+                    } else {
+                        None
+                    }
+                }).unwrap_or_else(|| format!("{path}.{field}"));
+                let mut flat = Vec::new();
+                for row in &scoped {
+                    let nested = row.iter().find_map(|(key, value)| {
+                        (key == &nested_path || key == &field).then_some(value)
+                    });
+                    if let Some(Capture::Many(inner)) = nested {
+                        if inner.len() > 1 {
+                            for inner_row in inner {
+                                let mut one = row.clone();
+                                one.extend(scope_rep_row(&nested_path, inner_row));
+                                // The inner row may be keyed by its field.
+                                // Re-scope it under the sequence the template names.
+                                if let Some(rekeyed) = one.iter().find(|(key, value)| key == &nested_path && matches!(value, Capture::Record { .. })).map(|(_, value)| value.clone()) {
+                                    one.extend(scope_rep_row(&nested_path, &[(field.clone(), rekeyed)]));
+                                }
+                                flat.push(one);
+                            }
+                            continue;
+                        }
+                    }
+                    flat.push(row.clone());
+                }
+                if flat.len() > scoped.len() {
+                    return flat;
+                }
+            }
+        }
+        return scoped;
     }
     let Some(name) = names.first() else {
         return Vec::new();
@@ -3523,18 +3732,29 @@ fn rep_rows(inner: &[Tpl], captures: &HashMap<String, Capture>) -> Vec<Vec<(Stri
 
 fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)> {
     let mut scoped = Vec::new();
+    let leaf = path.rsplit('.').next().unwrap_or(path);
     let element = row
         .iter()
-        .find(|(key, _)| key == path.rsplit('.').next().unwrap_or(path) || key == path)
+        .find(|(key, value)| (key == leaf || key == path) && !matches!(value, Capture::Text(_)))
+        .or_else(|| row.iter().find(|(key, _)| key == leaf || key == path))
         .or_else(|| row.first())
         .map(|(_, value)| value.clone());
     if let Some(element) = element {
-        scoped.push((path.to_owned(), element.clone()));
-        // `$state.moves.event` inside a repetition of `$state` reads the
-        // field off this element, not off the whole sequence.
+        // A row keyed by a field (`event`) still holds the class record.
+        // Store that record on the sequence path (`state.moves`) and the
+        // field text on the field path.
+        let record_path = if matches!(element, Capture::Record { .. }) && path.ends_with(&format!(".{leaf}")) {
+            path.trim_end_matches(&format!(".{leaf}")).to_owned()
+        } else {
+            path.to_owned()
+        };
+        scoped.push((record_path.clone(), element.clone()));
         if let Capture::Record { fields, .. } = &element {
             for (field, value) in fields {
-                let mut child = String::from(path);
+                if matches!(value, Capture::Record { .. }) {
+                    continue;
+                }
+                let mut child = record_path.clone();
                 child.push('.');
                 child.push_str(field);
                 scoped.push((child, value.clone()));
@@ -3552,7 +3772,7 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
 fn collect_vars(template: &[Tpl], names: &mut Vec<String>) {
     for part in template {
         match part {
-            Tpl::Var(name) | Tpl::Quote(name) | Tpl::Count(name) | Tpl::If { path: name, .. } => {
+            Tpl::Var(name) | Tpl::Quote(name) | Tpl::Count(name) => {
                 if !names.contains(name) {
                     names.push(name.clone());
                 }
@@ -3563,7 +3783,10 @@ fn collect_vars(template: &[Tpl], names: &mut Vec<String>) {
                 }
             }
             Tpl::Define(inner) | Tpl::Core(inner) | Tpl::Rep { inner, .. } => collect_vars(inner, names),
-            Tpl::If { then_body, else_body, .. } => {
+            Tpl::If { path, then_body, else_body } => {
+                if !names.contains(path) {
+                    names.push(path.clone());
+                }
                 collect_vars(then_body, names);
                 if let Some(else_body) = else_body {
                     collect_vars(else_body, names);

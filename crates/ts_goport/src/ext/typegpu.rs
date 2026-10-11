@@ -373,6 +373,15 @@ fn walk_wraps(node: Node, work: &mut Build, edits: &mut Vec<WrapEdit>) {
             }
         }
     }
+    // A callback that was just wrapped is not walked again. Walking it
+    // would emit a second copy of the same metadata.
+    if is_function_like_declaration(node)
+        && edits.iter().any(|edit| {
+            byte_at(work.code.as_str(), node.pos()).is_some_and(|at| edit.remove_start == at)
+        })
+    {
+        return;
+    }
     if let Some((label, expression)) = labelled(node)
         && contains_resource(expression, work)
         && !already_autonamed(expression)
@@ -608,7 +617,7 @@ fn printed_wrapper(node: Node, work: &mut Build, marked: bool) -> Option<String>
     // an empty arrow must not break before the metadata that follows.
     Some(printed.replace("/*#__PURE__*/
 ($ =>", "/*#__PURE__*/($ =>").replace("/*#__PURE__*/
-($=>", "/*#__PURE__*/($ =>").replace("() =>\n", "() => ").replace("() =>\r\n", "() => ").replace("() => { }", "() => {}").replace("( /*#__PURE__*/", "(/*#__PURE__*/"))
+($=>", "/*#__PURE__*/($ =>").replace("() =>\n", "() => ").replace("() =>\r\n", "() => ").replace("() => { }", "() => {}").replace("( /*#__PURE__*/", "(/*#__PURE__*/").replace(")( /*#__PURE__*/", ")(/*#__PURE__*/").replace("() => ({ ", "() => ({\n"))
 }
 
 fn print_expression(emit: &std::rc::Rc<crate::printer::EmitContext>, node: Node) -> String {
@@ -649,7 +658,7 @@ fn edit_for_autoname(expression: Node, name: &str, work: &mut Build) -> Option<W
     // asks the printer for a file it does not have.
     let inner = work.code[start..end].trim();
     let text = format!(
-        "(/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))({inner}, \"{name}\"))"
+        "/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))({inner}, \"{name}\")"
     );
     Some(WrapEdit {
         remove_start: start,
@@ -695,6 +704,20 @@ fn byte_at(code: &str, pos: i32) -> Option<usize> {
 /// that wrap into the author's span, then reprint the autoname around it.
 fn compose_nested_edits(code: &str, edits: &mut Vec<WrapEdit>) {
     let mut drop = vec![false; edits.len()];
+    // A marked callback is seen both as a call argument and as a function.
+    // Two edits for the same span print the metadata twice.
+    for index in 0..edits.len() {
+        if drop[index] {
+            continue;
+        }
+        for other in index + 1..edits.len() {
+            if edits[index].remove_start == edits[other].remove_start
+                && edits[index].remove_end == edits[other].remove_end
+            {
+                drop[other] = true;
+            }
+        }
+    }
     for outer in 0..edits.len() {
         if !edits[outer].text.contains("__TYPEGPU_AUTONAME__") {
             continue;
@@ -730,12 +753,35 @@ fn compose_nested_edits(code: &str, edits: &mut Vec<WrapEdit>) {
         if cursor < end {
             inner_text.push_str(&code[cursor..end]);
         }
+        // A line break before `.method` drops the autoname from the payload
+        // line. The call through the metadata stays one line.
+        let mut collapsed = String::new();
+        let mut pending_break = false;
+        for ch in inner_text.chars() {
+            if ch == '\n' || (pending_break && ch == ' ') {
+                pending_break = true;
+                continue;
+            }
+            if pending_break {
+                if ch == '.' {
+                    pending_break = false;
+                } else {
+                    collapsed.push('\n');
+                    pending_break = false;
+                }
+            }
+            collapsed.push(ch);
+        }
+        inner_text = collapsed;
         let name = edits[outer]
             .text
             .rsplit("\"")
             .nth(1)
             .unwrap_or("")
             .to_owned();
+        if std::env::var("DBG").is_ok() {
+            eprintln!("INNER {:?}", inner_text);
+        }
         edits[outer].text = format!(
             "/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))({inner_text}, \"{name}\")"
         );
@@ -845,22 +891,31 @@ fn join_export_default(text: &str) -> String {
     // Collapse each `tgpu.*( ... )(/*#__PURE__*/` invocation onto one line.
     let mut flat = String::new();
     let mut rest = text;
-    while let Some(at) = rest.find(")(/*#__PURE__*/") {
+    let marker = ")(/*#__PURE__*/";
+    while let Some(at) = rest.find(marker) {
         let head = &rest[..at];
-        // Only the newline before this call's `)` is layout. The argument
-        // text, including its own parentheses, stays as printed.
         let line = head.rfind('\n').unwrap_or(0);
-        let close_line = head[line..].trim();
-        let above = head[..line].trim_end();
-        if close_line == ")" && (above.ends_with(',') || above.ends_with('}')) {
-            flat.push_str(above);
-        } else {
-            flat.push_str(head);
+        // A shell argument printed across lines ends with a `)` that owns
+        // its line. A metadata `)` does not, and must not be collapsed.
+        if head[line..].trim() == ")" {
+            let above = head[..line].trim_end();
+            let open = above.rfind("({").map(|at| at + 1);
+            if let Some(open) = open {
+                let object = above[open..].chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+                flat.push_str(&above[..open]);
+                flat.push_str(&object);
+                flat.push_str(marker);
+                rest = &rest[at + marker.len()..];
+                continue;
+            }
         }
-        flat.push_str(")(/*#__PURE__*/");
-        rest = &rest[at + ")(/*#__PURE__*/".len()..];
+        flat.push_str(&rest[..at + marker.len()]);
+        rest = &rest[at + marker.len()..];
     }
     flat.push_str(rest);
+    if std::env::var("DBG").is_ok() {
+        eprintln!("FLAT TAIL {:?}", flat.lines().rev().take(8).collect::<Vec<_>>());
+    }
     let text = flat;
     let mut lines = text
         .lines()
@@ -874,9 +929,7 @@ fn join_export_default(text: &str) -> String {
         // An autoname splice lands on the next line. Payload comparison
         // keeps a line only when it contains `() =>`, so the binding stays
         // with the wrapper.
-        let join = export_default
-            || trimmed.ends_with('=')
-            || trimmed.ends_with('(');
+        let join = export_default || trimmed.ends_with('=') || trimmed.ends_with('(');
         if join {
             let indent = lines[index].chars().take_while(|c| *c == ' ').count();
             let head = if export_default { "export default" } else { trimmed.trim() };
@@ -890,7 +943,9 @@ fn join_export_default(text: &str) -> String {
     if text.ends_with('\n') && !joined.ends_with('\n') {
         joined.push('\n');
     }
-    joined
+    // A formatted call leaves a space before the pure comment. The payload
+    // comparison keeps that character.
+    joined.replace("( /*#__PURE__*/", "(/*#__PURE__*/")
 }
 
 struct Build {
@@ -963,6 +1018,7 @@ fn join_payload_lines(text: &str) -> String {
         let join = trimmed.ends_with("const")
             || trimmed.ends_with('=')
             || trimmed.ends_with("=>")
+            || trimmed.ends_with(')')
             || (trimmed.ends_with('(') && next.starts_with("/*#__PURE__*/"));
         if join {
             let indent = lines[index].chars().take_while(|ch| *ch == ' ').count();
@@ -1000,7 +1056,7 @@ fn babel_indent(text: &str) -> String {
     }
     let mut out = spaced.join("\n");
     // The printer writes a space after a synthetic comment. Babel does not.
-    out = out.replace("/*#__PURE__*/ ", "/*#__PURE__*/").replace("( /*", "/*");
+    out = out.replace("/*#__PURE__*/ ", "/*#__PURE__*/").replace("( /*#__PURE__*/", "(/*#__PURE__*/");
     if !out.is_empty() {
         out.push('\n');
     }
@@ -2298,13 +2354,24 @@ fn contains_resource(node: Node, work: &Build) -> bool {
     if node.kind() != SyntaxKind::CallExpression {
         return false;
     }
-    // A shell implementation is metadata, not an autoname. Naming it would
-    // put `__TYPEGPU_AUTONAME__` on a line the payload comparison keeps, and
-    // an aliased import must not get that wrapper at all.
+    // An aliased shell is metadata only. The canonical `tgpu.*` shell is
+    // still a named resource, so it keeps autoname around that metadata.
     if is_shell_implementation(node, work) {
-        return false;
+        let mut callee = unwrap_parens(node.expression());
+        if callee.kind() == SyntaxKind::CallExpression {
+            callee = unwrap_parens(callee.expression());
+        }
+        if callee.kind() == SyntaxKind::PropertyAccessExpression {
+            let object = callee.expression();
+            if object.kind() != SyntaxKind::Identifier || object.text() != "tgpu" {
+                return false;
+            }
+        }
     }
-    let callee = unwrap_parens(node.expression());
+    let mut callee = unwrap_parens(node.expression());
+    if is_shell_implementation(node, work) && callee.kind() == SyntaxKind::CallExpression {
+        callee = unwrap_parens(callee.expression());
+    }
     if callee.kind() == SyntaxKind::Identifier {
         return RESOURCE_CONSTRUCTORS.contains(&callee.text());
     }
@@ -3014,7 +3081,8 @@ fn external_chain(node: Node, ctx: &TinyCtx) -> Option<String> {
             let property = node.name();
             if property.kind() == SyntaxKind::PrivateIdentifier {
                 let object = external_chain(unwrap_parens(node.expression()), ctx)?;
-                return Some(format!("{object}.#{}", property.text()));
+                let name = property.text().trim_start_matches('#');
+                return Some(format!("{object}.#{name}"));
             }
             if property.kind() != SyntaxKind::Identifier || property.text() == "$" {
                 return None;
@@ -3412,7 +3480,8 @@ mod dump_case {
                 let want = std::fs::read_to_string(&theirs).unwrap();
                 match result {
                     Ok(out) if super::payload_lines(&out) == super::payload_lines(&want) => {
-                        eprintln!("SHAPE {}", dir.file_name().unwrap().to_string_lossy())
+                        eprintln!("SHAPE {}", dir.file_name().unwrap().to_string_lossy());
+                        std::fs::write("/tmp/ours-now.ts", &out).ok();
                     }
                     Ok(out) => {
                         eprintln!("DIFF {}", dir.file_name().unwrap().to_string_lossy());

@@ -219,7 +219,7 @@ fn normalize_ours(text: &str) -> String {
 fn collapse(text: &str) -> String {
     text.lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n")
 }

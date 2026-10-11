@@ -8,19 +8,7 @@ type Event =
 // Patterns destructure and bind. `x` and `y` below are ordinary bindings the
 // macro introduced from the pattern — look at the generated TypeScript.
 export function describe(event: Event): string {
-  return ((matched) => {
-        if (matchTest(matched, { kind: "click", at: { x: x, y: y } }.pattern)) {
-            matchBind(matched, { kind: "click", at: { x: x, y: y } }.pattern);
-             {
-              if ({ kind: "click", at: { x: x, y: y } }.guard) { return { kind: "click", at: { x: x, y: y } }.body; }
-            } #else {
-              return { kind: "click", at: { x: x, y: y } }.body;
-            }
-          }
-        throw new globalThis.Error(
-          `no arm matched ${globalThis.JSON.stringify(matched)}`,
-        );
-      })(event) ?? "something else";
+  return ((matched) => { if (typeof matched === "object" && matched !== null && ((matched)["kind"]) === "click" && typeof (matched)["at"] === "object" && (matched)["at"] !== null && true && true) { ; const x = ((matched)["at"])["x"];const y = ((matched)["at"])["y"]; return `click at ${String(x)},${String(y)}`; } if (typeof matched === "object" && matched !== null && ((matched)["kind"]) === "key" && true) { ; const key = (matched)["key"]; if (key === "Escape") { return "escape"; } } if (typeof matched === "object" && matched !== null && ((matched)["kind"]) === "key" && true) { ; const key = (matched)["key"]; return `key ${key}`; } return "something else"; })(event) ?? "something else";
 }
 
 export const clicked: string = describe({
