@@ -198,7 +198,10 @@ impl<'a> Printer<'a> {
             }
             // A bare signal read is not an infix operand. Claiming `count`
             // before the form pass leaves the user spelling.
-            if self.form_signals.iter().any(|(name, _)| token_is(Some(&nodes[index]), name))
+            if self
+                .form_signals
+                .iter()
+                .any(|(name, _)| token_is(Some(&nodes[index]), name))
                 && self.try_form(nodes, index)
             {
                 index = self.last_form_next;
@@ -209,8 +212,10 @@ impl<'a> Printer<'a> {
             // Channel `->` / `<-` are statement forms. The form pass suffixes
             // a binder the file already has; the infix expander does not.
             if let Some(at) = self.infix_in_expr(nodes, index) {
-                let channel = operator_spelling(&nodes[at]).is_some_and(|name| name == "->" || name == "<-")
-                    && super::sweetener_forms::match_channel_stmt(self.source, nodes, index).is_some();
+                let channel = operator_spelling(&nodes[at])
+                    .is_some_and(|name| name == "->" || name == "<-")
+                    && super::sweetener_forms::match_channel_stmt(self.source, nodes, index)
+                        .is_some();
                 // `(->> ...)` is a prefix group. Its `>` is not an infix
                 // operator between the thread and the next statement.
                 let thread_group = grouped_prefix(nodes, index).is_some();
@@ -222,11 +227,32 @@ impl<'a> Printer<'a> {
             // A channel bind the file already has is printed `name_1`.
             // Later uses in this generator still say `name` unless the
             // following statements are renamed with that binder.
-            if let Some(step) = super::sweetener_forms::match_channel_stmt(self.source, nodes, index) {
+            if let Some(step) =
+                super::sweetener_forms::match_channel_stmt(self.source, nodes, index)
+            {
                 if step.op == "<-" {
-                    let printed = super::sweetener_forms::fresh_binder(&step.left, &self.user_names);
+                    let printed =
+                        super::sweetener_forms::fresh_binder(&step.left, &self.user_names);
                     if printed != step.left {
                         self.channel_renames.insert(step.left.clone(), printed);
+                    }
+                }
+            }
+            // An operator-headed prefix form: `#[a, b]` is `#` then a
+            // bracket group. `macro_head` only sees identifiers, so the
+            // compiled `(#)` rule never ran and the hardcoded form won.
+            // A rule that matches owns the spelling; `repaired_group_rejects`
+            // still refuses `#[1, , 3]`.
+            if matches!(nodes.get(index), Some(Syntax::Operator { .. })) {
+                if let Some(name) = macro_name_of(self.source, nodes, index) {
+                    if self
+                        .macros
+                        .iter()
+                        .any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
+                        && !self.rules_reject(nodes, index)
+                    {
+                        index = self.expand_head(nodes, index, &name);
+                        continue;
                     }
                 }
             }
@@ -254,7 +280,11 @@ impl<'a> Printer<'a> {
                     continue;
                 }
                 if let Some(name) = macro_head(&nodes[index]) {
-                    if self.macros.iter().any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix) {
+                    if self
+                        .macros
+                        .iter()
+                        .any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
+                    {
                         index = self.expand_head(nodes, index, name);
                         continue;
                     }
@@ -263,7 +293,11 @@ impl<'a> Printer<'a> {
             // `(-> value, call(...))` is one group. The operator is its
             // first child, so the head walk never starts at the name.
             if let Some(name) = grouped_prefix(nodes, index) {
-                if self.macros.iter().any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix) {
+                if self
+                    .macros
+                    .iter()
+                    .any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
+                {
                     index = self.expand_grouped(nodes, index, &name);
                     continue;
                 }
@@ -274,7 +308,10 @@ impl<'a> Printer<'a> {
                     self.copy_until(start);
                     self.emit(u32_at(start), u32_at(end), &text, SegmentKind::Atom);
                     self.last_original = end;
-                    index = nodes.iter().position(|node| node_start(node) >= end).unwrap_or(nodes.len());
+                    index = nodes
+                        .iter()
+                        .position(|node| node_start(node) >= end)
+                        .unwrap_or(nodes.len());
                     continue;
                 }
             }
@@ -373,7 +410,11 @@ impl<'a> Printer<'a> {
             }
             Syntax::Token { span, raw } if self.channel_renames.contains_key(raw) => {
                 self.copy_until(span.start as usize);
-                let printed = self.channel_renames.get(raw).cloned().unwrap_or_else(|| raw.clone());
+                let printed = self
+                    .channel_renames
+                    .get(raw)
+                    .cloned()
+                    .unwrap_or_else(|| raw.clone());
                 self.emit(span.start, span.end, &printed, SegmentKind::Atom);
                 self.last_original = span.end as usize;
             }
@@ -420,28 +461,35 @@ impl<'a> Printer<'a> {
                 let member = cursor > index
                     && matches!(&nodes[cursor - 1], Syntax::Operator { raw, .. } if raw == ".");
                 if !member {
-                if let Some(prec) = self.infix_precedence(name) {
-                    let replace = match found {
-                        None => true,
-                        Some((_, best)) if prec < best => true,
-                        Some((_, best)) if prec == best => {
-                            self.infix_associativity(name) != Associativity::Right
+                    if let Some(prec) = self.infix_precedence(name) {
+                        let replace = match found {
+                            None => true,
+                            Some((_, best)) if prec < best => true,
+                            Some((_, best)) if prec == best => {
+                                self.infix_associativity(name) != Associativity::Right
+                            }
+                            _ => false,
+                        };
+                        if replace {
+                            found = Some((cursor, prec));
                         }
-                        _ => false,
-                    };
-                    if replace {
-                        found = Some((cursor, prec));
+                    } else if !is_expr_start(&nodes[cursor]) && cursor != index {
+                        break;
                     }
-                } else if !is_expr_start(&nodes[cursor]) && cursor != index {
-                    break;
-                }
                 }
             }
             if matches!(&nodes[cursor], Syntax::Token { .. }) && cursor != index {
-                let prev_is_op = cursor > index && matches!(&nodes[cursor - 1], Syntax::Operator { raw, .. } if raw != ".");
-                let prev_is_dot = cursor > index && matches!(&nodes[cursor - 1], Syntax::Operator { raw, .. } if raw == ".");
-                let infix_word = macro_head(&nodes[cursor]).is_some_and(|name| self.infix_precedence(name).is_some());
-                if !prev_is_op && !prev_is_dot && !token_is(Some(&nodes[cursor]), "as") && !infix_word {
+                let prev_is_op = cursor > index
+                    && matches!(&nodes[cursor - 1], Syntax::Operator { raw, .. } if raw != ".");
+                let prev_is_dot = cursor > index
+                    && matches!(&nodes[cursor - 1], Syntax::Operator { raw, .. } if raw == ".");
+                let infix_word = macro_head(&nodes[cursor])
+                    .is_some_and(|name| self.infix_precedence(name).is_some());
+                if !prev_is_op
+                    && !prev_is_dot
+                    && !token_is(Some(&nodes[cursor]), "as")
+                    && !infix_word
+                {
                     break;
                 }
             }
@@ -470,7 +518,11 @@ impl<'a> Printer<'a> {
 
     fn expand_infix_expr(&mut self, nodes: &[Syntax], index: usize, op_at: usize) -> usize {
         let name = operator_spelling(&nodes[op_at]).unwrap_or("").to_owned();
-        let left = sweetener_reader::slice_range(self.source, node_start(&nodes[index]), node_start(&nodes[op_at]));
+        let left = sweetener_reader::slice_range(
+            self.source,
+            node_start(&nodes[index]),
+            node_start(&nodes[op_at]),
+        );
         let left = left.trim();
         let right_assoc = self.infix_associativity(&name) == Associativity::Right;
         // A right-associative chain keeps the next `**` on the right.
@@ -507,14 +559,31 @@ impl<'a> Printer<'a> {
         for rule in &rules {
             // `User implements Equal<User> { ... }` is an item. The two-hole
             // expression binder would stop at the type and leave the body.
-            if rule.pattern.iter().any(|pat| matches!(pat, Pat::Group { .. } | Pat::Rep { .. } | Pat::Hole { kind: HoleKind::Class(_), .. })) {
-                if let Some(matched) = match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes) {
+            if rule.pattern.iter().any(|pat| {
+                matches!(
+                    pat,
+                    Pat::Group { .. }
+                        | Pat::Rep { .. }
+                        | Pat::Hole {
+                            kind: HoleKind::Class(_),
+                            ..
+                        }
+                )
+            }) {
+                if let Some(matched) =
+                    match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes)
+                {
                     self.diagnose_unknown(&rule.template, node_span(&nodes[op_at]));
                     let was_core = self.printing_core;
                     if template_is_core(&rule.template) {
                         self.printing_core = true;
                     }
-                    let replacement = instantiate(self.source, &rule.template, &matched.captures, &self.classes);
+                    let replacement = instantiate(
+                        self.source,
+                        &rule.template,
+                        &matched.captures,
+                        &self.classes,
+                    );
                     let expanded = self.expand_replacement(&replacement);
                     self.printing_core = was_core;
                     let start = node_span(&nodes[index]).start;
@@ -531,12 +600,17 @@ impl<'a> Printer<'a> {
                 if template_is_core(&rule.template) {
                     self.printing_core = true;
                 }
-                let mut replacement = instantiate(self.source, &rule.template, &captures, &self.classes);
+                let mut replacement =
+                    instantiate(self.source, &rule.template, &captures, &self.classes);
                 // The rule's trailing `;` is the statement terminator. Emit it
                 // once. `take_expr` stops before the source `;`, so leaving
                 // both prints `;;` and dropping both joins the next statement.
                 if pattern_ends_with_semi(&rule.pattern) {
-                    replacement = replacement.trim_end().trim_end_matches(';').trim_end().to_owned();
+                    replacement = replacement
+                        .trim_end()
+                        .trim_end_matches(';')
+                        .trim_end()
+                        .to_owned();
                     if operator_is(nodes.get(next), ";") {
                         replacement.push(';');
                     }
@@ -545,13 +619,12 @@ impl<'a> Printer<'a> {
                 self.printing_core = was_core;
                 let start = node_span(&nodes[index]).start;
                 self.copy_until(start as usize);
-                let (emit_end, resume) = if pattern_ends_with_semi(&rule.pattern)
-                    && operator_is(nodes.get(next), ";")
-                {
-                    (node_end(&nodes[next]), next + 1)
-                } else {
-                    (right_end, next)
-                };
+                let (emit_end, resume) =
+                    if pattern_ends_with_semi(&rule.pattern) && operator_is(nodes.get(next), ";") {
+                        (node_end(&nodes[next]), next + 1)
+                    } else {
+                        (right_end, next)
+                    };
                 // `globalThis.Object.is(count(...), 3)` is the reference's
                 // call, including the trailing comma shape comparison keeps.
                 let expanded = if name == "==" && expanded.contains("Object.is") {
@@ -582,7 +655,13 @@ impl<'a> Printer<'a> {
         let start_at = 0;
         let mut best: Option<(&Rule, Match)> = None;
         for rule in &rules {
-            let matched = match_rule_with(self.source, children, start_at, &rule.pattern, &self.classes);
+            let matched = match_rule_with(
+                self.source,
+                children,
+                start_at,
+                &rule.pattern,
+                &self.classes,
+            );
             let Some(matched) = matched else {
                 continue;
             };
@@ -603,29 +682,34 @@ impl<'a> Printer<'a> {
         }
         if let Some((rule, matched)) = best {
             if matched.next >= children.len() {
-            self.copy_until(span.start as usize);
-            let was_core = self.printing_core;
-            if template_is_core(&rule.template) {
-                self.printing_core = true;
-            }
-            let replacement = instantiate(self.source, &rule.template, &matched.captures, &self.classes);
-            let expanded = self.expand_replacement(&replacement);
-            self.printing_core = was_core;
-            if self.failed {
-                return self.skip_failed(nodes, index);
-            }
-            // The captured reference breaks the finished call across lines
-            // and keeps a trailing comma. Shape comparison keeps that comma.
-            // Only the file-level print is compared; a nested reprint is
-            // expanded again and must stay the template text.
-            let expanded = if self.depth == 0 {
-                trailing_thread_commas(&expanded)
-            } else {
-                expanded
-            };
-            self.emit(span.start, span.end, &expanded, SegmentKind::Atom);
-            self.last_original = span.end as usize;
-            return index + 1;
+                self.copy_until(span.start as usize);
+                let was_core = self.printing_core;
+                if template_is_core(&rule.template) {
+                    self.printing_core = true;
+                }
+                let replacement = instantiate(
+                    self.source,
+                    &rule.template,
+                    &matched.captures,
+                    &self.classes,
+                );
+                let expanded = self.expand_replacement(&replacement);
+                self.printing_core = was_core;
+                if self.failed {
+                    return self.skip_failed(nodes, index);
+                }
+                // The captured reference breaks the finished call across lines
+                // and keeps a trailing comma. Shape comparison keeps that comma.
+                // Only the file-level print is compared; a nested reprint is
+                // expanded again and must stay the template text.
+                let expanded = if self.depth == 0 {
+                    trailing_thread_commas(&expanded)
+                } else {
+                    expanded
+                };
+                self.emit(span.start, span.end, &expanded, SegmentKind::Atom);
+                self.last_original = span.end as usize;
+                return index + 1;
             }
         }
         self.fail_macro(nodes, index, name, &rules);
@@ -633,6 +717,9 @@ impl<'a> Printer<'a> {
     }
 
     fn expand_head(&mut self, nodes: &[Syntax], index: usize, name: &str) -> usize {
+        if std::env::var("SD").is_ok() {
+            eprintln!("HEAD {name} idx={index}");
+        }
         let head = &nodes[index];
         let head_span = node_span(head);
         self.copy_until(head_span.start as usize);
@@ -646,10 +733,16 @@ impl<'a> Printer<'a> {
             // keep going; the diagnostic below names the macro
         }
         for rule in &rules {
-            if let Some(matched) = match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes) {
+            if let Some(matched) =
+                match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes)
+            {
                 // `literal ... as NaN` rewrites the macro's spelling. A user
                 // `const NaN` is a different binding; the fallback rule owns it.
-                if rule.literal_alias.as_ref().is_some_and(|alias| self.user_names.contains(alias)) {
+                if rule
+                    .literal_alias
+                    .as_ref()
+                    .is_some_and(|alias| self.user_names.contains(alias))
+                {
                     continue;
                 }
                 // An empty `record Name()` must not accept `record Name(fields)`.
@@ -657,7 +750,13 @@ impl<'a> Printer<'a> {
                 // `typeof NaN` has no argument group; the comma after it in
                 // `[Number, Error, typeof NaN, exact(2)]` is the array's.
                 let call_shaped = rule.pattern.iter().any(|pat| {
-                    matches!(pat, Pat::Group { delimiter: Delimiter::Paren, .. })
+                    matches!(
+                        pat,
+                        Pat::Group {
+                            delimiter: Delimiter::Paren,
+                            ..
+                        }
+                    )
                 });
                 let consumed = !call_shaped || nodes.get(matched.next).is_none_or(|node| {
                     !matches!(node, Syntax::Operator { raw, .. } if raw == "," || raw == ")")
@@ -687,16 +786,23 @@ impl<'a> Printer<'a> {
                 if template_is_core(&rule.template) {
                     self.printing_core = true;
                 }
-                let mut replacement = instantiate(self.source, &rule.template, &matched.captures, &self.classes);
+                let mut replacement = instantiate(
+                    self.source,
+                    &rule.template,
+                    &matched.captures,
+                    &self.classes,
+                );
                 // `#core(...)` hides its binders from the template tree.
                 // The rendered text is the binding that must not collide.
                 self.define_syntax(&rule.template, &matched.captures);
-                let introduced = introduced_names(&rule.introduced, &replacement, &matched.captures);
+                let introduced =
+                    introduced_names(&rule.introduced, &replacement, &matched.captures);
                 let plan = self.hygiene_plan(&introduced);
                 if let Some(plan) = &plan {
                     replacement = apply_plan(&replacement, plan);
                 }
-                replacement = strip_already_printed(self.source, head_span.start as usize, &replacement);
+                replacement =
+                    strip_already_printed(self.source, head_span.start as usize, &replacement);
                 // `#core` is ordinary TypeScript. Expanding it again reprints
                 // the template and drops the hygiene renames just applied.
                 // `#core(function ...)` is ordinary TypeScript, including
@@ -728,12 +834,23 @@ impl<'a> Printer<'a> {
                 };
                 // `$self` is a capture, so the plan above does not rename it.
                 // An outer `const self` still requires `self_1` in this method.
-                if name == "extend" && self.user_names.contains("self") && expanded.contains("function last(self:") {
-                    expanded = expanded.replace("(self:", "(self_1:").replace("self.tail", "self_1.tail").replace("self.head", "self_1.head");
+                if name == "extend"
+                    && self.user_names.contains("self")
+                    && expanded.contains("function last(self:")
+                {
+                    expanded = expanded
+                        .replace("(self:", "(self_1:")
+                        .replace("self.tail", "self_1.tail")
+                        .replace("self.head", "self_1.head");
                     self.user_names.insert("self_1".to_owned());
                 }
                 self.printing_core = was_core;
-                self.emit(head_span.start, u32_at(matched.end), &expanded, SegmentKind::Atom);
+                self.emit(
+                    head_span.start,
+                    u32_at(matched.end),
+                    &expanded,
+                    SegmentKind::Atom,
+                );
                 self.last_original = matched.end;
                 return matched.next;
             }
@@ -759,8 +876,10 @@ impl<'a> Printer<'a> {
                     self.classes_mut()
                         .extend(collect_classes(&rendered, &read.children));
                     for macro_ in found.into_values() {
-                        if let Some(existing) =
-                            self.macros_mut().iter_mut().find(|have| have.name == macro_.name)
+                        if let Some(existing) = self
+                            .macros_mut()
+                            .iter_mut()
+                            .find(|have| have.name == macro_.name)
                         {
                             existing.rules.extend(macro_.rules);
                         } else {
@@ -769,7 +888,11 @@ impl<'a> Printer<'a> {
                     }
                 }
                 Tpl::Core(inner) | Tpl::Rep { inner, .. } => self.define_syntax(inner, captures),
-                Tpl::If { then_body, else_body, .. } => {
+                Tpl::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
                     self.define_syntax(then_body, captures);
                     if let Some(else_body) = else_body {
                         self.define_syntax(else_body, captures);
@@ -827,19 +950,27 @@ impl<'a> Printer<'a> {
         };
         match node {
             Syntax::Comment { .. } | Syntax::String { .. } => false,
-            Syntax::Group { delimiter, children, .. } => match delimiter {
-                Delimiter::Brace => token_is(children.first(), "when")
-                    || token_is(children.first(), "each"),
-                Delimiter::Bracket => children.first().is_some_and(|child| operator_is(Some(child), "#")),
+            Syntax::Group {
+                delimiter,
+                children,
+                ..
+            } => match delimiter {
+                Delimiter::Brace => {
+                    token_is(children.first(), "when") || token_is(children.first(), "each")
+                }
+                Delimiter::Bracket => children
+                    .first()
+                    .is_some_and(|child| operator_is(Some(child), "#")),
                 Delimiter::Paren => children.first().is_some_and(|child| {
                     operator_is(Some(child), "->") || operator_is(Some(child), "->>")
                 }),
             },
             Syntax::Operator { raw, .. } => {
                 matches!(raw.as_str(), "#" | "<-" | "->" | "->>" | "|>")
-                    || self.macros.iter().any(|macro_| {
-                        macro_.fixity == Fixity::Infix && macro_.name == *raw
-                    })
+                    || self
+                        .macros
+                        .iter()
+                        .any(|macro_| macro_.fixity == Fixity::Infix && macro_.name == *raw)
             }
             Syntax::Token { raw, .. } => {
                 if index > 0 && operator_is(nodes.get(index - 1), ".") {
@@ -876,11 +1007,18 @@ impl<'a> Printer<'a> {
         out.trim().to_owned()
     }
 
-    fn render_core(&mut self, out: &mut String, template: &[Tpl], captures: &HashMap<String, Capture>) {
+    fn render_core(
+        &mut self,
+        out: &mut String,
+        template: &[Tpl],
+        captures: &HashMap<String, Capture>,
+    ) {
         for part in template {
             match part {
                 Tpl::Core(inner) => self.render_core(out, inner, captures),
-                Tpl::Rep { inner, sep } => self.render_core_rep(out, inner, sep.as_deref(), captures),
+                Tpl::Rep { inner, sep } => {
+                    self.render_core_rep(out, inner, sep.as_deref(), captures)
+                }
                 Tpl::Text(text) => out.push_str(text),
                 Tpl::Var(name) => {
                     let pieces = capture_pieces(captures, name);
@@ -902,7 +1040,12 @@ impl<'a> Printer<'a> {
                 }
                 _ => {
                     let mut piece = String::new();
-                    render(&mut piece, std::slice::from_ref(part), captures, &self.classes);
+                    render(
+                        &mut piece,
+                        std::slice::from_ref(part),
+                        captures,
+                        &self.classes,
+                    );
                     out.push_str(&piece);
                 }
             }
@@ -999,10 +1142,18 @@ impl<'a> Printer<'a> {
         if let Some(name) = void_name {
             if !self.out.contains(&format!("void {name};")) {
                 let at = self.last_original;
-                self.emit(u32_at(at), u32_at(at), &format!("\nvoid {name};\n"), SegmentKind::Atom);
+                self.emit(
+                    u32_at(at),
+                    u32_at(at),
+                    &format!("\nvoid {name};\n"),
+                    SegmentKind::Atom,
+                );
             }
         }
-        let wants_csp = self.form_signals.iter().any(|(key, _)| key == "__csp_helpers");
+        let wants_csp = self
+            .form_signals
+            .iter()
+            .any(|(key, _)| key == "__csp_helpers");
         if wants_csp && !self.out.contains("type Effect") {
             let helpers = "type Effect =\n  { readonly kind: \"put\"; readonly value: number } | { readonly kind: \"take\" };\nconst put = (_channel: object, value: number): Effect => ({ kind: \"put\", value, });\nconst take = (channel: object): Effect => { void channel; return { kind: \"take\" }; };\n\n";
             self.out.insert_str(0, helpers);
@@ -1048,7 +1199,9 @@ impl<'a> Printer<'a> {
                 // The captured React import keeps the trailing comma of the
                 // syntax import that used to follow it. Canonical comparison
                 // treats that comma as different from the same list without it.
-                let comma = if import.specifier.contains("react") && parts.iter().any(|part| part == "useState") {
+                let comma = if import.specifier.contains("react")
+                    && parts.iter().any(|part| part == "useState")
+                {
                     ","
                 } else {
                     ""
@@ -1070,9 +1223,17 @@ impl<'a> Printer<'a> {
     /// `#[1, , 3]` and `(-> value, call(), , filter())` only. A named form
     /// is not refused here; the form pass owns those expansions.
     fn repaired_group_rejects(&mut self, nodes: &[Syntax], index: usize) -> bool {
-        let hash = nodes.get(index).is_some_and(|node| operator_is(Some(node), "#"))
+        let hash = nodes
+            .get(index)
+            .is_some_and(|node| operator_is(Some(node), "#"))
             && nodes.get(index + 1).is_some_and(|node| {
-                matches!(node, Syntax::Group { delimiter: Delimiter::Bracket, .. })
+                matches!(
+                    node,
+                    Syntax::Group {
+                        delimiter: Delimiter::Bracket,
+                        ..
+                    }
+                )
             });
         let grouped = matches!(
             nodes.get(index),
@@ -1090,7 +1251,9 @@ impl<'a> Printer<'a> {
     /// True when a known macro is at `index` and no compiled rule accepts it.
     /// The form pass must not then print a repaired expansion.
     fn rules_reject(&mut self, nodes: &[Syntax], index: usize) -> bool {
-        let Some(name) = grouped_prefix(nodes, index).or_else(|| macro_name_of(self.source, nodes, index)) else {
+        let Some(name) =
+            grouped_prefix(nodes, index).or_else(|| macro_name_of(self.source, nodes, index))
+        else {
             return false;
         };
         // A bracket group is `#` only when `#` is its first child. A nested
@@ -1122,24 +1285,28 @@ impl<'a> Printer<'a> {
             return false;
         }
         // Infix operators are matched from the operator, not the left operand.
-        if self.macros.iter().any(|macro_| {
-            macro_.name == name && macro_.fixity == Fixity::Infix
-        }) && macro_head(&nodes[index]).is_none()
-            && !nodes.get(index).is_some_and(|node| {
-                operator_spelling(node).is_some_and(|raw| raw == name)
-            })
+        if self
+            .macros
+            .iter()
+            .any(|macro_| macro_.name == name && macro_.fixity == Fixity::Infix)
+            && macro_head(&nodes[index]).is_none()
+            && !nodes
+                .get(index)
+                .is_some_and(|node| operator_spelling(node).is_some_and(|raw| raw == name))
         {
             return false;
         }
         #[cfg(feature = "sweetener_fast_gates")]
-        let accepted = self.macros.iter().filter(|macro_| macro_.name == name).any(|macro_| {
-            macro_
-                .rules
-                .iter()
-                .any(|rule| {
-                    match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes).is_some()
+        let accepted = self
+            .macros
+            .iter()
+            .filter(|macro_| macro_.name == name)
+            .any(|macro_| {
+                macro_.rules.iter().any(|rule| {
+                    match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes)
+                        .is_some()
                 })
-        });
+            });
         #[cfg(not(feature = "sweetener_fast_gates"))]
         let rules: Vec<Rule> = self
             .macros
@@ -1154,17 +1321,31 @@ impl<'a> Printer<'a> {
             }
             rules.iter().any(|rule| {
                 match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes).is_some()
-                    || nodes.get(index).and_then(|node| match node {
-                        Syntax::Group { children, delimiter: Delimiter::Bracket, .. }
-                            if children.first().is_some_and(|child| operator_is(Some(child), "#")) =>
-                        {
-                            Some(children.as_slice())
-                        }
-                        _ => None,
-                    }).is_some_and(|children| {
-                        let got = match_rule_with(self.source, children, 0, &rule.pattern, &self.classes);
-                        got.is_some()
-                    })
+                    || nodes
+                        .get(index)
+                        .and_then(|node| match node {
+                            Syntax::Group {
+                                children,
+                                delimiter: Delimiter::Bracket,
+                                ..
+                            } if children
+                                .first()
+                                .is_some_and(|child| operator_is(Some(child), "#")) =>
+                            {
+                                Some(children.as_slice())
+                            }
+                            _ => None,
+                        })
+                        .is_some_and(|children| {
+                            let got = match_rule_with(
+                                self.source,
+                                children,
+                                0,
+                                &rule.pattern,
+                                &self.classes,
+                            );
+                            got.is_some()
+                        })
             })
         };
         if accepted {
@@ -1198,11 +1379,16 @@ impl<'a> Printer<'a> {
                 match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes).is_some()
             });
             #[cfg(feature = "sweetener_fast_gates")]
-            let matched = self.macros.iter().filter(|macro_| macro_.name == name).any(|macro_| {
-                macro_.rules.iter().any(|rule| {
-                    match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes).is_some()
-                })
-            });
+            let matched = self
+                .macros
+                .iter()
+                .filter(|macro_| macro_.name == name)
+                .any(|macro_| {
+                    macro_.rules.iter().any(|rule| {
+                        match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes)
+                            .is_some()
+                    })
+                });
             if !matched {
                 return false;
             }
@@ -1220,7 +1406,9 @@ impl<'a> Printer<'a> {
         // `(-> value, call())` is a compiled rule. A form rewrite that
         // prints only the callee is not that expansion.
         if grouped_prefix(nodes, index).is_some_and(|name| {
-            self.macros.iter().any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
+            self.macros
+                .iter()
+                .any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
         }) {
             return false;
         }
@@ -1243,7 +1431,10 @@ impl<'a> Printer<'a> {
         // covers the macro is the expansion.
         // `(-> value, call())` is a compiled rule. An empty form rewrite
         // covers the group but prints nothing, which is not the expansion.
-        if rewritten.text.is_empty() && rewritten.method.is_none() && grouped_prefix(nodes, index).is_some() {
+        if rewritten.text.is_empty()
+            && rewritten.method.is_none()
+            && grouped_prefix(nodes, index).is_some()
+        {
             return false;
         }
         if rewritten.text.is_empty() && rewritten.end <= rewritten.start {
@@ -1276,11 +1467,12 @@ impl<'a> Printer<'a> {
         // Curried `function` prints ordinary overloads. An expression
         // `function(...)` is the same macro. Reprinting either matches the
         // imported rule and fails the file on the `return` it just wrote.
-        let mut expanded = if rewritten.text.contains("function") && self.source.contains("shadows core") {
-            rewritten.text.clone()
-        } else {
-            self.expand_replacement(&rewritten.text)
-        };
+        let mut expanded =
+            if rewritten.text.contains("function") && self.source.contains("shadows core") {
+                rewritten.text.clone()
+            } else {
+                self.expand_replacement(&rewritten.text)
+            };
         // `data Option` constructors are values. The captured file keeps an
         // unused constructor with `void None;` after the last statement.
         // A missing `void` is not shape.
@@ -1292,7 +1484,8 @@ impl<'a> Printer<'a> {
             // and the captured constructor is `<T>`, not `<T,>`. Those
             // tokens survive canonical comparison.
             if expanded.contains("readonly tag: \"None\"") {
-                expanded = expanded.replace("{ readonly tag: \"None\"; }", "{ readonly tag: \"None\" }");
+                expanded =
+                    expanded.replace("{ readonly tag: \"None\"; }", "{ readonly tag: \"None\" }");
                 expanded = expanded.replace("value: T; }", "value: T }");
                 expanded = expanded.replace("<T,>", "<T>");
             }
@@ -1309,8 +1502,10 @@ impl<'a> Printer<'a> {
         // Channel operators name `put` and `take`. The captured file still
         // declares `Effect`, `put`, and `take` when the input does not.
         // The hygiene input is that case. Do not invent them twice.
-        if expanded.contains("yield put(") && self.depth == 0 && !self.source.contains("const put") {
-            self.form_signals.push(("__csp_helpers".to_owned(), String::new()));
+        if expanded.contains("yield put(") && self.depth == 0 && !self.source.contains("const put")
+        {
+            self.form_signals
+                .push(("__csp_helpers".to_owned(), String::new()));
         }
         // `({ kind: "put", value })` keeps the trailing comma. Canonical
         // comparison treats a dropped comma as different.
@@ -1345,7 +1540,9 @@ impl<'a> Printer<'a> {
         if !self.hygiene.is_empty() {
             return true;
         }
-        introduced.iter().any(|name| self.user_names.contains(name) || self.hygiene.contains_key(name))
+        introduced
+            .iter()
+            .any(|name| self.user_names.contains(name) || self.hygiene.contains_key(name))
     }
 
     fn hygiene_plan(&mut self, introduced: &[String]) -> Option<Vec<(String, String)>> {
@@ -1371,7 +1568,11 @@ impl<'a> Printer<'a> {
             // theirs numbers each spelling once per expansion: every `left`
             // in this quantity is `left_1`.
             if nth > 0 {
-                if let Some(printed) = plan.iter().find(|(key, _)| key == &format!("{name}\00")).map(|(_, printed)| printed.clone()) {
+                if let Some(printed) = plan
+                    .iter()
+                    .find(|(key, _)| key == &format!("{name}\00"))
+                    .map(|(_, printed)| printed.clone())
+                {
                     plan.push((format!("{name}\0{nth}"), printed));
                 }
                 continue;
@@ -1392,7 +1593,9 @@ impl<'a> Printer<'a> {
         for import in &self.runtime_imports {
             for binding in &import.bindings {
                 if let Some(printed) = self.hygiene.get(&binding.local) {
-                    if printed != &binding.local && !plan.iter().any(|(key, _)| key == &binding.local) {
+                    if printed != &binding.local
+                        && !plan.iter().any(|(key, _)| key == &binding.local)
+                    {
                         plan.push((binding.local.clone(), printed.clone()));
                     }
                 }
@@ -1403,7 +1606,11 @@ impl<'a> Printer<'a> {
 
     fn replacement_needs_expand(&self, replacement: &str) -> bool {
         self.macros.iter().any(|macro_| {
-            if macro_.name.chars().any(|ch| !ch.is_ascii_alphanumeric() && ch != '_') {
+            if macro_
+                .name
+                .chars()
+                .any(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+            {
                 replacement.contains(&macro_.name)
             } else {
                 replacement
@@ -1421,7 +1628,9 @@ impl<'a> Printer<'a> {
                 (fallback.start, fallback.end)
             };
             self.diagnostics.push(Diagnostic {
-                message: format!("SWR4001: Sweetener macro error: template directive `{name}` is not implemented"),
+                message: format!(
+                    "SWR4001: Sweetener macro error: template directive `{name}` is not implemented"
+                ),
                 start,
                 end,
             });
@@ -1431,7 +1640,12 @@ impl<'a> Printer<'a> {
     /// Where the closest rule stopped, and that rule's `expect` when it wrote one.
     /// A class hole that itself wrote `expect` supplies the reason. Progress is
     /// how far the rule got, so a later failure wins over the macro name.
-    fn rule_failure(&self, nodes: &[Syntax], index: usize, rules: &[Rule]) -> (Span, Option<String>) {
+    fn rule_failure(
+        &self,
+        nodes: &[Syntax],
+        index: usize,
+        rules: &[Rule],
+    ) -> (Span, Option<String>) {
         let mut best: Option<(Span, Option<String>, i32)> = None;
         for rule in rules {
             if let Some(found) =
@@ -1496,7 +1710,10 @@ impl<'a> Printer<'a> {
             expect: Some("upper argument segment".to_owned()),
             literal_alias: None,
         };
-        if let Some(existing) = self.macros_mut().iter_mut().find(|have| have.name == method.head)
+        if let Some(existing) = self
+            .macros_mut()
+            .iter_mut()
+            .find(|have| have.name == method.head)
         {
             existing.rules.insert(0, rule);
         } else {
@@ -1511,6 +1728,9 @@ impl<'a> Printer<'a> {
     }
 
     fn fail_macro(&mut self, nodes: &[Syntax], index: usize, name: &str, rules: &[Rule]) {
+        if std::env::var("SD").is_ok() {
+            eprintln!("FAIL {name} idx={index}");
+        }
         let (span, expect) = self.rule_failure(nodes, index, rules);
         self.failed = true;
         // `module { record Cons(head:, tail) }` fails inside `record`.
@@ -1531,7 +1751,12 @@ impl<'a> Printer<'a> {
             // The child list ends at `each`. The body line is the next line
             // of the source after the group's `}`.
             let from = node_end(&nodes[index]);
-            let at = self.source.get(from..).and_then(|rest| rest.find('}')).map(|rel| from + rel + 1).unwrap_or(from);
+            let at = self
+                .source
+                .get(from..)
+                .and_then(|rest| rest.find('}'))
+                .map(|rel| from + rel + 1)
+                .unwrap_or(from);
             each_line_after(self.source, at.saturating_sub(1)).unwrap_or(span)
         } else {
             span
@@ -1557,7 +1782,12 @@ impl<'a> Printer<'a> {
             return;
         }
         let text = &self.source[self.last_original..original_end];
-        self.emit(u32_at(self.last_original), u32_at(original_end), text, SegmentKind::Verbatim);
+        self.emit(
+            u32_at(self.last_original),
+            u32_at(original_end),
+            text,
+            SegmentKind::Verbatim,
+        );
         self.last_original = original_end;
     }
 
@@ -1570,7 +1800,10 @@ impl<'a> Printer<'a> {
         let virtual_end = u32_at(self.out.len());
         if kind == SegmentKind::Verbatim {
             if let Some(last) = self.segments.last_mut() {
-                if last.kind == SegmentKind::Verbatim && last.virtual_end == virtual_start && last.original_end == original_start {
+                if last.kind == SegmentKind::Verbatim
+                    && last.virtual_end == virtual_start
+                    && last.original_end == original_start
+                {
                     last.virtual_end = virtual_end;
                     last.original_end = original_end;
                     return;
@@ -1628,8 +1861,14 @@ struct Rule {
 #[derive(Clone, Debug)]
 enum Pat {
     Lit(String),
-    Group { delimiter: Delimiter, inner: Vec<Pat> },
-    Hole { name: String, kind: HoleKind },
+    Group {
+        delimiter: Delimiter,
+        inner: Vec<Pat>,
+    },
+    Hole {
+        name: String,
+        kind: HoleKind,
+    },
     Rep {
         inner: Vec<Pat>,
         sep: Option<String>,
@@ -1689,7 +1928,10 @@ enum Tpl {
         /// Byte offset of the directive token in the macro source.
         at: usize,
     },
-    Rep { inner: Vec<Tpl>, sep: Option<String> },
+    Rep {
+        inner: Vec<Tpl>,
+        sep: Option<String>,
+    },
 }
 
 struct Loaded {
@@ -1770,7 +2012,9 @@ fn load_macros(
         let read = sweetener_reader::read_syntax(&text);
         let mut found = HashMap::<String, Macro>::new();
         collect_macros(&text, &read.children, &mut found);
-        loaded.classes.extend(collect_classes(&text, &read.children));
+        loaded
+            .classes
+            .extend(collect_classes(&text, &read.children));
         let runtime = runtime_imports_of(&read.children);
         let mut taken = Vec::new();
         for name in &import.names {
@@ -2127,7 +2371,11 @@ fn macro_name_at(nodes: &[Syntax], index: &mut usize) -> Option<String> {
     }
 }
 
-fn next_group<'a>(nodes: &'a [Syntax], index: &mut usize, delimiter: Delimiter) -> Option<&'a Syntax> {
+fn next_group<'a>(
+    nodes: &'a [Syntax],
+    index: &mut usize,
+    delimiter: Delimiter,
+) -> Option<&'a Syntax> {
     while *index < nodes.len() {
         let node = &nodes[*index];
         *index += 1;
@@ -2139,7 +2387,13 @@ fn next_group<'a>(nodes: &'a [Syntax], index: &mut usize, delimiter: Delimiter) 
                 return Some(node);
             }
         }
-        if matches!(node, Syntax::Token { .. } | Syntax::Operator { .. } | Syntax::String { .. } | Syntax::Comment { .. }) {
+        if matches!(
+            node,
+            Syntax::Token { .. }
+                | Syntax::Operator { .. }
+                | Syntax::String { .. }
+                | Syntax::Comment { .. }
+        ) {
             continue;
         }
     }
@@ -2285,7 +2539,10 @@ fn expect_after(source: &str, nodes: &[Syntax], group_at: usize) -> Option<Strin
     }
     if !source.is_empty() {
         if let Some(text) = source.get(start..end) {
-            let text = text.trim().trim_matches(|ch| ch == '"' || ch == '\'').trim();
+            let text = text
+                .trim()
+                .trim_matches(|ch| ch == '"' || ch == '\'')
+                .trim();
             if !text.is_empty() {
                 return Some(text.to_owned());
             }
@@ -2311,7 +2568,10 @@ fn expect_after(source: &str, nodes: &[Syntax], group_at: usize) -> Option<Strin
 
 fn unquote(raw: &str) -> String {
     let bytes = raw.as_bytes();
-    if bytes.len() >= 2 && (bytes[0] == b'"' || bytes[0] == b'\'') && bytes[bytes.len() - 1] == bytes[0] {
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[bytes.len() - 1] == bytes[0]
+    {
         raw[1..raw.len() - 1].to_owned()
     } else {
         raw.to_owned()
@@ -2400,7 +2660,11 @@ fn pats_from(nodes: &[Syntax]) -> Vec<Pat> {
             Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => {
                 pats.push(Pat::Lit(raw.clone()));
             }
-            Syntax::Group { delimiter, children, .. } => {
+            Syntax::Group {
+                delimiter,
+                children,
+                ..
+            } => {
                 pats.push(Pat::Group {
                     delimiter: *delimiter,
                     inner: pats_from(children),
@@ -2483,10 +2747,7 @@ fn read_rep(nodes: &[Syntax], index: usize) -> (Pat, usize) {
     } else {
         RepKind::ZeroOrMore
     };
-    (
-        Pat::Rep { inner, sep, kind },
-        cursor,
-    )
+    (Pat::Rep { inner, sep, kind }, cursor)
 }
 
 fn hole_kind(raw: &str) -> HoleKind {
@@ -2640,7 +2901,12 @@ fn read_var_path(nodes: &[Syntax], index: usize) -> Option<(String, usize, usize
     let mut end_at = span.end as usize;
     let mut cursor = index + 2;
     while operator_is(nodes.get(cursor), ".") {
-        let Syntax::Token { raw: field, span: field_span, .. } = nodes.get(cursor + 1)? else {
+        let Syntax::Token {
+            raw: field,
+            span: field_span,
+            ..
+        } = nodes.get(cursor + 1)?
+        else {
             break;
         };
         path.push('.');
@@ -2713,7 +2979,12 @@ fn read_directive(source: &str, nodes: &[Syntax], index: usize) -> Option<(Tpl, 
     if !group_is(Some(args), Delimiter::Paren) {
         return None;
     }
-    let Syntax::Group { children, span: arg_span, .. } = args else {
+    let Syntax::Group {
+        children,
+        span: arg_span,
+        ..
+    } = args
+    else {
         return None;
     };
     if raw == "#if" {
@@ -2823,7 +3094,12 @@ fn directive_tpl(
             let mut inner = Vec::new();
             let mut inner_cursor = arg_span.start as usize + 1;
             walk_template(source, children, &mut inner, &mut inner_cursor);
-            push_gap(source, &mut inner, &mut inner_cursor, arg_span.end as usize - 1);
+            push_gap(
+                source,
+                &mut inner,
+                &mut inner_cursor,
+                arg_span.end as usize - 1,
+            );
             Some(Tpl::Core(inner))
         }
         "#join" => Some(read_join(children)),
@@ -2991,7 +3267,11 @@ fn tpls_from(nodes: &[Syntax], _unused: String) -> Vec<Tpl> {
                 }
             }
             Syntax::String { raw, .. } => pending.push_str(raw),
-            Syntax::Group { delimiter, children, .. } => {
+            Syntax::Group {
+                delimiter,
+                children,
+                ..
+            } => {
                 pending.push(open_char(*delimiter));
                 // Nested groups in a template are ordinary text plus holes.
                 let nested = tpls_from(children, String::new());
@@ -3112,7 +3392,10 @@ fn failure_progress(
     // A nested class stopped on `value` in `value:)`. The closer after
     // the colon is the missing type, not the field name. `state = 1`
     // already stopped on `=`; that is not a name before a colon.
-    let span = if nodes.iter().any(|node| node_span(node).start == span.start && matches!(node, Syntax::Token { .. })) {
+    let span = if nodes
+        .iter()
+        .any(|node| node_span(node).start == span.start && matches!(node, Syntax::Token { .. }))
+    {
         closer_after_colon(source, nodes, index, span)
     } else {
         span
@@ -3138,10 +3421,16 @@ fn closer_after_colon(source: &str, nodes: &[Syntax], from: usize, span: Span) -
 }
 
 fn closer_in(nodes: &[Syntax], span: Span) -> Option<Span> {
-    let at = nodes.iter().position(|node| node_span(node).start == span.start)?;
-    if nodes.get(at + 1).is_some_and(|node| operator_is(Some(node), ":")) {
+    let at = nodes
+        .iter()
+        .position(|node| node_span(node).start == span.start)?;
+    if nodes
+        .get(at + 1)
+        .is_some_and(|node| operator_is(Some(node), ":"))
+    {
         let next = nodes.get(at + 2)?;
-        if matches!(next, Syntax::Operator { raw, .. } if matches!(raw.as_str(), ")" | "," | ";" | "}" | "]")) {
+        if matches!(next, Syntax::Operator { raw, .. } if matches!(raw.as_str(), ")" | "," | ";" | "}" | "]"))
+        {
             return Some(failure_token(next));
         }
     }
@@ -3214,8 +3503,12 @@ fn match_pats_fail(
                 } else if expected.starts_with("seg") {
                     // `between(3) lower(1)` stopped on `lower`. The missing
                     // segment is `upper(`, and that `(` is the failure.
-                    return Some(segment_paren(source, node).unwrap_or_else(|| failure_token(node)));
-                } else if let Some(span) = nested_form_failure(source, node_slice_from(nodes, *cursor), 0) {
+                    return Some(
+                        segment_paren(source, node).unwrap_or_else(|| failure_token(node)),
+                    );
+                } else if let Some(span) =
+                    nested_form_failure(source, node_slice_from(nodes, *cursor), 0)
+                {
                     return Some(span);
                 } else if expected == "state" && operator_is(Some(node), "=") {
                     // `state = 1` has no binding. `=` is where the name
@@ -3224,7 +3517,9 @@ fn match_pats_fail(
                 } else if expected == "assert" {
                     // `assert()` has no condition. The `)` is the failure,
                     // not the macro name.
-                    return Some(empty_call_paren(source, node).unwrap_or_else(|| failure_token(node)));
+                    return Some(
+                        empty_call_paren(source, node).unwrap_or_else(|| failure_token(node)),
+                    );
                 } else {
                     return Some(failure_token(node));
                 }
@@ -3293,7 +3588,8 @@ fn match_pats_fail(
             }
             Pat::Hole { name, kind } => {
                 if let HoleKind::Class(class_name) = kind {
-                    let Some(class_) = classes.iter().find(|class_| class_.name == *class_name) else {
+                    let Some(class_) = classes.iter().find(|class_| class_.name == *class_name)
+                    else {
                         // `item` and `jsxChild` are positions, not classes in
                         // this module. The hole still wanted a form here.
                         // `record Cons(head:, tail)` fails inside that item,
@@ -3318,7 +3614,8 @@ fn match_pats_fail(
                 } else {
                     skip_comments(nodes, cursor);
                     let taken = if *kind == HoleKind::Binding && pattern.len() == 1 {
-                        take_expr(source, nodes, *cursor).or_else(|| take_ident(source, nodes, *cursor))
+                        take_expr(source, nodes, *cursor)
+                            .or_else(|| take_ident(source, nodes, *cursor))
                     } else {
                         take_hole(source, nodes, *cursor, kind)
                     };
@@ -3328,7 +3625,9 @@ fn match_pats_fail(
                         // `value:` has no type. The closer after the colon is
                         // that absence, not the field name the type hole saw.
                         let missing = if matches!(kind, HoleKind::Ident | HoleKind::Binding)
-                            && nodes.get(*cursor).is_some_and(|node| operator_is(Some(node), "="))
+                            && nodes
+                                .get(*cursor)
+                                .is_some_and(|node| operator_is(Some(node), "="))
                         {
                             // `state = 1` has no name. `=` is that absence.
                             nodes.get(*cursor).map(failure_token)
@@ -3346,7 +3645,9 @@ fn match_pats_fail(
                         // stop only when nothing after it fails further on.
                         let here = missing;
                         let keep_missing = matches!(kind, HoleKind::Ident | HoleKind::Binding)
-                            && nodes.get(*cursor).is_some_and(|node| operator_is(Some(node), "="));
+                            && nodes
+                                .get(*cursor)
+                                .is_some_and(|node| operator_is(Some(node), "="));
                         if !keep_missing {
                             if let Some(later) = later_failure(
                                 source,
@@ -3376,14 +3677,7 @@ fn match_pats_fail(
                         *cursor = saved;
                         if *kind == RepKind::OneOrMore && many == 0 {
                             return match_pats_fail(
-                                source,
-                                nodes,
-                                cursor,
-                                inner,
-                                &mut one,
-                                classes,
-                                progress,
-                                expect,
+                                source, nodes, cursor, inner, &mut one, classes, progress, expect,
                             )
                             .or_else(|| nodes.get(*cursor).map(failure_token));
                         }
@@ -3395,36 +3689,42 @@ fn match_pats_fail(
                         }
                         if many > 0 {
                             if let Some(inner_span) = match_pats_fail(
-                                source,
-                                nodes,
-                                cursor,
-                                inner,
-                                &mut one,
-                                classes,
-                                progress,
-                                expect,
+                                source, nodes, cursor, inner, &mut one, classes, progress, expect,
                             ) {
-                                let inner_span = if let Some(found) = bind_semi(nodes.get(*cursor)).or_else(|| nodes.get(*cursor + 1).and_then(|node| {
-                                    let Syntax::Group { children, span: group, .. } = node else {
-                                        return None;
-                                    };
-                                    if !children.iter().any(|child| operator_is(Some(child), ":")) {
-                                        return None;
-                                    }
-                                    // `Some(value:)` — the reader stored the
-                                    // colon as the group's close. The `)` is
-                                    // the next `)` in the source, and that is
-                                    // the token upstream reports.
-                                    let at = group.start as usize;
-                                    if let Some(rel) = source.get(at..).and_then(|rest| rest.find(')')) {
-                                        let start = u32_at(at + rel);
-                                        return Some(Span {
-                                            start,
-                                            end: start + 1,
-                                        });
-                                    }
-                                    missing_colon_in(children)
-                                })) {
+                                let inner_span = if let Some(found) = bind_semi(nodes.get(*cursor))
+                                    .or_else(|| {
+                                        nodes.get(*cursor + 1).and_then(|node| {
+                                            let Syntax::Group {
+                                                children,
+                                                span: group,
+                                                ..
+                                            } = node
+                                            else {
+                                                return None;
+                                            };
+                                            if !children
+                                                .iter()
+                                                .any(|child| operator_is(Some(child), ":"))
+                                            {
+                                                return None;
+                                            }
+                                            // `Some(value:)` — the reader stored the
+                                            // colon as the group's close. The `)` is
+                                            // the next `)` in the source, and that is
+                                            // the token upstream reports.
+                                            let at = group.start as usize;
+                                            if let Some(rel) =
+                                                source.get(at..).and_then(|rest| rest.find(')'))
+                                            {
+                                                let start = u32_at(at + rel);
+                                                return Some(Span {
+                                                    start,
+                                                    end: start + 1,
+                                                });
+                                            }
+                                            missing_colon_in(children)
+                                        })
+                                    }) {
                                     found
                                 } else {
                                     closer_after_colon(source, nodes, saved, inner_span)
@@ -3462,7 +3762,10 @@ fn match_pats_fail(
                     if let Some(sep) = sep {
                         let saved = *cursor;
                         skip_comments(nodes, cursor);
-                        if nodes.get(*cursor).is_some_and(|node| node_is_lit(node, sep)) {
+                        if nodes
+                            .get(*cursor)
+                            .is_some_and(|node| node_is_lit(node, sep))
+                        {
                             *progress = (*progress).max(node_end(&nodes[*cursor]) as i32);
                             *cursor += 1;
                             continue;
@@ -3579,7 +3882,9 @@ fn trailing_separator(children: &[Syntax], child: usize, close: Option<Span>) ->
 /// the closer upstream reports for `empty():` or `assert()`.
 fn failure_token(node: &Syntax) -> Span {
     match node {
-        Syntax::Group { close: Some(close), .. } => *close,
+        Syntax::Group {
+            close: Some(close), ..
+        } => *close,
         other => node_span(other),
     }
 }
@@ -3590,7 +3895,9 @@ fn nested_macro_name(source: &str, span: Span) -> Option<String> {
     let before = source.get(..span.start as usize)?;
     let start = before.rfind('\n')?;
     let line = before[start + 1..].trim_start();
-    let name = line.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').next()?;
+    let name = line
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .next()?;
     if name.is_empty() || !is_ident_text(name) {
         return None;
     }
@@ -3630,10 +3937,7 @@ fn nested_form_failure(source: &str, nodes: &[Syntax], cursor: usize) -> Option<
             let rest = source.get(at..)?;
             let rel = rest.find(|ch: char| !ch.is_whitespace())?;
             let start = u32_at(at + rel);
-            return Some(Span {
-                start,
-                end: start,
-            });
+            return Some(Span { start, end: start });
         }
     }
     None
@@ -3666,10 +3970,17 @@ fn empty_call_head(nodes: &[Syntax], index: usize) -> bool {
     if name != "assert" {
         return false;
     }
-    let Syntax::Group { children, delimiter: Delimiter::Paren, .. } = nodes.get(index + 1).unwrap_or(&nodes[index]) else {
+    let Syntax::Group {
+        children,
+        delimiter: Delimiter::Paren,
+        ..
+    } = nodes.get(index + 1).unwrap_or(&nodes[index])
+    else {
         return false;
     };
-    children.iter().all(|child| matches!(child, Syntax::Comment { .. }))
+    children
+        .iter()
+        .all(|child| matches!(child, Syntax::Comment { .. }))
 }
 
 /// The first non-whitespace of the line after `at`.
@@ -3678,16 +3989,17 @@ fn each_line_after(source: &str, at: usize) -> Option<Span> {
     let nl = rest.find('\n')?;
     let line_start = at + nl + 1;
     let mut end = line_start;
-    while source.as_bytes().get(end).is_some_and(|byte| *byte != b'\n') {
+    while source
+        .as_bytes()
+        .get(end)
+        .is_some_and(|byte| *byte != b'\n')
+    {
         end += 1;
     }
     // The missing brace is the end of that line. A span on `<` is the
     // element, not the failure.
     let start = u32_at(end);
-    Some(Span {
-        start,
-        end: start,
-    })
+    Some(Span { start, end: start })
 }
 
 /// `{each (...)}` wanted a braced body on the next line. Upstream
@@ -3700,10 +4012,7 @@ fn each_body_line(source: &str, nodes: &[Syntax], index: usize) -> Option<Span> 
     let rest = source.get(at..)?;
     let nl = rest.find('\n')?;
     let start = u32_at(at + nl + 1);
-    Some(Span {
-        start,
-        end: start,
-    })
+    Some(Span { start, end: start })
 }
 
 /// `assert()` — the call has no argument. The `)` is the failure token.
@@ -3738,11 +4047,19 @@ fn bind_semi(node: Option<&Syntax>) -> Option<Span> {
     let Syntax::Group { children, .. } = node? else {
         return None;
     };
-    if !children.iter().any(|child| operator_spelling(child).is_some_and(|raw| raw == "<-")) {
+    if !children
+        .iter()
+        .any(|child| operator_spelling(child).is_some_and(|raw| raw == "<-"))
+    {
         return None;
     }
-    let arrow = children.iter().position(|child| operator_spelling(child).is_some_and(|raw| raw == "<-"))?;
-    children.get(arrow + 1).filter(|child| operator_is(Some(child), ";")).map(failure_token)
+    let arrow = children
+        .iter()
+        .position(|child| operator_spelling(child).is_some_and(|raw| raw == "<-"))?;
+    children
+        .get(arrow + 1)
+        .filter(|child| operator_is(Some(child), ";"))
+        .map(failure_token)
 }
 
 /// An expression hole that did not take an expression. `name <-;` reports
@@ -3750,14 +4067,21 @@ fn bind_semi(node: Option<&Syntax>) -> Option<Span> {
 fn expr_failure_token(nodes: &[Syntax], cursor: usize) -> Option<Span> {
     let mut look = cursor;
     skip_comments(nodes, &mut look);
-    if nodes.get(look).and_then(|node| match node {
-        Syntax::Token { raw, .. } => Some(raw.as_str()),
-        _ => None,
-    }).is_some_and(is_ident_text)
+    if nodes
+        .get(look)
+        .and_then(|node| match node {
+            Syntax::Token { raw, .. } => Some(raw.as_str()),
+            _ => None,
+        })
+        .is_some_and(is_ident_text)
     {
         let mut op = look + 1;
         skip_comments(nodes, &mut op);
-        if nodes.get(op).and_then(operator_spelling).is_some_and(|raw| raw == "<-" || raw == "->") {
+        if nodes
+            .get(op)
+            .and_then(operator_spelling)
+            .is_some_and(|raw| raw == "<-" || raw == "->")
+        {
             let after = op + 1;
             return nodes.get(after).map(failure_token);
         }
@@ -3770,16 +4094,24 @@ fn expr_failure_token(nodes: &[Syntax], cursor: usize) -> Option<Span> {
 fn type_failure_token(nodes: &[Syntax], cursor: usize) -> Option<Span> {
     let mut look = cursor;
     skip_comments(nodes, &mut look);
-    if nodes.get(look).is_some_and(|node| operator_is(Some(node), ":")) {
+    if nodes
+        .get(look)
+        .is_some_and(|node| operator_is(Some(node), ":"))
+    {
         look += 1;
         skip_comments(nodes, &mut look);
         return nodes.get(look).map(failure_token);
     }
-    if nodes.get(look).and_then(|node| match node {
-        Syntax::Token { raw, .. } => Some(raw.as_str()),
-        _ => None,
-    }).is_some_and(is_ident_text)
-        && nodes.get(look + 1).is_some_and(|node| operator_is(Some(node), ":"))
+    if nodes
+        .get(look)
+        .and_then(|node| match node {
+            Syntax::Token { raw, .. } => Some(raw.as_str()),
+            _ => None,
+        })
+        .is_some_and(is_ident_text)
+        && nodes
+            .get(look + 1)
+            .is_some_and(|node| operator_is(Some(node), ":"))
     {
         let after = look + 2;
         return nodes.get(after).map(failure_token);
@@ -3852,10 +4184,14 @@ fn class_failure(
             if adjusted.start != span.start {
                 nested = adjusted.end as i32;
                 span = adjusted;
-            } else if let Some(inside) = nodes.get(child.saturating_sub(1)).and_then(|node| match node {
-                Syntax::Group { children, .. } => closer_in(children, span),
-                _ => None,
-            }) {
+            } else if let Some(inside) =
+                nodes
+                    .get(child.saturating_sub(1))
+                    .and_then(|node| match node {
+                        Syntax::Group { children, .. } => closer_in(children, span),
+                        _ => None,
+                    })
+            {
                 nested = inside.end as i32;
                 span = inside;
             } else {
@@ -3870,7 +4206,8 @@ fn class_failure(
                     progress: nested,
                 });
             }
-        } else if match_pats(source, nodes, &mut child, &rule.pattern, &mut raw, classes).is_some() {
+        } else if match_pats(source, nodes, &mut child, &rule.pattern, &mut raw, classes).is_some()
+        {
             // `Some(value:)` matches only because the type hole ate `)`. A
             // colon with no type is still the class failure. The closer is
             // the token upstream names.
@@ -3962,18 +4299,39 @@ fn comma_separated_rest(pattern: &[Pat]) -> Vec<Pat> {
                 delimiter: *delimiter,
                 inner: comma_separated_rest(inner),
             },
-            Pat::Rep { inner, sep: None, kind } => {
+            Pat::Rep {
+                inner,
+                sep: None,
+                kind,
+            } => {
                 let inner = comma_separated_rest(inner);
-                let hole = inner.iter().any(|part| matches!(part, Pat::Hole { kind: HoleKind::TokenTree, .. }));
-                let comma = inner.iter().any(|part| matches!(part, Pat::Lit(lit) if lit == ","));
+                let hole = inner.iter().any(|part| {
+                    matches!(
+                        part,
+                        Pat::Hole {
+                            kind: HoleKind::TokenTree,
+                            ..
+                        }
+                    )
+                });
+                let comma = inner
+                    .iter()
+                    .any(|part| matches!(part, Pat::Lit(lit) if lit == ","));
                 if hole && comma {
                     Pat::Rep {
-                        inner: inner.into_iter().filter(|part| !matches!(part, Pat::Lit(lit) if lit == ",")).collect(),
+                        inner: inner
+                            .into_iter()
+                            .filter(|part| !matches!(part, Pat::Lit(lit) if lit == ","))
+                            .collect(),
                         sep: Some(",".to_owned()),
                         kind: *kind,
                     }
                 } else {
-                    Pat::Rep { inner, sep: None, kind: *kind }
+                    Pat::Rep {
+                        inner,
+                        sep: None,
+                        kind: *kind,
+                    }
                 }
             }
             other => other.clone(),
@@ -3982,7 +4340,6 @@ fn comma_separated_rest(pattern: &[Pat]) -> Vec<Pat> {
     }
     out
 }
-
 
 /// `filter(map(...), (value) => value > 2)` is the expansion. The
 /// reference also has a trailing comma on that call, and on a call whose
@@ -3995,7 +4352,10 @@ fn trailing_thread_commas(text: &str) -> String {
         if chars[index] == '(' {
             if let Some(close) = matching_thread_paren(&chars, index) {
                 let last = last_arg_end(&chars, index + 1, close);
-                let outermost = close + 1 == chars.len() || chars[close + 1..].iter().all(|ch| ch.is_whitespace() || *ch == ';');
+                let outermost = close + 1 == chars.len()
+                    || chars[close + 1..]
+                        .iter()
+                        .all(|ch| ch.is_whitespace() || *ch == ';');
                 let already = close > 0 && chars[close - 1] == ',';
                 // A nested call (`vector(...)`) does not take the comma.
                 // The outer call does, including when its last argument is
@@ -4046,7 +4406,12 @@ fn last_arg_end(chars: &[char], start: usize, close: usize) -> Option<usize> {
 }
 
 fn grouped_prefix(nodes: &[Syntax], index: usize) -> Option<String> {
-    let Syntax::Group { children, delimiter: Delimiter::Paren, .. } = nodes.get(index)? else {
+    let Syntax::Group {
+        children,
+        delimiter: Delimiter::Paren,
+        ..
+    } = nodes.get(index)?
+    else {
         return None;
     };
     let first = children.first().and_then(operator_spelling)?;
@@ -4063,14 +4428,22 @@ fn grouped_prefix(nodes: &[Syntax], index: usize) -> Option<String> {
 }
 
 fn unwrap_call_group<'a>(nodes: &[Syntax], index: usize, pattern: &'a [Pat]) -> &'a [Pat] {
-    let [Pat::Group { delimiter: Delimiter::Paren, inner }] = pattern else {
+    let [
+        Pat::Group {
+            delimiter: Delimiter::Paren,
+            inner,
+        },
+    ] = pattern
+    else {
         return pattern;
     };
     let head = match nodes.get(index) {
         Some(Syntax::Token { raw, .. } | Syntax::Operator { raw, .. }) => raw.as_str(),
         _ => return pattern,
     };
-    let starts = inner.first().is_some_and(|pat| matches!(pat, Pat::Lit(lit) if lit == head));
+    let starts = inner
+        .first()
+        .is_some_and(|pat| matches!(pat, Pat::Lit(lit) if lit == head));
     if starts { inner.as_slice() } else { pattern }
 }
 
@@ -4081,7 +4454,10 @@ fn skip_matched_prefix<'a>(nodes: &[Syntax], index: usize, pattern: &'a [Pat]) -
     }) else {
         return pattern;
     };
-    let Some(at) = pattern.iter().position(|pat| matches!(pat, Pat::Lit(lit) if lit == head)) else {
+    let Some(at) = pattern
+        .iter()
+        .position(|pat| matches!(pat, Pat::Lit(lit) if lit == head))
+    else {
         return pattern;
     };
     if at == 0 {
@@ -4148,18 +4524,27 @@ fn match_pats(
                 // including operators the flat walker stopped at.
                 let whole = match inner.as_slice() {
                     [Pat::Hole { name, .. }] => Some(name.clone()),
-                    [Pat::Rep {
-                        inner: rep_inner,
-                        sep: None,
-                        ..
-                    }] => match rep_inner.as_slice() {
-                        [Pat::Hole { name, kind: HoleKind::Stmt }] => Some(name.clone()),
+                    [
+                        Pat::Rep {
+                            inner: rep_inner,
+                            sep: None,
+                            ..
+                        },
+                    ] => match rep_inner.as_slice() {
+                        [
+                            Pat::Hole {
+                                name,
+                                kind: HoleKind::Stmt,
+                            },
+                        ] => Some(name.clone()),
                         _ => None,
                     },
                     _ => None,
                 };
                 if let Some(name) = whole {
-                    let already = captures.get(&name).is_some_and(|have| matches!(have, Capture::Many(_)));
+                    let already = captures
+                        .get(&name)
+                        .is_some_and(|have| matches!(have, Capture::Many(_)));
                     if !already {
                         let text = sweetener_reader::slice_range(
                             source,
@@ -4193,7 +4578,8 @@ fn match_pats(
                     let taken = if *kind == HoleKind::Binding && pattern.len() == 1 {
                         // `rule { clamp(...) }` is a binding hole standing for the
                         // whole call. Inside `function $name(...)` it is one name.
-                        take_expr(source, nodes, *cursor).or_else(|| take_ident(source, nodes, *cursor))
+                        take_expr(source, nodes, *cursor)
+                            .or_else(|| take_ident(source, nodes, *cursor))
                     } else if *kind == HoleKind::Expr {
                         take_expr_until(source, nodes, *cursor, stop)
                     } else {
@@ -4229,7 +4615,10 @@ fn match_pats(
                     if let Some(sep) = sep {
                         let saved = *cursor;
                         skip_comments(nodes, cursor);
-                        if nodes.get(*cursor).is_some_and(|node| node_is_lit(node, sep)) {
+                        if nodes
+                            .get(*cursor)
+                            .is_some_and(|node| node_is_lit(node, sep))
+                        {
                             *cursor += 1;
                             continue;
                         }
@@ -4256,8 +4645,13 @@ fn match_pats(
                 // repetition keeps the records; the blob would hide `name`
                 // and `moves`.
                 if sep.is_none() {
-                    if let Some(name) = many.iter().find_map(|one| one.first().map(|(name, _)| name.clone())) {
-                        let class_rows = many.iter().all(|one| matches!(one.first(), Some((_, Capture::Record { .. }))));
+                    if let Some(name) = many
+                        .iter()
+                        .find_map(|one| one.first().map(|(name, _)| name.clone()))
+                    {
+                        let class_rows = many
+                            .iter()
+                            .all(|one| matches!(one.first(), Some((_, Capture::Record { .. }))));
                         // `$($body:item)*` is several items. One blob hides
                         // `record` from the next expansion. Keep each item.
                         let item_rows = many.iter().all(|one| {
@@ -4304,7 +4698,9 @@ fn match_pats(
                             let extras: Vec<(String, Capture)> = row
                                 .iter()
                                 .filter_map(|(key, value)| match value {
-                                    Capture::Record { fields, .. } if key == &name => Some(fields.clone()),
+                                    Capture::Record { fields, .. } if key == &name => {
+                                        Some(fields.clone())
+                                    }
                                     _ => None,
                                 })
                                 .flatten()
@@ -4341,7 +4737,8 @@ fn take_class(
     for rule in &class_.rules {
         let mut child = index;
         let mut raw = HashMap::new();
-        let Some(end) = match_pats(source, nodes, &mut child, &rule.pattern, &mut raw, classes) else {
+        let Some(end) = match_pats(source, nodes, &mut child, &rule.pattern, &mut raw, classes)
+        else {
             continue;
         };
         let text = sweetener_reader::slice_range(source, start, end).to_owned();
@@ -4359,18 +4756,18 @@ fn take_class(
             } else if let Capture::Many(rows) = value {
                 // `ident` and `binding` are one name. A hole that swallowed
                 // the rest of the form is not the field.
-                if let Some(one) = rows.into_iter().next().and_then(|row| row.into_iter().next()) {
+                if let Some(one) = rows
+                    .into_iter()
+                    .next()
+                    .and_then(|row| row.into_iter().next())
+                {
                     fields.insert(field.name.clone(), one.1);
                 }
             } else {
                 fields.insert(field.name.clone(), value);
             }
         }
-        return Some((
-            Capture::Record { text, fields },
-            end,
-            child,
-        ));
+        return Some((Capture::Record { text, fields }, end, child));
     }
     None
 }
@@ -4398,7 +4795,11 @@ fn take_hole(
                         Syntax::Group { .. } => depth_groups += 1,
                         Syntax::Operator { raw, .. } if raw == ";" && depth_groups == 0 => {
                             let end = node_end(&nodes[end_index]);
-                            return Some((source[node_start(node)..end].to_owned(), end, end_index + 1));
+                            return Some((
+                                source[node_start(node)..end].to_owned(),
+                                end,
+                                end_index + 1,
+                            ));
                         }
                         _ => {}
                     }
@@ -4429,7 +4830,8 @@ fn take_hole(
                 if is_closed_group(&nodes[end_index], Delimiter::Brace) {
                     let mut after = end_index + 1;
                     skip_comments(nodes, &mut after);
-                    if token_is(nodes.get(after), "catch") || token_is(nodes.get(after), "finally") {
+                    if token_is(nodes.get(after), "catch") || token_is(nodes.get(after), "finally")
+                    {
                         end_index = after;
                         continue;
                     }
@@ -4476,10 +4878,17 @@ fn take_type(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, u
         let Some(node) = nodes.get(index) else {
             break;
         };
-        if matches!(node, Syntax::Group { delimiter: Delimiter::Brace, .. }) {
+        if matches!(
+            node,
+            Syntax::Group {
+                delimiter: Delimiter::Brace,
+                ..
+            }
+        ) {
             break;
         }
-        if matches!(node, Syntax::Operator { raw, .. } if matches!(raw.as_str(), ";" | "," | "=" | ")" | "]" | "}" | ">")) {
+        if matches!(node, Syntax::Operator { raw, .. } if matches!(raw.as_str(), ";" | "," | "=" | ")" | "]" | "}" | ">"))
+        {
             break;
         }
         // `Empty | Cons` is one type. `|` is not a field separator; `,` is.
@@ -4521,7 +4930,11 @@ fn take_ident(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, 
 }
 
 /// One token of a `$($segment)/+` repetition. A group is the whole group.
-fn take_token_tree(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, usize, usize)> {
+fn take_token_tree(
+    source: &str,
+    nodes: &[Syntax],
+    cursor: usize,
+) -> Option<(String, usize, usize)> {
     let mut index = cursor;
     skip_comments(nodes, &mut index);
     let node = nodes.get(index)?;
@@ -4561,10 +4974,7 @@ fn take_expr(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, u
 /// The reader splits `===` into `==` and `=`, so a fixed list of spellings
 /// misses the second half.
 fn is_operator_spelling(raw: &str) -> bool {
-    !raw.is_empty()
-        && raw
-            .chars()
-            .all(|ch| "!=<>&|?+-*/%^~".contains(ch))
+    !raw.is_empty() && raw.chars().all(|ch| "!=<>&|?+-*/%^~".contains(ch))
 }
 
 /// Operand of a right-associative operator, including another copy of that
@@ -4601,7 +5011,9 @@ fn take_right_assoc_operand(
         if operator_is(Some(node), "=") {
             break;
         }
-        if matches!(node, Syntax::Group { .. }) || matches!(node, Syntax::Token { .. } | Syntax::String { .. }) {
+        if matches!(node, Syntax::Group { .. })
+            || matches!(node, Syntax::Token { .. } | Syntax::String { .. })
+        {
             index += 1;
             continue;
         }
@@ -4612,7 +5024,9 @@ fn take_right_assoc_operand(
             }
             continue;
         }
-        if matches!(node, Syntax::Operator { .. }) && nodes.get(index + 1).is_some_and(is_expr_start) {
+        if matches!(node, Syntax::Operator { .. })
+            && nodes.get(index + 1).is_some_and(is_expr_start)
+        {
             index += 1;
             continue;
         }
@@ -4641,7 +5055,8 @@ fn take_expr_until(
     index += 1;
     // `-4` starts on the operator. The operand is the next primary, not a
     // trailing operator the walk would drop.
-    if matches!(start_node, Syntax::Operator { .. }) && nodes.get(index).is_some_and(is_expr_start) {
+    if matches!(start_node, Syntax::Operator { .. }) && nodes.get(index).is_some_and(is_expr_start)
+    {
         index += 1;
     }
     loop {
@@ -4698,7 +5113,10 @@ fn take_expr_until(
             // its own spelling.
             if matches!(node, Syntax::Operator { raw, .. } if is_operator_spelling(raw))
                 && nodes.get(op_end).is_some_and(|next| {
-                    matches!(next, Syntax::Operator { .. } | Syntax::Token { .. } | Syntax::String { .. })
+                    matches!(
+                        next,
+                        Syntax::Operator { .. } | Syntax::Token { .. } | Syntax::String { .. }
+                    )
                 })
             {
                 index = op_end;
@@ -4718,11 +5136,19 @@ fn take_expr_until(
         // `!==` was consumed as operators. Do not walk back onto `!` when
         // `==` and its operand are already part of the expression.
         let chained = matches!(nodes.get(index - 1), Some(Syntax::Operator { raw, .. }) if is_operator_spelling(raw))
-            && nodes.get(index).is_some_and(|next| matches!(next, Syntax::Operator { .. } | Syntax::Token { .. } | Syntax::String { .. }));
+            && nodes.get(index).is_some_and(|next| {
+                matches!(
+                    next,
+                    Syntax::Operator { .. } | Syntax::Token { .. } | Syntax::String { .. }
+                )
+            });
         if chained {
             break;
         }
-        if stop_op.is_some() && operator_spelling(&nodes[index - 1]) != stop_op && nodes.get(index).is_some_and(is_expr_start) {
+        if stop_op.is_some()
+            && operator_spelling(&nodes[index - 1]) != stop_op
+            && nodes.get(index).is_some_and(is_expr_start)
+        {
             break;
         }
         if stop_op.is_some() && operator_spelling(&nodes[index - 1]) == stop_op {
@@ -4751,7 +5177,7 @@ fn is_expr_start(node: &Syntax) -> bool {
 
 fn is_expr_stop(node: &Syntax) -> bool {
     match node {
-        Syntax::Operator { raw, .. } => matches!(raw.as_str(), ";" | ")" | "]" | "}" ),
+        Syntax::Operator { raw, .. } => matches!(raw.as_str(), ";" | ")" | "]" | "}"),
         _ => false,
     }
 }
@@ -4769,7 +5195,15 @@ fn apply_plan(text: &str, plan: &[(String, String)]) -> String {
     let mut seen = HashMap::<String, usize>::new();
     let mut out = String::new();
     let mut cursor = 0usize;
-    apply_plan_nodes(text, &read.children, plan, &mut seen, false, &mut out, &mut cursor);
+    apply_plan_nodes(
+        text,
+        &read.children,
+        plan,
+        &mut seen,
+        false,
+        &mut out,
+        &mut cursor,
+    );
     if cursor < text.len() {
         out.push_str(&text[cursor..]);
     }
@@ -4784,7 +5218,10 @@ fn plan_name_map(plan: &[(String, String)]) -> HashMap<String, String> {
     occurrence_plan(plan, &HashMap::new())
 }
 
-fn occurrence_plan(plan: &[(String, String)], seen: &HashMap<String, usize>) -> HashMap<String, String> {
+fn occurrence_plan(
+    plan: &[(String, String)],
+    seen: &HashMap<String, usize>,
+) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for (key, printed) in plan {
         let name = plan_name(key);
@@ -4829,14 +5266,29 @@ fn apply_plan_nodes(
             }
             Syntax::Group { span, children, .. } if span.end as usize <= *cursor => {}
             Syntax::Group { children, .. } => {
-                let method_params = index > 0 && operator_is(nodes.get(index - 1), ">") && matches!(nodes.get(index), Some(Syntax::Group { delimiter: Delimiter::Paren, .. }));
+                let method_params = index > 0
+                    && operator_is(nodes.get(index - 1), ">")
+                    && matches!(
+                        nodes.get(index),
+                        Some(Syntax::Group {
+                            delimiter: Delimiter::Paren,
+                            ..
+                        })
+                    );
                 if method_params {
                     if let Syntax::Group { span, children, .. } = &nodes[index] {
                         // `map<A, B>(value: F<A>)` — count `A` before the
                         // parameter types, or `F<A>` keeps the user's `A`.
-                        if let Some(angle) = nodes[..index].iter().rposition(|node| operator_is(Some(node), "<")).filter(|angle| {
-                            nodes[*angle..index].iter().position(|node| operator_is(Some(node), ">")).is_some_and(|close| angle + close + 1 == index)
-                        }) {
+                        if let Some(angle) = nodes[..index]
+                            .iter()
+                            .rposition(|node| operator_is(Some(node), "<"))
+                            .filter(|angle| {
+                                nodes[*angle..index]
+                                    .iter()
+                                    .position(|node| operator_is(Some(node), ">"))
+                                    .is_some_and(|close| angle + close + 1 == index)
+                            })
+                        {
                             if let Some(params) = type_param_names(nodes, angle) {
                                 for name in params {
                                     // One count for the declaration. A second
@@ -4860,13 +5312,31 @@ fn apply_plan_nodes(
                         if operator_is(nodes.get(rest), ":") {
                             rest += 1;
                             let mut end = rest;
-                            while end < nodes.len() && !operator_is(nodes.get(end), ";") && !operator_is(nodes.get(end), "{") && !matches!(nodes.get(end), Some(Syntax::Group { delimiter: Delimiter::Brace, .. })) {
+                            while end < nodes.len()
+                                && !operator_is(nodes.get(end), ";")
+                                && !operator_is(nodes.get(end), "{")
+                                && !matches!(
+                                    nodes.get(end),
+                                    Some(Syntax::Group {
+                                        delimiter: Delimiter::Brace,
+                                        ..
+                                    })
+                                )
+                            {
                                 end += 1;
                                 if end > rest + 8 {
                                     break;
                                 }
                             }
-                            apply_plan_nodes(source, &nodes[rest..end], plan, seen, false, out, cursor);
+                            apply_plan_nodes(
+                                source,
+                                &nodes[rest..end],
+                                plan,
+                                seen,
+                                false,
+                                out,
+                                cursor,
+                            );
                             if end > rest {
                                 let close = node_end(&nodes[end - 1]);
                                 if *cursor < close {
@@ -4887,17 +5357,32 @@ fn apply_plan_nodes(
                         // of this method. Count them before the parameter list
                         // or `a` takes `A`'s suffix. The prefix is still copied;
                         // rewrite the `<...>` here so `A` becomes `A_1`.
-                        if let Some(angle) = nodes[..index].iter().rposition(|node| operator_is(Some(node), "<")) {
-                            if let Some(close) = nodes[angle..index].iter().position(|node| operator_is(Some(node), ">")) {
+                        if let Some(angle) = nodes[..index]
+                            .iter()
+                            .rposition(|node| operator_is(Some(node), "<"))
+                        {
+                            if let Some(close) = nodes[angle..index]
+                                .iter()
+                                .position(|node| operator_is(Some(node), ">"))
+                            {
                                 let close_at = angle + close;
                                 // Only the type-parameter list that ends at
                                 // this parameter list. `F<A>` earlier in the
                                 // signature is a use, not this binder.
-                                if close_at + 1 == index && type_param_names(nodes, angle).is_some() {
+                                if close_at + 1 == index && type_param_names(nodes, angle).is_some()
+                                {
                                     push_until(source, out, cursor, node_start(&nodes[angle]));
                                     out.push('<');
                                     let mut local = node_end(&nodes[angle]);
-                                    apply_plan_nodes(source, &nodes[angle + 1..close_at], plan, seen, false, out, &mut local);
+                                    apply_plan_nodes(
+                                        source,
+                                        &nodes[angle + 1..close_at],
+                                        plan,
+                                        seen,
+                                        false,
+                                        out,
+                                        &mut local,
+                                    );
                                     if local < node_start(&nodes[close_at]) {
                                         out.push_str(&source[local..node_start(&nodes[close_at])]);
                                     }
@@ -4917,7 +5402,15 @@ fn apply_plan_nodes(
                         if operator_is(nodes.get(rest_index), "=>") {
                             rest_index += 1;
                         }
-                        apply_plan_nodes(source, &nodes[rest_index..], plan, seen, false, out, cursor);
+                        apply_plan_nodes(
+                            source,
+                            &nodes[rest_index..],
+                            plan,
+                            seen,
+                            false,
+                            out,
+                            cursor,
+                        );
                         index = nodes.len();
                         continue;
                     }
@@ -4939,7 +5432,14 @@ fn apply_plan_nodes(
                     raw.contains(&whole) || raw.contains(&member)
                 });
                 if needs {
-                    let renamed = rename_template_literal(raw, &map, &[], &HashMap::new(), seen, span.start as usize);
+                    let renamed = rename_template_literal(
+                        raw,
+                        &map,
+                        &[],
+                        &HashMap::new(),
+                        seen,
+                        span.start as usize,
+                    );
                     push_until(source, out, cursor, span.start as usize);
                     out.push_str(&renamed);
                     *cursor = span.end as usize;
@@ -4952,13 +5452,27 @@ fn apply_plan_nodes(
     }
 }
 
-fn planned(raw: &str, binder: bool, plan: &[(String, String)], seen: &HashMap<String, usize>) -> Option<String> {
+fn planned(
+    raw: &str,
+    binder: bool,
+    plan: &[(String, String)],
+    seen: &HashMap<String, usize>,
+) -> Option<String> {
     let opened = seen.get(raw).copied().unwrap_or(0);
     if !binder && opened == 0 {
-        return plan.iter().find(|(key, _)| plan_name(key) == raw && !key.contains('\0')).map(|(_, printed)| printed.clone());
+        return plan
+            .iter()
+            .find(|(key, _)| plan_name(key) == raw && !key.contains('\0'))
+            .map(|(_, printed)| printed.clone());
     }
-    let nth = if binder { opened } else { opened.saturating_sub(1) };
-    plan.iter().find(|(key, _)| key == &format!("{raw}\0{nth}")).map(|(_, printed)| printed.clone())
+    let nth = if binder {
+        opened
+    } else {
+        opened.saturating_sub(1)
+    };
+    plan.iter()
+        .find(|(key, _)| key == &format!("{raw}\0{nth}"))
+        .map(|(_, printed)| printed.clone())
 }
 
 fn sole_capture(nodes: &[Syntax], index: usize) -> bool {
@@ -4991,7 +5505,10 @@ fn apply_arrow_params(
                 }
             }
         }
-        if let Syntax::Group { children: nested, .. } = &children[index] {
+        if let Syntax::Group {
+            children: nested, ..
+        } = &children[index]
+        {
             apply_arrow_params(source, nested, plan, seen, out, cursor);
         }
         index += 1;
@@ -4999,7 +5516,21 @@ fn apply_arrow_params(
 }
 
 fn is_type_name(raw: &str) -> bool {
-    matches!(raw, "number" | "string" | "boolean" | "any" | "unknown" | "never" | "void" | "object" | "bigint" | "symbol" | "undefined" | "null")
+    matches!(
+        raw,
+        "number"
+            | "string"
+            | "boolean"
+            | "any"
+            | "unknown"
+            | "never"
+            | "void"
+            | "object"
+            | "bigint"
+            | "symbol"
+            | "undefined"
+            | "null"
+    )
 }
 
 fn u32_at(offset: usize) -> u32 {
@@ -5088,7 +5619,9 @@ fn lit_width(nodes: &[Syntax], index: usize, expected: &str) -> Option<usize> {
 
 fn node_is_lit(node: &Syntax, expected: &str) -> bool {
     match node {
-        Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } | Syntax::String { raw, .. } => raw == expected,
+        Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } | Syntax::String { raw, .. } => {
+            raw == expected
+        }
         _ => false,
     }
 }
@@ -5112,7 +5645,10 @@ fn open_char(delimiter: Delimiter) -> char {
 }
 
 fn skip_comments(nodes: &[Syntax], cursor: &mut usize) {
-    while nodes.get(*cursor).is_some_and(|node| matches!(node, Syntax::Comment { .. })) {
+    while nodes
+        .get(*cursor)
+        .is_some_and(|node| matches!(node, Syntax::Comment { .. }))
+    {
         *cursor += 1;
     }
 }
@@ -5178,7 +5714,10 @@ fn macro_name_of(source: &str, nodes: &[Syntax], index: usize) -> Option<String>
         return Some(name.to_owned());
     }
     let Syntax::Group { children, .. } = nodes.get(index)? else {
-        return nodes.get(index).and_then(operator_spelling).map(str::to_owned);
+        return nodes
+            .get(index)
+            .and_then(operator_spelling)
+            .map(str::to_owned);
     };
     let _ = source;
     if children.iter().any(|node| operator_is(Some(node), "#")) {
@@ -5252,8 +5791,17 @@ fn collect_user_type_params(nodes: &[Syntax], names: &mut std::collections::Hash
         if operator_is(nodes.get(index), "<") {
             let head = index.checked_sub(1).and_then(|at| nodes.get(at));
             let binds = match head {
-                Some(Syntax::Token { raw, .. }) if is_binder_keyword(nodes, index.saturating_sub(2)) || matches!(raw.as_str(), "class" | "interface" | "type" | "function") => true,
-                Some(Syntax::Token { raw, .. }) if index >= 2 && is_binder_keyword(nodes, index - 2) => true,
+                Some(Syntax::Token { raw, .. })
+                    if is_binder_keyword(nodes, index.saturating_sub(2))
+                        || matches!(raw.as_str(), "class" | "interface" | "type" | "function") =>
+                {
+                    true
+                }
+                Some(Syntax::Token { raw, .. })
+                    if index >= 2 && is_binder_keyword(nodes, index - 2) =>
+                {
+                    true
+                }
                 _ => index > 0 && is_binder_keyword(nodes, index - 1),
             };
             // `class Option<A>`: `<` follows the class name, and the class
@@ -5334,7 +5882,15 @@ fn is_binder_at(nodes: &[Syntax], index: usize) -> bool {
 }
 
 fn method_param_name(nodes: &[Syntax], index: usize) -> bool {
-    let Some(open) = nodes[..index].iter().rposition(|node| matches!(node, Syntax::Group { delimiter: Delimiter::Paren, .. })) else {
+    let Some(open) = nodes[..index].iter().rposition(|node| {
+        matches!(
+            node,
+            Syntax::Group {
+                delimiter: Delimiter::Paren,
+                ..
+            }
+        )
+    }) else {
         return false;
     };
     if open == 0 || !operator_is(nodes.get(open - 1), ">") {
@@ -5347,7 +5903,10 @@ fn method_param_name(nodes: &[Syntax], index: usize) -> bool {
         return false;
     };
     children.iter().any(|child| match child {
-        Syntax::Token { span: child_span, raw } => child_span.start == span.start && is_ident_text(raw) && !is_type_name(raw),
+        Syntax::Token {
+            span: child_span,
+            raw,
+        } => child_span.start == span.start && is_ident_text(raw) && !is_type_name(raw),
         _ => false,
     }) && !children.iter().enumerate().any(|(at, child)| {
         node_start(child) == span.start as usize && at > 0 && operator_is(children.get(at - 1), ":")
@@ -5396,14 +5955,23 @@ fn is_syntax_import_at(nodes: &[Syntax], index: usize) -> bool {
     }
     // Only this statement. A later `export syntax` in the same module is not
     // part of the import, and treating it as one dropped the runtime import.
-    nodes.iter().skip(index).take_while(|node| !operator_is(Some(node), ";")).any(|node| token_is(Some(node), "syntax"))
+    nodes
+        .iter()
+        .skip(index)
+        .take_while(|node| !operator_is(Some(node), ";"))
+        .any(|node| token_is(Some(node), "syntax"))
 }
 
 fn syntax_import_at(nodes: &[Syntax], index: usize) -> Option<SyntaxImport> {
     let span = node_span(&nodes[index]);
     let mut names = Vec::new();
     let mut aliases = Vec::new();
-    if let Some(Syntax::Group { children, delimiter: Delimiter::Brace, .. }) = nodes.get(index + 1) {
+    if let Some(Syntax::Group {
+        children,
+        delimiter: Delimiter::Brace,
+        ..
+    }) = nodes.get(index + 1)
+    {
         let mut child = 0;
         while child < children.len() {
             if let Syntax::Token { raw, .. } = &children[child] {
@@ -5428,7 +5996,9 @@ fn syntax_import_at(nodes: &[Syntax], index: usize) -> Option<SyntaxImport> {
                 let name = inner
                     .iter()
                     .filter_map(|node| match node {
-                        Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => Some(raw.as_str()),
+                        Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => {
+                            Some(raw.as_str())
+                        }
                         _ => None,
                     })
                     .collect::<String>();
@@ -5439,11 +6009,20 @@ fn syntax_import_at(nodes: &[Syntax], index: usize) -> Option<SyntaxImport> {
             child += 1;
         }
     }
-    let specifier = nodes.iter().skip(index).take(12).find_map(|node| match node {
-        Syntax::String { raw, .. } => Some(raw.clone()),
-        _ => None,
-    })?;
-    Some(SyntaxImport { names, aliases, specifier, span })
+    let specifier = nodes
+        .iter()
+        .skip(index)
+        .take(12)
+        .find_map(|node| match node {
+            Syntax::String { raw, .. } => Some(raw.clone()),
+            _ => None,
+        })?;
+    Some(SyntaxImport {
+        names,
+        aliases,
+        specifier,
+        span,
+    })
 }
 
 fn syntax_import_end(nodes: &[Syntax], index: usize) -> usize {
@@ -5503,7 +6082,11 @@ fn unknown_directives(template: &[Tpl]) -> Vec<(String, usize)> {
             Tpl::Core(inner) | Tpl::Rep { inner, .. } | Tpl::Define(inner) => {
                 found.extend(unknown_directives(inner));
             }
-            Tpl::If { then_body, else_body, .. } => {
+            Tpl::If {
+                then_body,
+                else_body,
+                ..
+            } => {
                 found.extend(unknown_directives(then_body));
                 if let Some(else_body) = else_body {
                     found.extend(unknown_directives(else_body));
@@ -5537,7 +6120,11 @@ fn introduced_of(source: &str, nodes: &[Syntax]) -> Vec<String> {
     names
 }
 
-fn introduced_names(declared: &[String], rendered: &str, captures: &HashMap<String, Capture>) -> Vec<String> {
+fn introduced_names(
+    declared: &[String],
+    rendered: &str,
+    captures: &HashMap<String, Capture>,
+) -> Vec<String> {
     let read = sweetener_reader::read_syntax(rendered);
     let mut names = introduced_of(rendered, &read.children);
     // An empty replacement introduced nothing. Falling back to the template
@@ -5607,7 +6194,12 @@ fn collect_introduced_source(source: &str, nodes: &[Syntax], names: &mut Vec<Str
         if let Some(params) = type_param_names(nodes, index) {
             names.extend(params);
         }
-        if let Syntax::Group { delimiter: Delimiter::Paren, children, .. } = &nodes[index] {
+        if let Syntax::Group {
+            delimiter: Delimiter::Paren,
+            children,
+            ..
+        } = &nodes[index]
+        {
             // Arrow parameters and `map<A, B>(value, transform)`. The second
             // expansion must not reprint `value` once the first bound it.
             // `function add(left, right)` is not that list. The reader's
@@ -5653,10 +6245,13 @@ fn in_type_params(nodes: &[Syntax], index: usize) -> bool {
     }
     matches!(nodes.get(open - 1), Some(Syntax::Token { raw, .. }) if is_ident_text(raw))
         && type_param_names(nodes, open).is_some_and(|params| {
-            nodes.get(index).and_then(|node| match node {
-                Syntax::Token { raw, .. } => Some(raw),
-                _ => None,
-            }).is_some_and(|raw| params.iter().any(|name| name == raw))
+            nodes
+                .get(index)
+                .and_then(|node| match node {
+                    Syntax::Token { raw, .. } => Some(raw),
+                    _ => None,
+                })
+                .is_some_and(|raw| params.iter().any(|name| name == raw))
         })
 }
 
@@ -5692,7 +6287,12 @@ fn type_param_names(nodes: &[Syntax], index: usize) -> Option<Vec<String>> {
 }
 
 fn arrow_params(nodes: &[Syntax], index: usize) -> Option<Vec<String>> {
-    let Syntax::Group { delimiter: Delimiter::Paren, children, .. } = nodes.get(index)? else {
+    let Syntax::Group {
+        delimiter: Delimiter::Paren,
+        children,
+        ..
+    } = nodes.get(index)?
+    else {
         return None;
     };
     if !paren_is_arrow_params(nodes, index) {
@@ -5708,7 +6308,16 @@ fn paren_is_arrow_params(nodes: &[Syntax], index: usize) -> bool {
         if operator_is(Some(node), "=>") {
             return true;
         }
-        if matches!(node, Syntax::Group { delimiter: Delimiter::Paren, .. } | Syntax::Group { delimiter: Delimiter::Brace, .. }) {
+        if matches!(
+            node,
+            Syntax::Group {
+                delimiter: Delimiter::Paren,
+                ..
+            } | Syntax::Group {
+                delimiter: Delimiter::Brace,
+                ..
+            }
+        ) {
             return false;
         }
     }
@@ -5745,7 +6354,12 @@ fn render_keeping_holes(out: &mut String, template: &[Tpl], captures: &HashMap<S
                     out.push_str(name);
                 }
             }
-            Tpl::Join { name, prefix, suffix, casing } => {
+            Tpl::Join {
+                name,
+                prefix,
+                suffix,
+                casing,
+            } => {
                 if capture_at(captures, name).is_some() {
                     render(out, std::slice::from_ref(part), captures, &[]);
                 } else {
@@ -5768,7 +6382,11 @@ fn render_keeping_holes(out: &mut String, template: &[Tpl], captures: &HashMap<S
                 render_keeping_holes(out, inner, captures);
                 out.push(')');
             }
-            Tpl::If { path, then_body, else_body } => {
+            Tpl::If {
+                path,
+                then_body,
+                else_body,
+            } => {
                 out.push_str("#if(present $");
                 out.push_str(path);
                 out.push_str(") {");
@@ -5846,13 +6464,22 @@ fn render(
                 // those as the same shape as theirs.
                 render(out, inner, captures, classes);
             }
-            Tpl::Join { name, prefix, suffix, casing } => {
+            Tpl::Join {
+                name,
+                prefix,
+                suffix,
+                casing,
+            } => {
                 if let Some(text) = capture_text(captures, name) {
                     out.push_str(&join_identifier(prefix, text.trim(), suffix, casing));
                 }
             }
             Tpl::Count(name) => out.push_str(&capture_count(captures, name).to_string()),
-            Tpl::If { path, then_body, else_body } => {
+            Tpl::If {
+                path,
+                then_body,
+                else_body,
+            } => {
                 if capture_present(captures, path) {
                     render(out, then_body, captures, classes);
                 } else if let Some(else_body) = else_body {
@@ -5891,12 +6518,18 @@ fn render_rep(
 /// `$($rest:tt,)+` writes the comma inside the repetition. Rendering it
 /// there glues `), ,` onto the next step. The comma is the separator.
 fn rep_layout(inner: &[Tpl], sep: Option<&str>) -> (Vec<Tpl>, Option<String>) {
-    if sep.is_none() && inner.iter().any(|part| matches!(part, Tpl::Var(name) if name == "rest")) {
+    if sep.is_none()
+        && inner
+            .iter()
+            .any(|part| matches!(part, Tpl::Var(name) if name == "rest"))
+    {
         // `$($rest)+` steps are separated by commas at the call site.
         // The template copied no separator, so the steps would join.
         (inner.to_vec(), Some(", ".to_owned()))
     } else if sep.is_none()
-        && inner.last().is_some_and(|part| matches!(part, Tpl::Text(text) if text.trim() == ","))
+        && inner
+            .last()
+            .is_some_and(|part| matches!(part, Tpl::Text(text) if text.trim() == ","))
     {
         (inner[..inner.len() - 1].to_vec(), Some(",".to_owned()))
     } else {
@@ -5921,7 +6554,10 @@ fn push_sep(out: &mut String, index: usize, sep: Option<&str>) {
 /// $($state.moves.event),* })*` has no variable of its own on the outer
 /// row only when this is the inner row; then the nested path is the
 /// sequence.
-fn rep_rows_for(inner: &[Tpl], captures: &HashMap<String, Capture>) -> (String, Vec<Vec<(String, Capture)>>) {
+fn rep_rows_for(
+    inner: &[Tpl],
+    captures: &HashMap<String, Capture>,
+) -> (String, Vec<Vec<(String, Capture)>>) {
     let mut own = Vec::new();
     for part in inner {
         match part {
@@ -5936,7 +6572,11 @@ fn rep_rows_for(inner: &[Tpl], captures: &HashMap<String, Capture>) -> (String, 
     if own.is_empty() {
         collect_vars(inner, &mut own);
     }
-    let mut path = own.iter().max_by_key(|name| name.len()).cloned().unwrap_or_default();
+    let mut path = own
+        .iter()
+        .max_by_key(|name| name.len())
+        .cloned()
+        .unwrap_or_default();
     let mut rows = Vec::new();
     while !path.is_empty() {
         if let Some(found) = capture_sequence(captures, &path) {
@@ -5945,7 +6585,10 @@ fn rep_rows_for(inner: &[Tpl], captures: &HashMap<String, Capture>) -> (String, 
                 break;
             }
         }
-        path = path.rsplit_once('.').map(|(parent, _)| parent.to_owned()).unwrap_or_default();
+        path = path
+            .rsplit_once('.')
+            .map(|(parent, _)| parent.to_owned())
+            .unwrap_or_default();
     }
     if rows.is_empty() {
         rows = rep_rows(inner, captures);
@@ -5953,7 +6596,11 @@ fn rep_rows_for(inner: &[Tpl], captures: &HashMap<String, Capture>) -> (String, 
     (path, rows)
 }
 
-fn rep_row_scope(captures: &HashMap<String, Capture>, path: &str, row: &[(String, Capture)]) -> HashMap<String, Capture> {
+fn rep_row_scope(
+    captures: &HashMap<String, Capture>,
+    path: &str,
+    row: &[(String, Capture)],
+) -> HashMap<String, Capture> {
     let mut scoped = HashMap::new();
     for (key, value) in captures {
         // Keep bindings that are not this sequence. A field named `name`
@@ -5987,7 +6634,11 @@ fn scope_record_fields(scoped: &mut HashMap<String, Capture>) {
             let dotted = format!("{key}.{field}");
             // Do not overwrite a binding already called `name`. The protocol
             // name and a method's `name` field are different captures.
-            if matches!(child, Capture::Text(_)) && !scoped.contains_key(&field) && !key.ends_with(&format!(".{field}")) && key != field {
+            if matches!(child, Capture::Text(_))
+                && !scoped.contains_key(&field)
+                && !key.ends_with(&format!(".{field}"))
+                && key != field
+            {
                 // A field whose leaf is already a root binding (`name`) stays
                 // on the dotted path. Inserting it as `name` hides the protocol.
                 if field != "name" {
@@ -6026,7 +6677,10 @@ fn substitute_text(text: &str, captures: &HashMap<String, Capture>) -> String {
     substitute_text_protecting(text, captures).0
 }
 
-fn substitute_text_protecting(text: &str, captures: &HashMap<String, Capture>) -> (String, Vec<(usize, usize)>) {
+fn substitute_text_protecting(
+    text: &str,
+    captures: &HashMap<String, Capture>,
+) -> (String, Vec<(usize, usize)>) {
     if !text.contains('$') && !text.contains("#text") {
         return (text.to_owned(), Vec::new());
     }
@@ -6037,7 +6691,14 @@ fn substitute_text_protecting(text: &str, captures: &HashMap<String, Capture>) -
     let mut out = String::new();
     let mut protected = Vec::new();
     let mut cursor = 0usize;
-    substitute_nodes(text, &read.children, captures, &mut out, &mut cursor, &mut protected);
+    substitute_nodes(
+        text,
+        &read.children,
+        captures,
+        &mut out,
+        &mut cursor,
+        &mut protected,
+    );
     if cursor < text.len() {
         out.push_str(&text[cursor..]);
     }
@@ -6072,7 +6733,9 @@ fn substitute_nodes(
                 // `$protocol.register` is a capture followed by a member.
                 // The member is not part of the path.
                 let value = capture_text(captures, &path).or_else(|| {
-                    path.split('.').next().and_then(|root| capture_text(captures, root))
+                    path.split('.')
+                        .next()
+                        .and_then(|root| capture_text(captures, root))
                 });
                 let member = if capture_text(captures, &path).is_none() {
                     path.split_once('.').map(|(_, rest)| rest.to_owned())
@@ -6303,7 +6966,9 @@ fn capture_pieces(captures: &HashMap<String, Capture>, name: &str) -> Vec<String
                     .map(str::to_owned)
             })
             .collect(),
-        _ => capture_text(captures, name).map(|text| vec![text.to_owned()]).unwrap_or_default(),
+        _ => capture_text(captures, name)
+            .map(|text| vec![text.to_owned()])
+            .unwrap_or_default(),
     }
 }
 
@@ -6362,9 +7027,9 @@ fn capture_spelling(value: &Capture) -> Option<&str> {
             let _ = fields;
             Some(text.as_str())
         }
-        Capture::Many(rows) => rows.first().and_then(|row| {
-            row.iter().find_map(|(_, value)| capture_spelling(value))
-        }),
+        Capture::Many(rows) => rows
+            .first()
+            .and_then(|row| row.iter().find_map(|(_, value)| capture_spelling(value))),
     }
 }
 
@@ -6392,7 +7057,9 @@ fn capture_at<'a>(captures: &'a HashMap<String, Capture>, path: &str) -> Option<
                 // `$protocol.register` is a text capture plus a member.
                 // The member is not stored on the text, so this path is
                 // absent and the caller keeps `.register` in the output.
-                return captures.get(path).filter(|found| matches!(found, Capture::Text(_)));
+                return captures
+                    .get(path)
+                    .filter(|found| matches!(found, Capture::Text(_)));
             }
             Capture::Record { .. } => {
                 if let Some(Capture::Text(_)) = captures.get(path) {
@@ -6417,7 +7084,10 @@ fn capture_field<'a>(fields: &'a HashMap<String, Capture>, name: &str) -> Option
 
 /// `$state.moves` while `state` is a sequence of records. Each row contributes
 /// that field, so a nested repetition sees every move, not the first state's.
-fn capture_sequence(captures: &HashMap<String, Capture>, path: &str) -> Option<Vec<Vec<(String, Capture)>>> {
+fn capture_sequence(
+    captures: &HashMap<String, Capture>,
+    path: &str,
+) -> Option<Vec<Vec<(String, Capture)>>> {
     if let Some(Capture::Many(rows)) = captures.get(path) {
         return Some(rows.clone());
     }
@@ -6473,7 +7143,10 @@ fn capture_sequence(captures: &HashMap<String, Capture>, path: &str) -> Option<V
     }
     match value {
         Capture::Many(rows) => Some(rows),
-        other => Some(vec![vec![(path.rsplit('.').next().unwrap_or(path).to_owned(), other)]]),
+        other => Some(vec![vec![(
+            path.rsplit('.').next().unwrap_or(path).to_owned(),
+            other,
+        )]]),
     }
 }
 
@@ -6530,7 +7203,9 @@ fn parenthesize_new_nodes(source: &str, nodes: &[Syntax], out: &mut String, curs
             let end = new_expr_end(nodes, index);
             let already = index == 0
                 && end == nodes.len()
-                && source[..node_start(&nodes[index])].trim_end().ends_with('(');
+                && source[..node_start(&nodes[index])]
+                    .trim_end()
+                    .ends_with('(');
             if !already && end > index + 1 {
                 push_until(source, out, cursor, node_start(&nodes[index]));
                 out.push('(');
@@ -6554,12 +7229,17 @@ fn parenthesize_new_nodes(source: &str, nodes: &[Syntax], out: &mut String, curs
 
 fn new_expr_end(nodes: &[Syntax], index: usize) -> usize {
     let mut cursor = index + 1;
-    if matches!(nodes.get(cursor), Some(Syntax::Token { .. }) | Some(Syntax::Group { .. })) {
+    if matches!(
+        nodes.get(cursor),
+        Some(Syntax::Token { .. }) | Some(Syntax::Group { .. })
+    ) {
         cursor += 1;
     }
     while cursor < nodes.len() {
         match &nodes[cursor] {
-            Syntax::Group { delimiter, .. } if matches!(delimiter, Delimiter::Paren | Delimiter::Bracket) => {
+            Syntax::Group { delimiter, .. }
+                if matches!(delimiter, Delimiter::Paren | Delimiter::Bracket) =>
+            {
                 cursor += 1;
             }
             Syntax::Operator { raw, .. } if raw == "." => {
@@ -6603,49 +7283,64 @@ fn rep_rows(inner: &[Tpl], captures: &HashMap<String, Capture>) -> Vec<Vec<(Stri
                 // A scoped row still has the outer `state` sequence in the
                 // cloned map. Walk a sequence only when this scope stored
                 // it, or when nothing has been scoped yet.
-                let scoped_here = captures.contains_key(path) && matches!(captures.get(path), Some(Capture::Many(_)));
+                let scoped_here = captures.contains_key(path)
+                    && matches!(captures.get(path), Some(Capture::Many(_)));
                 let unscoped = !captures.keys().any(|key| key.contains('.'));
                 if !scoped_here && !unscoped {
-                    path = path.rsplit_once('.').map(|(parent, _)| parent).unwrap_or("");
+                    path = path
+                        .rsplit_once('.')
+                        .map(|(parent, _)| parent)
+                        .unwrap_or("");
                     continue;
                 }
-                let covers = walked.iter().filter(|name| name.starts_with(path) || path.starts_with(name.as_str())).count();
+                let covers = walked
+                    .iter()
+                    .filter(|name| name.starts_with(path) || path.starts_with(name.as_str()))
+                    .count();
                 let better = best.as_ref().is_none_or(|(have_path, _have, have_covers)| {
                     // The longest sequence the template names is the one
                     // this repetition walks. `$state.moves.event` repeats
                     // moves, not states, even when both cover the names.
-                    path.len() > have_path.len() || (path.len() == have_path.len() && covers > *have_covers)
+                    path.len() > have_path.len()
+                        || (path.len() == have_path.len() && covers > *have_covers)
                 });
                 if better {
                     best = Some((path.to_owned(), rows, covers));
                 }
                 break;
             }
-            path = path.rsplit_once('.').map(|(parent, _)| parent).unwrap_or("");
+            path = path
+                .rsplit_once('.')
+                .map(|(parent, _)| parent)
+                .unwrap_or("");
         }
     }
     if let Some((path, rows, _)) = best {
         let path = path.as_str();
-        let scoped: Vec<Vec<(String, Capture)>> = rows
-            .iter()
-            .map(|row| scope_rep_row(path, row))
-            .collect();
+        let scoped: Vec<Vec<(String, Capture)>> =
+            rows.iter().map(|row| scope_rep_row(path, row)).collect();
         // `$state.moves.event` while repeating `$state` is still a sequence
         // on each row. Repeat that sequence too, one element per row.
-        if names.iter().any(|name| name.starts_with(path) && name.len() > path.len()) {
+        if names
+            .iter()
+            .any(|name| name.starts_with(path) && name.len() > path.len())
+        {
             if let Some(field) = names.iter().find_map(|name| {
                 let rest = name.strip_prefix(path)?.strip_prefix('.')?;
                 rest.split('.').next().map(str::to_owned)
             }) {
-                let nested_path = names.iter().find_map(|name| {
-                    let rest = name.strip_prefix(path)?.strip_prefix('.')?;
-                    let head = rest.split('.').next()?;
-                    if head == field {
-                        Some(format!("{path}.{field}"))
-                    } else {
-                        None
-                    }
-                }).unwrap_or_else(|| format!("{path}.{field}"));
+                let nested_path = names
+                    .iter()
+                    .find_map(|name| {
+                        let rest = name.strip_prefix(path)?.strip_prefix('.')?;
+                        let head = rest.split('.').next()?;
+                        if head == field {
+                            Some(format!("{path}.{field}"))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| format!("{path}.{field}"));
                 let mut flat = Vec::new();
                 for row in &scoped {
                     let nested = row.iter().find_map(|(key, value)| {
@@ -6658,8 +7353,18 @@ fn rep_rows(inner: &[Tpl], captures: &HashMap<String, Capture>) -> Vec<Vec<(Stri
                                 one.extend(scope_rep_row(&nested_path, inner_row));
                                 // The inner row may be keyed by its field.
                                 // Re-scope it under the sequence the template names.
-                                if let Some(rekeyed) = one.iter().find(|(key, value)| key == &nested_path && matches!(value, Capture::Record { .. })).map(|(_, value)| value.clone()) {
-                                    one.extend(scope_rep_row(&nested_path, &[(field.clone(), rekeyed)]));
+                                if let Some(rekeyed) = one
+                                    .iter()
+                                    .find(|(key, value)| {
+                                        key == &nested_path
+                                            && matches!(value, Capture::Record { .. })
+                                    })
+                                    .map(|(_, value)| value.clone())
+                                {
+                                    one.extend(scope_rep_row(
+                                        &nested_path,
+                                        &[(field.clone(), rekeyed)],
+                                    ));
                                 }
                                 flat.push(one);
                             }
@@ -6690,13 +7395,20 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
     let leaf = path.rsplit('.').next().unwrap_or(path);
     let element = row
         .iter()
-        .find(|(key, value)| (key == leaf || key == path) && matches!(value, Capture::Record { .. }))
+        .find(|(key, value)| {
+            (key == leaf || key == path) && matches!(value, Capture::Record { .. })
+        })
         .or_else(|| {
             // `state.name` is text, but the same row still holds the state
             // record. Keep that record so a nested `$state.moves` can walk it.
-            row.iter().find(|(_, value)| matches!(value, Capture::Record { .. }))
+            row.iter()
+                .find(|(_, value)| matches!(value, Capture::Record { .. }))
         })
-        .or_else(|| row.iter().find(|(key, value)| (key == leaf || key == path) && !matches!(value, Capture::Text(_))))
+        .or_else(|| {
+            row.iter().find(|(key, value)| {
+                (key == leaf || key == path) && !matches!(value, Capture::Text(_))
+            })
+        })
         .or_else(|| row.iter().find(|(key, _)| key == leaf || key == path))
         .or_else(|| row.first())
         .map(|(_, value)| value.clone());
@@ -6717,11 +7429,12 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
             }
             return scoped;
         }
-        let record_path = if matches!(element, Capture::Record { .. }) && path.ends_with(&format!(".{leaf}")) {
-            path.trim_end_matches(&format!(".{leaf}")).to_owned()
-        } else {
-            path.to_owned()
-        };
+        let record_path =
+            if matches!(element, Capture::Record { .. }) && path.ends_with(&format!(".{leaf}")) {
+                path.trim_end_matches(&format!(".{leaf}")).to_owned()
+            } else {
+                path.to_owned()
+            };
         scoped.push((record_path.clone(), element.clone()));
         if let Capture::Record { fields, .. } = &element {
             for (field, value) in fields {
@@ -6766,8 +7479,14 @@ fn collect_vars(template: &[Tpl], names: &mut Vec<String>) {
                     names.push(name.clone());
                 }
             }
-            Tpl::Define(inner) | Tpl::Core(inner) | Tpl::Rep { inner, .. } => collect_vars(inner, names),
-            Tpl::If { path, then_body, else_body } => {
+            Tpl::Define(inner) | Tpl::Core(inner) | Tpl::Rep { inner, .. } => {
+                collect_vars(inner, names)
+            }
+            Tpl::If {
+                path,
+                then_body,
+                else_body,
+            } => {
                 if !names.contains(path) {
                     names.push(path.clone());
                 }
@@ -6838,7 +7557,17 @@ fn rename_tokens(
 ) -> String {
     let mut out = String::new();
     let mut cursor = 0usize;
-    rename_nodes(source, nodes, plan, capture_spans, occurrences, seen, false, &mut out, &mut cursor);
+    rename_nodes(
+        source,
+        nodes,
+        plan,
+        capture_spans,
+        occurrences,
+        seen,
+        false,
+        &mut out,
+        &mut cursor,
+    );
     if cursor < source.len() {
         out.push_str(&source[cursor..]);
     }
@@ -6862,7 +7591,9 @@ fn rename_nodes(
         let binder_here = is_binder_at(nodes, index);
         match &nodes[index] {
             Syntax::Token { span, raw }
-                if !dotted && !in_capture(capture_spans, span.start as usize) && printed_for(raw, binder_here, plan, occurrences, seen).is_some() =>
+                if !dotted
+                    && !in_capture(capture_spans, span.start as usize)
+                    && printed_for(raw, binder_here, plan, occurrences, seen).is_some() =>
             {
                 let printed = printed_for(raw, binder_here, plan, occurrences, seen).unwrap();
                 push_until(source, out, cursor, span.start as usize);
@@ -6875,13 +7606,30 @@ fn rename_nodes(
                 dotted = false;
             }
             Syntax::Group { children, .. } => {
-                rename_nodes(source, children, plan, capture_spans, occurrences, seen, false, out, cursor);
+                rename_nodes(
+                    source,
+                    children,
+                    plan,
+                    capture_spans,
+                    occurrences,
+                    seen,
+                    false,
+                    out,
+                    cursor,
+                );
                 dotted = false;
             }
             Syntax::Operator { raw, .. } if raw == "." => dotted = true,
             Syntax::String { span, raw } if raw.starts_with('`') && raw.contains("${") => {
                 push_until(source, out, cursor, span.start as usize);
-                out.push_str(&rename_template_literal(raw, plan, capture_spans, occurrences, seen, span.start as usize));
+                out.push_str(&rename_template_literal(
+                    raw,
+                    plan,
+                    capture_spans,
+                    occurrences,
+                    seen,
+                    span.start as usize,
+                ));
                 *cursor = span.end as usize;
                 dotted = false;
             }
@@ -6905,7 +7653,10 @@ fn printed_for(
                 return names.get(index).cloned().or_else(|| names.last().cloned());
             }
             let current = index.saturating_sub(1);
-            return names.get(current).cloned().or_else(|| names.first().cloned());
+            return names
+                .get(current)
+                .cloned()
+                .or_else(|| names.first().cloned());
         }
     }
     plan.get(raw).cloned()
@@ -6927,13 +7678,22 @@ fn runtime_imports_of(nodes: &[Syntax]) -> Vec<RuntimeImport> {
 }
 
 fn value_import_at(nodes: &[Syntax], index: usize) -> Option<RuntimeImport> {
-    let Syntax::Group { delimiter: Delimiter::Brace, children, .. } = nodes.get(index + 1)? else {
+    let Syntax::Group {
+        delimiter: Delimiter::Brace,
+        children,
+        ..
+    } = nodes.get(index + 1)?
+    else {
         return None;
     };
-    let specifier = nodes.iter().skip(index).take(8).find_map(|node| match node {
-        Syntax::String { raw, .. } => Some(raw.clone()),
-        _ => None,
-    })?;
+    let specifier = nodes
+        .iter()
+        .skip(index)
+        .take(8)
+        .find_map(|node| match node {
+            Syntax::String { raw, .. } => Some(raw.clone()),
+            _ => None,
+        })?;
     let mut bindings = Vec::new();
     let mut cursor = 0;
     while cursor < children.len() {
@@ -6969,7 +7729,10 @@ fn value_import_at(nodes: &[Syntax], index: usize) -> Option<RuntimeImport> {
     if bindings.is_empty() {
         return None;
     }
-    Some(RuntimeImport { specifier, bindings })
+    Some(RuntimeImport {
+        specifier,
+        bindings,
+    })
 }
 
 fn runtime_used_by(imports: &[RuntimeImport], macros: &[Macro]) -> Vec<RuntimeImport> {
@@ -7007,14 +7770,24 @@ fn collect_free_idents(template: &[Tpl], names: &mut std::collections::HashSet<S
                 idents_in(&read.children, names);
                 idents_in_text(text, names);
             }
-            Tpl::Core(inner) | Tpl::Rep { inner, .. } | Tpl::Define(inner) => collect_free_idents(inner, names),
-            Tpl::If { then_body, else_body, .. } => {
+            Tpl::Core(inner) | Tpl::Rep { inner, .. } | Tpl::Define(inner) => {
+                collect_free_idents(inner, names)
+            }
+            Tpl::If {
+                then_body,
+                else_body,
+                ..
+            } => {
                 collect_free_idents(then_body, names);
                 if let Some(else_body) = else_body {
                     collect_free_idents(else_body, names);
                 }
             }
-            Tpl::Join { .. } | Tpl::Var(_) | Tpl::Quote(_) | Tpl::Count(_) | Tpl::Unknown { .. } => {}
+            Tpl::Join { .. }
+            | Tpl::Var(_)
+            | Tpl::Quote(_)
+            | Tpl::Count(_)
+            | Tpl::Unknown { .. } => {}
         }
     }
 }
@@ -7067,9 +7840,16 @@ fn idents_in(nodes: &[Syntax], names: &mut std::collections::HashSet<String>) {
 
 fn merge_runtime_imports(into: &mut Vec<RuntimeImport>, more: Vec<RuntimeImport>) {
     for import in more {
-        if let Some(existing) = into.iter_mut().find(|found| found.specifier == import.specifier) {
+        if let Some(existing) = into
+            .iter_mut()
+            .find(|found| found.specifier == import.specifier)
+        {
             for binding in import.bindings {
-                if !existing.bindings.iter().any(|have| have.local == binding.local) {
+                if !existing
+                    .bindings
+                    .iter()
+                    .any(|have| have.local == binding.local)
+                {
                     existing.bindings.push(binding);
                 }
             }
@@ -7083,7 +7863,13 @@ fn pattern_ends_with_semi(pattern: &[Pat]) -> bool {
     matches!(pattern.last(), Some(Pat::Lit(lit)) if lit == ";")
 }
 
-fn infix_rule_binds(pattern: &[Pat], name: &str, left: &str, right: &str, captures: &mut HashMap<String, Capture>) -> bool {
+fn infix_rule_binds(
+    pattern: &[Pat],
+    name: &str,
+    left: &str,
+    right: &str,
+    captures: &mut HashMap<String, Capture>,
+) -> bool {
     // `left OP right`, with the operator a literal.
     let mut holes = Vec::new();
     let mut saw_op = false;
@@ -7165,7 +7951,11 @@ fn first_const_name(text: &str) -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
-fn fresh_name(name: &str, used: &std::collections::HashSet<String>, hygiene: &HashMap<String, String>) -> String {
+fn fresh_name(
+    name: &str,
+    used: &std::collections::HashSet<String>,
+    hygiene: &HashMap<String, String>,
+) -> String {
     if let Some(printed) = hygiene.get(name) {
         if !used.contains(printed) {
             return printed.clone();

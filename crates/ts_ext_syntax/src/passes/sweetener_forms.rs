@@ -162,7 +162,11 @@ pub fn try_expand_fixture(
         return Some(query);
     }
     if let Some(step) = match_channel_stmt(source, nodes, index) {
-        let mut end = node_end(nodes.get(step.next.saturating_sub(1)).unwrap_or(&nodes[index]));
+        let mut end = node_end(
+            nodes
+                .get(step.next.saturating_sub(1))
+                .unwrap_or(&nodes[index]),
+        );
         let text = if step.op == "->" {
             expand_channel_send(&step.left, &step.right)
         } else {
@@ -192,7 +196,11 @@ pub fn try_expand_fixture(
             .iter()
             .map(|(name, source)| DoStep { name, source })
             .collect();
-        let end = node_end(nodes.get(item.next.saturating_sub(1)).unwrap_or(&nodes[index]));
+        let end = node_end(
+            nodes
+                .get(item.next.saturating_sub(1))
+                .unwrap_or(&nodes[index]),
+        );
         return Some(FixtureRewrite {
             start: node_start(&nodes[index]),
             end,
@@ -214,7 +222,11 @@ pub fn try_expand_fixture(
                 method: None,
             });
         }
-        let end = node_end(nodes.get(item.next.saturating_sub(1)).unwrap_or(&nodes[index]));
+        let end = node_end(
+            nodes
+                .get(item.next.saturating_sub(1))
+                .unwrap_or(&nodes[index]),
+        );
         return Some(FixtureRewrite {
             start: node_start(&nodes[index]),
             end,
@@ -284,7 +296,10 @@ fn failed_hash_group(nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
         (children, 0)
     } else {
         let children = group_children(Some(node), Delimiter::Bracket)?;
-        if !children.first().is_some_and(|child| operator_is(Some(child), "#")) {
+        if !children
+            .first()
+            .is_some_and(|child| operator_is(Some(child), "#"))
+        {
             return None;
         }
         (children, 1)
@@ -445,7 +460,11 @@ fn match_data_item(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
         let variant = ident_at(nodes, cursor)?;
         let params = group_children(nodes.get(cursor + 1), Delimiter::Paren)?;
         let fields = parse_ctor_fields(source, params);
-        if fields.is_empty() && params.iter().any(|node| ident_at(std::slice::from_ref(node), 0).is_some()) {
+        if fields.is_empty()
+            && params
+                .iter()
+                .any(|node| ident_at(std::slice::from_ref(node), 0).is_some())
+        {
             return None;
         }
         variants.push((variant, fields));
@@ -513,7 +532,11 @@ fn parse_ctor_fields(source: &str, children: &[Syntax]) -> Vec<(String, String)>
     fields
 }
 
-fn expand_data_decl(name: &str, type_param: &str, variants: &[(String, Vec<(String, String)>)]) -> String {
+fn expand_data_decl(
+    name: &str,
+    type_param: &str,
+    variants: &[(String, Vec<(String, String)>)],
+) -> String {
     expand_data_decl_hygiene(name, type_param, variants, &[])
 }
 
@@ -565,7 +588,9 @@ fn match_sweetener_match(source: &str, nodes: &[Syntax], index: usize) -> Option
     if !token_is(nodes.get(index), "match") {
         return None;
     }
-    let subject = group_interior(source, nodes.get(index + 1)?, Delimiter::Paren)?.trim().to_owned();
+    let subject = group_interior(source, nodes.get(index + 1)?, Delimiter::Paren)?
+        .trim()
+        .to_owned();
     if subject.is_empty() {
         return None;
     }
@@ -576,7 +601,12 @@ fn match_sweetener_match(source: &str, nodes: &[Syntax], index: usize) -> Option
     let body = nodes.get(body_at)?;
     let children = group_children(Some(body), Delimiter::Brace)?;
     let text = if let Some(arms) = parse_ctor_arms(source, children) {
-        expand_ctor_match(&subject, &arms, &unmatched_name(nodes, index), &outer_consts(source))
+        expand_ctor_match(
+            &subject,
+            &arms,
+            &unmatched_name(nodes, index),
+            &outer_consts(source),
+        )
     } else {
         let (arms, fallback) = parse_structural_arms(source, children)?;
         // `1 => "one",` with no `_` arm is not a finished match. The
@@ -679,12 +709,14 @@ fn expand_ctor_match(subject: &str, arms: &[CtorArm], unmatched: &str, outer: &[
                     }
                 })
                 .collect();
-            body.push_str(&format!("const {{ {} }} = this.value; ", renamed.join(", ")));
+            body.push_str(&format!(
+                "const {{ {} }} = this.value; ",
+                renamed.join(", ")
+            ));
         }
         let renamed_body = rename_params(
             &arm.body,
-            &arm
-                .binders
+            &arm.binders
                 .iter()
                 .map(|name| (name.as_str(), fresh_param(name, outer)))
                 .collect::<Vec<_>>(),
@@ -724,7 +756,10 @@ fn complete_match(children: &[Syntax]) -> bool {
     !operator_is(children.get(index - 1), ",")
 }
 
-fn parse_structural_arms(source: &str, children: &[Syntax]) -> Option<(Vec<StructArm>, Option<String>)> {
+fn parse_structural_arms(
+    source: &str,
+    children: &[Syntax],
+) -> Option<(Vec<StructArm>, Option<String>)> {
     let parts = split_top_commas(children);
     if parts.is_empty() {
         return None;
@@ -781,13 +816,21 @@ fn parse_match_pat(source: &str, nodes: &[Syntax]) -> Option<MatchPat> {
     if nodes.len() == 1 {
         return match &nodes[0] {
             Syntax::Token { raw, .. } if raw == "_" => Some(MatchPat::Wild),
-            Syntax::Token { raw, .. } if is_word(raw) && raw.chars().next().is_some_and(|ch| ch.is_lowercase()) => {
+            Syntax::Token { raw, .. }
+                if is_word(raw) && raw.chars().next().is_some_and(|ch| ch.is_lowercase()) =>
+            {
                 Some(MatchPat::Bind(raw.clone()))
             }
-            Syntax::Group { delimiter: Delimiter::Brace, children, .. } => {
-                Some(MatchPat::Object(parse_match_fields(source, children)?))
-            }
-            Syntax::Group { delimiter: Delimiter::Bracket, children, .. } => {
+            Syntax::Group {
+                delimiter: Delimiter::Brace,
+                children,
+                ..
+            } => Some(MatchPat::Object(parse_match_fields(source, children)?)),
+            Syntax::Group {
+                delimiter: Delimiter::Bracket,
+                children,
+                ..
+            } => {
                 let mut items = Vec::new();
                 for part in split_top_commas(children) {
                     items.push(parse_match_pat(source, part)?);
@@ -800,7 +843,10 @@ fn parse_match_pat(source: &str, nodes: &[Syntax]) -> Option<MatchPat> {
     Some(MatchPat::Lit(slice_nodes(source, nodes)?))
 }
 
-fn parse_match_fields(source: &str, children: &[Syntax]) -> Option<Vec<(String, Option<MatchPat>)>> {
+fn parse_match_fields(
+    source: &str,
+    children: &[Syntax],
+) -> Option<Vec<(String, Option<MatchPat>)>> {
     let mut fields = Vec::new();
     for part in split_top_commas(children) {
         let part = trim_trivia(part);
@@ -913,7 +959,10 @@ fn literal_object(pattern: &MatchPat) -> bool {
     let MatchPat::Object(fields) = pattern else {
         return false;
     };
-    !fields.is_empty() && fields.iter().all(|(_, pattern)| matches!(pattern, Some(MatchPat::Lit(_))))
+    !fields.is_empty()
+        && fields
+            .iter()
+            .all(|(_, pattern)| matches!(pattern, Some(MatchPat::Lit(_))))
 }
 
 /// A one-field literal object prints one empty statement, not two.
@@ -985,7 +1034,12 @@ fn slice_nodes(source: &str, nodes: &[Syntax]) -> Option<String> {
     let nodes = trim_trivia(nodes);
     let first = nodes.first()?;
     let last = nodes.last()?;
-    Some(source.get(node_start(first)..node_end(last))?.trim().to_owned())
+    Some(
+        source
+            .get(node_start(first)..node_end(last))?
+            .trim()
+            .to_owned(),
+    )
 }
 
 fn idents_in(nodes: &[Syntax]) -> Vec<String> {
@@ -1057,7 +1111,9 @@ pub fn signal_syntax(name: &str, signal: &str) -> String {
     rules.push(format!(
         "rule {{ {name} = {value}:expr }} => {{ {signal}.set({value}) }}"
     ));
-    for op in ["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>"] {
+    for op in [
+        "+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>",
+    ] {
         let assign = format!("{op}=");
         rules.push(format!(
             "rule {{ {name} {assign} {value}:expr }} => {{ {signal}.set({signal}.get() {op} {value}) }}"
@@ -1204,7 +1260,10 @@ fn outer_consts(source: &str) -> Vec<String> {
 fn collect_outer_consts(nodes: &[Syntax], names: &mut Vec<String>) {
     let mut index = 0;
     while index < nodes.len() {
-        if token_is(nodes.get(index), "const") || token_is(nodes.get(index), "let") || token_is(nodes.get(index), "var") {
+        if token_is(nodes.get(index), "const")
+            || token_is(nodes.get(index), "let")
+            || token_is(nodes.get(index), "var")
+        {
             if let Some(name) = token_raw(nodes.get(index + 1)) {
                 names.push(name);
             }
@@ -1421,7 +1480,10 @@ fn match_curried_fn(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixt
     if token_is(nodes.get(cursor), "export") {
         exported = true;
         cursor += 1;
-    } else if token_is(nodes.get(cursor), "function") && index > 0 && token_is(nodes.get(index - 1), "export") {
+    } else if token_is(nodes.get(cursor), "function")
+        && index > 0
+        && token_is(nodes.get(index - 1), "export")
+    {
         // The syntax import dropped `export` before this head. It is still
         // part of the item; theirs keeps it on every overload.
         exported = true;
@@ -1442,7 +1504,15 @@ fn match_curried_fn(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixt
     after += 1;
     let result_start = node_start(nodes.get(after)?);
     let mut result_end = result_start;
-    while after < nodes.len() && !matches!(nodes.get(after), Some(Syntax::Group { delimiter: Delimiter::Brace, .. })) {
+    while after < nodes.len()
+        && !matches!(
+            nodes.get(after),
+            Some(Syntax::Group {
+                delimiter: Delimiter::Brace,
+                ..
+            })
+        )
+    {
         result_end = node_end(&nodes[after]);
         after += 1;
     }
@@ -1543,7 +1613,11 @@ fn method_requests(source: &str, body: &Syntax) -> Vec<MethodRequest> {
             index += 1;
             continue;
         }
-        let Some(pattern) = group_interior(source, children.get(index + 1).unwrap_or(&children[index]), Delimiter::Brace) else {
+        let Some(pattern) = group_interior(
+            source,
+            children.get(index + 1).unwrap_or(&children[index]),
+            Delimiter::Brace,
+        ) else {
             index += 1;
             continue;
         };
@@ -1562,7 +1636,11 @@ fn method_requests(source: &str, body: &Syntax) -> Vec<MethodRequest> {
         if !operator_is(children.get(index), "=>") {
             continue;
         }
-        let Some(expansion) = group_interior(source, children.get(index + 1).unwrap_or(&children[index]), Delimiter::Brace) else {
+        let Some(expansion) = group_interior(
+            source,
+            children.get(index + 1).unwrap_or(&children[index]),
+            Delimiter::Brace,
+        ) else {
             index += 1;
             continue;
         };
@@ -1687,7 +1765,11 @@ fn match_protocol_item(source: &str, nodes: &[Syntax], index: usize) -> Option<F
     })
 }
 
-fn following_implements(source: &str, nodes: &[Syntax], mut index: usize) -> Option<FixtureRewrite> {
+fn following_implements(
+    source: &str,
+    nodes: &[Syntax],
+    mut index: usize,
+) -> Option<FixtureRewrite> {
     let mut prefix = String::new();
     let start = nodes.get(index).map(node_start)?;
     while index < nodes.len() {
@@ -1806,7 +1888,12 @@ struct ParsedMethod {
     next: usize,
 }
 
-fn one_method(source: &str, nodes: &[Syntax], index: usize, needs_body: bool) -> Option<ParsedMethod> {
+fn one_method(
+    source: &str,
+    nodes: &[Syntax],
+    index: usize,
+    needs_body: bool,
+) -> Option<ParsedMethod> {
     let name = token_raw(nodes.get(index))?;
     let params_at = index + 1;
     let params_group = group_children(nodes.get(params_at), Delimiter::Paren)?;
@@ -1819,7 +1906,9 @@ fn one_method(source: &str, nodes: &[Syntax], index: usize, needs_body: bool) ->
     let result_start = node_start(nodes.get(cursor)?);
     let mut result_end = result_start;
     while cursor < nodes.len() {
-        if group_children(nodes.get(cursor), Delimiter::Brace).is_some() || operator_is(nodes.get(cursor), ";") {
+        if group_children(nodes.get(cursor), Delimiter::Brace).is_some()
+            || operator_is(nodes.get(cursor), ";")
+        {
             break;
         }
         result_end = node_end(&nodes[cursor]);
@@ -1830,7 +1919,9 @@ fn one_method(source: &str, nodes: &[Syntax], index: usize, needs_body: bool) ->
         return None;
     }
     let body = if group_children(nodes.get(cursor), Delimiter::Brace).is_some() {
-        let text = group_interior(source, &nodes[cursor], Delimiter::Brace)?.trim().to_owned();
+        let text = group_interior(source, &nodes[cursor], Delimiter::Brace)?
+            .trim()
+            .to_owned();
         cursor += 1;
         Some(text)
     } else if needs_body {
@@ -1971,7 +2062,11 @@ fn join_typed(params: &[(String, String)]) -> String {
 }
 
 /// Split a `doSteps(monad) { steps; return result }` expression.
-pub fn match_do_steps<'a>(source: &'a str, nodes: &[Syntax], index: usize) -> Option<DoStepsItem<'a>> {
+pub fn match_do_steps<'a>(
+    source: &'a str,
+    nodes: &[Syntax],
+    index: usize,
+) -> Option<DoStepsItem<'a>> {
     if !token_is(nodes.get(index), "doSteps") {
         return None;
     }
@@ -1998,7 +2093,11 @@ pub struct DoStepsItem<'a> {
 }
 
 /// Split `(-> value, call(...), ...)` or `(->> value, call(...), ...)`.
-pub fn match_thread<'a>(source: &'a str, nodes: &'a [Syntax], index: usize) -> Option<ThreadItem<'a>> {
+pub fn match_thread<'a>(
+    source: &'a str,
+    nodes: &'a [Syntax],
+    index: usize,
+) -> Option<ThreadItem<'a>> {
     // `(-> value, call(...), ...)` is one paren group. The operator is its
     // first child, and `->>` is the two tokens `->` and `>`.
     let children = group_children(nodes.get(index), Delimiter::Paren)?;
@@ -2027,7 +2126,10 @@ fn joined_op(nodes: &[Syntax], index: usize) -> Option<JoinedOp> {
         if part.chars().all(|ch| "<>-".contains(ch)) && raw.len() < 3 {
             raw.push_str(part);
             cursor += 1;
-            if raw == "<-" || raw == "->>" || (raw == "->" && nodes.get(cursor).and_then(operator_raw) != Some(">")) {
+            if raw == "<-"
+                || raw == "->>"
+                || (raw == "->" && nodes.get(cursor).and_then(operator_raw) != Some(">"))
+            {
                 return Some(JoinedOp {
                     raw,
                     width: cursor - index,
@@ -2048,7 +2150,11 @@ pub struct ThreadItem<'a> {
 }
 
 /// `{when (cond)} child {else} other {end}` or `{each (items as item, index)}`.
-pub fn match_jsx_control<'a>(source: &'a str, nodes: &[Syntax], index: usize) -> Option<JsxControl<'a>> {
+pub fn match_jsx_control<'a>(
+    source: &'a str,
+    nodes: &[Syntax],
+    index: usize,
+) -> Option<JsxControl<'a>> {
     let children = group_children(nodes.get(index), Delimiter::Brace)?;
     let head = token_raw(children.first())?;
     if head != "when" && head != "each" {
@@ -2078,7 +2184,9 @@ fn match_query_call(
     methods: &[MethodBinding],
 ) -> Option<FixtureRewrite> {
     let name = token_raw(nodes.get(index))?;
-    let method = methods.iter().find(|method| method.head == name && !method.requests.is_empty())?;
+    let method = methods
+        .iter()
+        .find(|method| method.head == name && !method.requests.is_empty())?;
     let mut best: Option<(String, usize)> = None;
     for (pattern, expansion) in &method.requests {
         if let Some((text, next)) = apply_query(source, nodes, index, pattern, expansion) {
@@ -2180,12 +2288,17 @@ fn match_query_pats(
             index += 1;
             continue;
         }
-        let expected = token_raw(pattern.get(index)).or_else(|| pattern.get(index).and_then(|node| operator_raw(node).map(str::to_owned)))?;
+        let expected = token_raw(pattern.get(index)).or_else(|| {
+            pattern
+                .get(index)
+                .and_then(|node| operator_raw(node).map(str::to_owned))
+        })?;
         if expected.chars().all(|ch| ch.is_whitespace()) {
             index += 1;
             continue;
         }
-        let found = token_raw(nodes.get(cursor)).or_else(|| nodes.get(cursor).and_then(operator_raw).map(str::to_owned))?;
+        let found = token_raw(nodes.get(cursor))
+            .or_else(|| nodes.get(cursor).and_then(operator_raw).map(str::to_owned))?;
         if found != expected {
             return None;
         }
@@ -2216,8 +2329,13 @@ fn take_query_hole(source: &str, nodes: &[Syntax], index: usize) -> Option<(Stri
                     break;
                 }
                 if token_raw(nodes.get(end)).is_some_and(|word| {
-                    word.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
-                        || matches!(word.as_str(), "const" | "let" | "function" | "export" | "return" | "class")
+                    word.chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_uppercase())
+                        || matches!(
+                            word.as_str(),
+                            "const" | "let" | "function" | "export" | "return" | "class"
+                        )
                 }) {
                     break;
                 }
@@ -2380,7 +2498,11 @@ fn match_signal_read(
     if index > 0 && operator_is(nodes.get(index - 1), ".") {
         return None;
     }
-    if nodes.get(index + 1).and_then(operator_raw).is_some_and(is_signal_assign) {
+    if nodes
+        .get(index + 1)
+        .and_then(operator_raw)
+        .is_some_and(is_signal_assign)
+    {
         return None;
     }
     Some(FixtureRewrite {
@@ -2622,7 +2744,8 @@ fn assert_binder(source: &str, nodes: &[Syntax], index: usize, name: &str, op: &
                 if let Some(args) = group_interior(source, args_node, Delimiter::Paren) {
                     let read = sweetener_reader::read_syntax(args);
                     if let Some((_, found, _)) = split_assert_compare(args, &read.children) {
-                        let introduces = found == op || (name == "actual" && (found == "===" || found == ">="));
+                        let introduces =
+                            found == op || (name == "actual" && (found == "===" || found == ">="));
                         if introduces {
                             nth += 1;
                         }
@@ -2683,9 +2806,10 @@ fn slice_span<'a>(source: &'a str, nodes: &[Syntax], start: usize, end: usize) -
 }
 
 fn file_binds(source: &str, name: &str) -> bool {
-    source.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').any(|word| {
-        word == name
-    }) && source.contains(&format!("const {name}"))
+    source
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .any(|word| word == name)
+        && source.contains(&format!("const {name}"))
 }
 
 fn string_source(text: &str) -> String {
@@ -2839,7 +2963,9 @@ fn call_args_trail(source: &str, node: &Syntax) -> bool {
     let Some(last) = children.last() else {
         return source
             .get(node_start(node)..node_end(node))
-            .is_some_and(|text| text.trim_end().ends_with(",)") || text.trim_end().ends_with(", )"));
+            .is_some_and(|text| {
+                text.trim_end().ends_with(",)") || text.trim_end().ends_with(", )")
+            });
     };
     if operator_is(Some(last), ",") {
         return true;
@@ -2951,7 +3077,11 @@ fn is_signal_assign(op: &str) -> bool {
     )
 }
 
-fn take_value<'a>(source: &'a str, nodes: &[Syntax], index: usize) -> Option<(&'a str, usize, usize)> {
+fn take_value<'a>(
+    source: &'a str,
+    nodes: &[Syntax],
+    index: usize,
+) -> Option<(&'a str, usize, usize)> {
     let start = node_start(nodes.get(index)?);
     let mut end = start;
     let mut cursor = index;
@@ -2984,7 +3114,14 @@ fn method_item_end(nodes: &[Syntax], index: usize) -> usize {
         {
             break;
         }
-        if matches!(nodes.get(cursor), Some(Syntax::Group { delimiter: Delimiter::Brace, close: Some(_), .. })) {
+        if matches!(
+            nodes.get(cursor),
+            Some(Syntax::Group {
+                delimiter: Delimiter::Brace,
+                close: Some(_),
+                ..
+            })
+        ) {
             let end = node_end(&nodes[cursor]);
             if operator_is(nodes.get(cursor + 1), ";") {
                 return node_end(&nodes[cursor + 1]);
