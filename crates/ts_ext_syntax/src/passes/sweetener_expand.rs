@@ -691,17 +691,6 @@ impl<'a> Printer<'a> {
                 // `#core(...)` hides its binders from the template tree.
                 // The rendered text is the binding that must not collide.
                 self.define_syntax(&rule.template, &matched.captures);
-                if std::env::var("SD").is_ok() && name == "machine" {
-                    fn dump(v: &Capture, d: usize) {
-                        let pad = " ".repeat(d);
-                        match v {
-                            Capture::Text(t) => eprintln!("{pad}Text({t:?})"),
-                            Capture::Record { text, fields, .. } => { eprintln!("{pad}Record({text:?})"); for (k, val) in fields { eprintln!("{pad}  .{k}:"); dump(val, d+4); } }
-                            Capture::Many(rows) => { eprintln!("{pad}Many({})", rows.len()); for r in rows { eprintln!("{pad} row:"); for (k, val) in r { eprintln!("{pad}  [{k}]"); dump(val, d+5); } } }
-                        }
-                    }
-                    for (k, v) in &matched.captures { eprintln!("CAP {k}:"); dump(v, 1); }
-                }
                 let introduced = introduced_names(&rule.introduced, &replacement, &matched.captures);
                 let plan = self.hygiene_plan(&introduced);
                 if let Some(plan) = &plan {
@@ -890,7 +879,8 @@ impl<'a> Printer<'a> {
     fn render_core(&mut self, out: &mut String, template: &[Tpl], captures: &HashMap<String, Capture>) {
         for part in template {
             match part {
-                Tpl::Core(inner) | Tpl::Rep { inner, .. } => self.render_core(out, inner, captures),
+                Tpl::Core(inner) => self.render_core(out, inner, captures),
+                Tpl::Rep { inner, sep } => self.render_core_rep(out, inner, sep.as_deref(), captures),
                 Tpl::Text(text) => out.push_str(text),
                 Tpl::Var(name) => {
                     let pieces = capture_pieces(captures, name);
@@ -916,6 +906,27 @@ impl<'a> Printer<'a> {
                     out.push_str(&piece);
                 }
             }
+        }
+    }
+
+    /// A repetition inside `#core`. Each row is rendered with the row scope
+    /// in hand and holes still go through `expand_replacement`, so a macro
+    /// that a repetition repeats (`record Cons(...)` inside `module`) is
+    /// expanded. Flattening the inner template once would print empty
+    /// fields.
+    fn render_core_rep(
+        &mut self,
+        out: &mut String,
+        inner: &[Tpl],
+        sep: Option<&str>,
+        captures: &HashMap<String, Capture>,
+    ) {
+        let (inner, sep) = rep_layout(inner, sep);
+        let (path, rows) = rep_rows_for(&inner, captures);
+        for (index, row) in rows.iter().enumerate() {
+            push_sep(out, index, sep.as_deref());
+            let scoped = rep_row_scope(captures, &path, row);
+            self.render_core(out, &inner, &scoped);
         }
     }
 
@@ -5868,23 +5879,49 @@ fn render_rep(
     captures: &HashMap<String, Capture>,
     classes: &[SyntaxClass],
 ) {
-    // `$($rest:tt,)+` writes the comma inside the repetition. Rendering it
-    // there glues `), ,` onto the next step. The comma is the separator.
-    let (inner, sep): (Vec<Tpl>, Option<&str>) = if sep.is_none()
-        && inner.iter().any(|part| matches!(part, Tpl::Var(name) if name == "rest"))
-    {
+    let (inner, sep) = rep_layout(inner, sep);
+    let (path, rows) = rep_rows_for(&inner, captures);
+    for (index, row) in rows.iter().enumerate() {
+        push_sep(out, index, sep.as_deref());
+        let scoped = rep_row_scope(captures, &path, row);
+        render(out, &inner, &scoped, classes);
+    }
+}
+
+/// `$($rest:tt,)+` writes the comma inside the repetition. Rendering it
+/// there glues `), ,` onto the next step. The comma is the separator.
+fn rep_layout(inner: &[Tpl], sep: Option<&str>) -> (Vec<Tpl>, Option<String>) {
+    if sep.is_none() && inner.iter().any(|part| matches!(part, Tpl::Var(name) if name == "rest")) {
         // `$($rest)+` steps are separated by commas at the call site.
         // The template copied no separator, so the steps would join.
-        (inner.to_vec(), Some(", "))
+        (inner.to_vec(), Some(", ".to_owned()))
     } else if sep.is_none()
         && inner.last().is_some_and(|part| matches!(part, Tpl::Text(text) if text.trim() == ","))
     {
-        (inner[..inner.len() - 1].to_vec(), Some(","))
+        (inner[..inner.len() - 1].to_vec(), Some(",".to_owned()))
     } else {
-        (inner.to_vec(), sep)
-    };
-    let inner = inner.as_slice();
-    let sep = sep;
+        (inner.to_vec(), sep.map(str::to_owned))
+    }
+}
+
+fn push_sep(out: &mut String, index: usize, sep: Option<&str>) {
+    if index == 0 {
+        return;
+    }
+    if let Some(sep) = sep {
+        out.push_str(sep);
+        if sep == "," {
+            out.push(' ');
+        }
+    }
+}
+
+/// The sequence a repetition walks and the row for each element. The path
+/// is the longest one this repetition names. `$($state.name: {
+/// $($state.moves.event),* })*` has no variable of its own on the outer
+/// row only when this is the inner row; then the nested path is the
+/// sequence.
+fn rep_rows_for(inner: &[Tpl], captures: &HashMap<String, Capture>) -> (String, Vec<Vec<(String, Capture)>>) {
     let mut own = Vec::new();
     for part in inner {
         match part {
@@ -5896,53 +5933,44 @@ fn render_rep(
             _ => {}
         }
     }
-    // `$($state.name: { $($state.moves.event),* })` has no variable of its
-    // own on the outer row only when this is the inner row. If this row
-    // names nothing, the nested repetition's path is the sequence.
     if own.is_empty() {
         collect_vars(inner, &mut own);
     }
-    let mut path = own.iter().max_by_key(|name| name.len()).map(|name| name.as_str()).unwrap_or("");
+    let mut path = own.iter().max_by_key(|name| name.len()).cloned().unwrap_or_default();
     let mut rows = Vec::new();
     while !path.is_empty() {
-        if let Some(found) = capture_sequence(captures, path) {
+        if let Some(found) = capture_sequence(captures, &path) {
             if !found.is_empty() {
                 rows = found;
                 break;
             }
         }
-        path = path.rsplit_once('.').map(|(parent, _)| parent).unwrap_or("");
+        path = path.rsplit_once('.').map(|(parent, _)| parent.to_owned()).unwrap_or_default();
     }
     if rows.is_empty() {
         rows = rep_rows(inner, captures);
     }
-    for (index, row) in rows.iter().enumerate() {
-        if index > 0 {
-            if let Some(sep) = sep {
-                out.push_str(sep);
-                if sep == "," {
-                    out.push(' ');
-                }
-            }
+    (path, rows)
+}
+
+fn rep_row_scope(captures: &HashMap<String, Capture>, path: &str, row: &[(String, Capture)]) -> HashMap<String, Capture> {
+    let mut scoped = HashMap::new();
+    for (key, value) in captures {
+        // Keep bindings that are not this sequence. A field named `name`
+        // is stored on its dotted path; the root `name` stays the protocol.
+        if key == path || key == path.split('.').next().unwrap_or(path) {
+            continue;
         }
-        let mut scoped = HashMap::new();
-        for (key, value) in captures {
-            // Keep bindings that are not this sequence. A field named `name`
-            // is stored on its dotted path; the root `name` stays the protocol.
-            if key == path || key == path.split('.').next().unwrap_or(path) {
-                continue;
-            }
-            if path.starts_with(&format!("{key}.")) {
-                continue;
-            }
-            scoped.insert(key.clone(), value.clone());
+        if path.starts_with(&format!("{key}.")) {
+            continue;
         }
-        for (name, value) in scope_rep_row(path, row) {
-            scoped.insert(name, value);
-        }
-        scope_record_fields(&mut scoped);
-        render(out, inner, &scoped, classes);
+        scoped.insert(key.clone(), value.clone());
     }
+    for (name, value) in scope_rep_row(path, row) {
+        scoped.insert(name, value);
+    }
+    scope_record_fields(&mut scoped);
+    scoped
 }
 
 fn scope_record_fields(scoped: &mut HashMap<String, Capture>) {
