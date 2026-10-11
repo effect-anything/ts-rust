@@ -1399,6 +1399,17 @@ impl<'a> Printer<'a> {
         true
     }
 
+    /// True when a compiled rule for `name` accepts the call at `index`.
+    fn compiled_rule_matches(&self, nodes: &[Syntax], index: usize, name: &str) -> bool {
+        self.macros
+            .iter()
+            .filter(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
+            .flat_map(|macro_| macro_.rules.iter())
+            .any(|rule| {
+                match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes).is_some()
+            })
+    }
+
     fn try_form(&mut self, nodes: &[Syntax], index: usize) -> bool {
         // `(-> value, call())` is a compiled rule. A form rewrite that
         // prints only the callee is not that expansion.
@@ -5448,14 +5459,13 @@ fn apply_plan_nodes(
             Syntax::Operator { raw, .. } if raw == "." => dotted = true,
             Syntax::String { span, raw } if raw.starts_with('`') && raw.contains("${") => {
                 let map = occurrence_plan(plan, seen);
+                // A name is not only `${inspected}`; it can be nested inside
+                // `${globalThis.JSON.stringify(inspected)}`. Split the
+                // template on non-identifier characters so the word is found
+                // wherever it appears.
                 let needs = map.keys().any(|name| {
-                    let mut whole = String::from("${");
-                    whole.push_str(name);
-                    whole.push('}');
-                    let mut member = String::from("${");
-                    member.push_str(name);
-                    member.push('.');
-                    raw.contains(&whole) || raw.contains(&member)
+                    raw.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                        .any(|word| word == name)
                 });
                 if needs {
                     let renamed = rename_template_literal(
