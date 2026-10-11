@@ -1,3 +1,8 @@
+type Effect =
+  { readonly kind: "put"; readonly value: number } | { readonly kind: "take" };
+const put = (_channel: object, value: number): Effect => ({ kind: "put", value, });
+const take = (channel: object): Effect => { void channel; return { kind: "take" }; };
+
 
 
 const received = "outer received";

@@ -1,7 +1,0 @@
---- /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-theirs.txt	2026-10-11 12:45:35
-+++ /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-ours.txt	2026-10-11 12:45:35
-@@ -1 +1 @@
--typeOption<T>={readonlytag:"None"}|{readonlytag:"Some";value:T};constNone=<T>:Option<T>=>{tag:"None"};constSome=<T>value:T:Option<T>=>{tag:"Some",value};exportconstresult={value:Some3,run{ifthis.value.tag==="Some"{const{value}=this.value;returnvalue+1;}ifthis.value.tag==="None"{return0;}constunmatched:never=this.value;thrownewglobalThis.Error"Nomatchfor"+globalThis.JSON.stringifyunmatched,;},}.run;voidNone;
-\ No newline at end of file
-+typeOption<T>={readonlytag:"None";}|{readonlytag:"Some";value:T;};constNone=<T,>:Option<T>=>{tag:"None"};constSome=<T,>value:T:Option<T>=>{tag:"Some",value};exportconstresult={value:Some3,run{ifthis.value.tag==="Some"{const{value}=this.value;returnvalue+1;}ifthis.value.tag==="None"{return0;}constunmatched:never=this.value;thrownewglobalThis.Error"Nomatchfor"+globalThis.JSON.stringifyunmatched,;},}.run;
-\ No newline at end of file

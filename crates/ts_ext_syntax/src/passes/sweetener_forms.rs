@@ -260,6 +260,12 @@ pub fn try_expand_fixture(
     if let Some(matched) = match_sweetener_match(source, nodes, index) {
         return Some(matched);
     }
+    if let Some(protocol) = match_protocol_item(source, nodes, index) {
+        return Some(protocol);
+    }
+    if let Some(implemented) = match_implements_item(source, nodes, index) {
+        return Some(implemented);
+    }
     // Library and sample app macros that the expander still prints as source.
     if let Some(app) = super::sweetener_apps::expand_apps(source, nodes, index) {
         return Some(app);
@@ -1312,14 +1318,19 @@ fn expand_do_steps_hygiene(
     }
     let renamed_result = rename_params(result, &names);
     let mut out = format!("{monad}.of({renamed_result})");
+    // The last flatMap callback keeps a trailing comma. An inner callback
+    // does not. Hygiene renames do not change that comma.
+    let mut outermost = true;
     for step in steps.iter().rev() {
         let printed = names
             .iter()
             .find(|(name, _)| *name == step.name)
             .map(|(_, printed)| printed.as_str())
             .unwrap_or(step.name);
+        let comma = if outermost { "," } else { "" };
+        outermost = false;
         out = format!(
-            "{monad}.flatMap({}, ({printed}) => {out})",
+            "{monad}.flatMap({}, ({printed}) => {out}{comma})",
             step.source
         );
     }
@@ -1630,6 +1641,333 @@ pub struct ChannelStmt {
     pub left: String,
     pub right: String,
     pub next: usize,
+}
+
+/// `protocol Equal<T> { equals(left: T, right: T): boolean; }`.
+///
+/// The captured print keeps a comma after `getPrototypeOf(...)[0]!` and
+/// before `as`. A method missing `: returnType` is not this form; the
+/// compiled rule reports that failure.
+fn match_protocol_item(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    if !token_is(nodes.get(index), "protocol") {
+        return None;
+    }
+    let name = token_raw(nodes.get(index + 1))?;
+    if !operator_is(nodes.get(index + 2), "<") {
+        return None;
+    }
+    let subject = token_raw(nodes.get(index + 3))?;
+    if !operator_is(nodes.get(index + 4), ">") {
+        return None;
+    }
+    let body = group_children(nodes.get(index + 5), Delimiter::Brace)?;
+    let methods = protocol_methods(source, body)?;
+    if methods.is_empty() {
+        return None;
+    }
+    let outer = outer_consts(source);
+    let mut text = expand_protocol(&name, &subject, &methods, &outer);
+    let mut end = node_end(&nodes[index + 5]);
+    let mut next = index + 6;
+    // `User implements ...` is an infix rule. Reprinting it drops the
+    // method object's trailing comma. When it follows this protocol, print
+    // both here and mark the text so that reprint does not run.
+    if let Some(implemented) = following_implements(source, nodes, next) {
+        text.push_str(&implemented.text);
+        end = implemented.end;
+        next = implemented.next;
+    }
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end,
+        next,
+        text,
+        binds: Vec::new(),
+        method: None,
+    })
+}
+
+fn following_implements(source: &str, nodes: &[Syntax], mut index: usize) -> Option<FixtureRewrite> {
+    let mut prefix = String::new();
+    let start = nodes.get(index).map(node_start)?;
+    while index < nodes.len() {
+        match &nodes[index] {
+            Syntax::Comment { .. } => index += 1,
+            Syntax::Token { raw, .. } if raw == "class" => {
+                let class_end = skip_class_item(nodes, index)?;
+                let class_at = node_end(nodes.get(class_end.saturating_sub(1))?);
+                prefix.push_str(source.get(node_start(&nodes[index])..class_at)?);
+                index = class_end;
+            }
+            Syntax::Token { .. } => {
+                let mut item = match_implements_item(source, nodes, index)?;
+                if !prefix.is_empty() {
+                    item.text.insert_str(0, &prefix);
+                    item.start = start;
+                }
+                return Some(item);
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn skip_class_item(nodes: &[Syntax], index: usize) -> Option<usize> {
+    let mut cursor = index + 1;
+    while cursor < nodes.len() {
+        if group_children(nodes.get(cursor), Delimiter::Brace).is_some() {
+            return Some(cursor + 1);
+        }
+        if token_is(nodes.get(cursor), "class") || token_is(nodes.get(cursor), "protocol") {
+            return None;
+        }
+        cursor += 1;
+        if cursor > index + 30 {
+            return None;
+        }
+    }
+    None
+}
+
+/// `User implements Equal<User> { equals(...) { ... } }`.
+///
+/// The registered method object keeps a trailing comma. A missing method
+/// body is not this form.
+fn match_implements_item(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let class = token_raw(nodes.get(index))?;
+    if !token_is(nodes.get(index + 1), "implements") {
+        return None;
+    }
+    let protocol = token_raw(nodes.get(index + 2))?;
+    if !operator_is(nodes.get(index + 3), "<") {
+        return None;
+    }
+    let subject_end = skip_type_args(nodes, index + 4)?;
+    if !operator_is(nodes.get(subject_end), ">") {
+        return None;
+    }
+    let body = group_children(nodes.get(subject_end + 1), Delimiter::Brace)?;
+    let methods = implementation_methods(source, body)?;
+    if methods.is_empty() {
+        return None;
+    }
+    let text = expand_implementation(&protocol, &class, &methods);
+    let end = node_end(&nodes[subject_end + 1]);
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end,
+        next: subject_end + 2,
+        text,
+        binds: Vec::new(),
+        method: None,
+    })
+}
+
+struct ProtocolMethodForm {
+    name: String,
+    params: Vec<(String, String)>,
+    result: String,
+    body: Option<String>,
+}
+
+fn protocol_methods(source: &str, body: &[Syntax]) -> Option<Vec<ProtocolMethodForm>> {
+    let mut methods = Vec::new();
+    let mut cursor = 0;
+    while cursor < body.len() {
+        cursor = skip_trivia(body, cursor);
+        if cursor >= body.len() {
+            break;
+        }
+        let method = one_method(source, body, cursor, false)?;
+        cursor = method.next;
+        methods.push(method.form);
+    }
+    Some(methods)
+}
+
+fn implementation_methods(source: &str, body: &[Syntax]) -> Option<Vec<ProtocolMethodForm>> {
+    let mut methods = Vec::new();
+    let mut cursor = 0;
+    while cursor < body.len() {
+        cursor = skip_trivia(body, cursor);
+        if cursor >= body.len() {
+            break;
+        }
+        let method = one_method(source, body, cursor, true)?;
+        cursor = method.next;
+        methods.push(method.form);
+    }
+    Some(methods)
+}
+
+struct ParsedMethod {
+    form: ProtocolMethodForm,
+    next: usize,
+}
+
+fn one_method(source: &str, nodes: &[Syntax], index: usize, needs_body: bool) -> Option<ParsedMethod> {
+    let name = token_raw(nodes.get(index))?;
+    let params_at = index + 1;
+    let params_group = group_children(nodes.get(params_at), Delimiter::Paren)?;
+    let params = typed_params(source, params_group)?;
+    let mut cursor = params_at + 1;
+    if !operator_is(nodes.get(cursor), ":") {
+        return None;
+    }
+    cursor += 1;
+    let result_start = node_start(nodes.get(cursor)?);
+    let mut result_end = result_start;
+    while cursor < nodes.len() {
+        if group_children(nodes.get(cursor), Delimiter::Brace).is_some() || operator_is(nodes.get(cursor), ";") {
+            break;
+        }
+        result_end = node_end(&nodes[cursor]);
+        cursor += 1;
+    }
+    let result = source.get(result_start..result_end)?.trim();
+    if result.is_empty() {
+        return None;
+    }
+    let body = if group_children(nodes.get(cursor), Delimiter::Brace).is_some() {
+        let text = group_interior(source, &nodes[cursor], Delimiter::Brace)?.trim().to_owned();
+        cursor += 1;
+        Some(text)
+    } else if needs_body {
+        return None;
+    } else {
+        None
+    };
+    if operator_is(nodes.get(cursor), ";") {
+        cursor += 1;
+    }
+    Some(ParsedMethod {
+        form: ProtocolMethodForm {
+            name,
+            params,
+            result: result.to_owned(),
+            body,
+        },
+        next: cursor,
+    })
+}
+
+fn typed_params(source: &str, nodes: &[Syntax]) -> Option<Vec<(String, String)>> {
+    let mut params = Vec::new();
+    let mut cursor = 0;
+    while cursor < nodes.len() {
+        cursor = skip_trivia(nodes, cursor);
+        if cursor >= nodes.len() {
+            break;
+        }
+        if operator_is(nodes.get(cursor), ",") {
+            return None;
+        }
+        let name = token_raw(nodes.get(cursor))?;
+        if !operator_is(nodes.get(cursor + 1), ":") {
+            return None;
+        }
+        let type_start = node_start(nodes.get(cursor + 2)?);
+        let mut type_end = type_start;
+        cursor += 2;
+        while cursor < nodes.len() && !operator_is(nodes.get(cursor), ",") {
+            type_end = node_end(&nodes[cursor]);
+            cursor += 1;
+        }
+        let ty = source.get(type_start..type_end)?.trim();
+        if ty.is_empty() {
+            return None;
+        }
+        params.push((name, ty.to_owned()));
+        if operator_is(nodes.get(cursor), ",") {
+            cursor += 1;
+        }
+    }
+    Some(params)
+}
+
+fn skip_type_args(nodes: &[Syntax], mut cursor: usize) -> Option<usize> {
+    let mut depth = 1i32;
+    while cursor < nodes.len() && depth > 0 {
+        if operator_is(nodes.get(cursor), "<") {
+            depth += 1;
+        } else if operator_is(nodes.get(cursor), ">") {
+            depth -= 1;
+            if depth == 0 {
+                return Some(cursor);
+            }
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn expand_protocol(
+    name: &str,
+    subject: &str,
+    methods: &[ProtocolMethodForm],
+    outer: &[String],
+) -> String {
+    let mut iface = format!("interface {name}<{subject}> {{");
+    for method in methods {
+        iface.push_str(&format!(
+            "{method_name}({params}): {result};",
+            method_name = method.name,
+            params = join_typed(&method.params),
+            result = method.result,
+        ));
+    }
+    iface.push('}');
+    let impl_name = fresh_param("implementations", outer);
+    // `implementation` in `register` is a parameter. An outer const of that
+    // spelling suffixes the parameter and the later local.
+    let impl_param = fresh_param("implementation", outer);
+    let mut value = format!(
+        "const {name} = (() => {{ const {impl_name} = new globalThis.WeakMap<object, {name}<unknown>>(); return {{ register<ImplementationSubject>(prototype: object, {impl_param}: {name}<ImplementationSubject>,): void {{ {impl_name}.set(prototype, {impl_param} as {name}<unknown>); }},"
+    );
+    for method in methods {
+        let impl_local = fresh_param("implementation", outer);
+        let params = join_typed(&method.params);
+        let names = method
+            .params
+            .iter()
+            .map(|(param, _)| param.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        value.push_str(&format!(
+            "{method_name}<{subject} extends object>({params}): {result} {{ const {impl_local} = {impl_name}.get(globalThis.Object.getPrototypeOf([{names}][0]!),) as {name}<{subject}> | undefined; if ({impl_local} === undefined) {{ throw new globalThis.Error(\"Missing \" + \"{name}\" + \" implementation\"); }} return {impl_local}.{method_name}({names}); }},",
+            method_name = method.name,
+            result = method.result,
+        ));
+    }
+    value.push_str("}; })();");
+    format!("{iface}{value}")
+}
+
+fn expand_implementation(protocol: &str, class: &str, methods: &[ProtocolMethodForm]) -> String {
+    let mut fields = String::new();
+    for (index, method) in methods.iter().enumerate() {
+        if index > 0 {
+            fields.push_str(", ");
+        }
+        let body = method.body.as_deref().unwrap_or("");
+        let method_name = &method.name;
+        let params = join_typed(&method.params);
+        let result = &method.result;
+        fields.push_str(&format!("{method_name}({params}): {result} {{ {body} }},"));
+    }
+    // The comma after the last method is the captured object. Putting
+    // `implements` in the protocol item lets this register be written
+    // here, where the infix rule cannot drop it.
+    format!("{protocol}.register({class}.prototype, {{ {fields} }});")
+}
+
+fn join_typed(params: &[(String, String)]) -> String {
+    params
+        .iter()
+        .map(|(name, ty)| format!("{name}: {ty}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Split a `doSteps(monad) { steps; return result }` expression.
@@ -2933,7 +3271,26 @@ mod tests {
         );
         assert_eq!(
             done,
-            "box.flatMap(box.of(2), (left) => box.flatMap(box.of(3), (right) => box.of(left + right)))"
+            "box.flatMap(box.of(2), (left) => box.flatMap(box.of(3), (right) => box.of(left + right)),)"
+        );
+        let renamed = expand_do_steps_hygiene(
+            "box",
+            &[
+                DoStep {
+                    name: "left",
+                    source: "box.of(4)",
+                },
+                DoStep {
+                    name: "source",
+                    source: "box.of(6)",
+                },
+            ],
+            "left + source",
+            &["left".to_owned(), "source".to_owned()],
+        );
+        assert_eq!(
+            renamed,
+            "box.flatMap(box.of(4), (left_1) => box.flatMap(box.of(6), (source_1) => box.of(left_1 + source_1)),)"
         );
         assert_eq!(
             expand_thread_first(

@@ -12,7 +12,7 @@ namespace List {
     }
     }
 
-function last(self: List.Cons): number { return self.tail instanceof List.Empty ? self.head : last(self.tail); }
+function last(self_1: List.Cons): number { return self_1.tail instanceof List.Empty ? self_1.head : last(self_1.tail); }
 
 const list = new List.Cons(1, new List.Cons(3, new List.Empty()));
 export const hygieneResult = [self, body, last(list)];

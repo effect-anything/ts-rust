@@ -345,9 +345,6 @@ fn walk_wraps(node: Node, work: &mut Build, edits: &mut Vec<WrapEdit>) {
     if node.is_nil() {
         return;
     }
-    if std::env::var("DBG").is_ok() {
-        eprintln!("WALK {:?} shell={} resource={}", node.kind(), is_shell_implementation(node, work), labelled(node).is_some());
-    }
     if is_function_like_declaration(node) && function_marked(node) && !already_wrapped(node) {
         if let Some(edit) = edit_for_function(node, work, true) {
             edits.push(edit);
@@ -613,7 +610,7 @@ fn printed_wrapper(node: Node, work: &mut Build, marked: bool) -> Option<String>
         // An expression body is printed as the arrow's right-hand side.
         author
     };
-    let printed = printed.replacen("__tgpu_body__", &replacement, 1);
+    let printed = printed.replacen("{ __tgpu_body__; }", &replacement, 1).replacen("__tgpu_body__", &replacement, 1);
     // The payload comparison keeps only lines that contain `() =>`. The
     // wrapper's arrow has to stay on the same line as the pure comment, and
     // an empty arrow must not break before the metadata that follows.
@@ -987,11 +984,18 @@ impl Build {
     }
 
     fn list(&self, nodes: &[Node]) -> crate::ast::NodeList {
-        self.factory.new_node_list(nodes)
+        // A required list with an undefined range panics when the printer
+        // reads its location. Zero is a real range.
+        self.factory
+            .new_node_list_with_loc(nodes, crate::ast::TextRange::new(0, 0))
     }
 
     fn empty(&self) -> crate::ast::NodeList {
         self.list(&[])
+    }
+
+    fn nil_list(&self) -> crate::ast::NodeList {
+        self.empty()
     }
 }
 
@@ -1362,7 +1366,9 @@ fn function_expression(node: Node, work: &mut Build) -> Node {
     // The printed function has to keep the author's operators. Cloning the
     // body rewrites `+`. The placeholder is replaced with the author's text
     // after the wrapper is printed.
-    let body = work.id("__tgpu_body__");
+    // The printer reads a block's statement list. An identifier has none.
+    let placeholder = work.factory.new_expression_statement(work.id("__tgpu_body__"));
+    let body = work.factory.new_block(work.list(&[placeholder]), false);
     let params = rebuild_params(node, work);
     match node.kind() {
         SyntaxKind::ArrowFunction => work.factory.new_arrow_function(
@@ -1403,8 +1409,12 @@ fn function_expression(node: Node, work: &mut Build) -> Node {
 }
 
 fn rebuild_params(node: Node, work: &Build) -> crate::ast::NodeList {
-    let params = node
-        .parameters()
+    let parameter_list = node.parameter_list();
+    if parameter_list.is_nil() {
+        return crate::ast::NodeList::NIL;
+    }
+    let params = parameter_list
+        .nodes()
         .iter()
         .map(|param| {
             let name = param.name();
@@ -1421,11 +1431,9 @@ fn rebuild_params(node: Node, work: &Build) -> crate::ast::NodeList {
                 // not have.
                 type_from_slice(work, &slice_node(work.code.as_str(), param.type_()))
             };
-            let question = if param.question_token().is_nil() {
-                Node::NIL
-            } else {
-                work.factory.new_token(SyntaxKind::QuestionToken)
-            };
+            // Emitted JavaScript has no `?`. Reading `question_token` asks
+            // for a postfix list the parameter does not have.
+            let question = Node::NIL;
             work.factory.new_parameter_declaration(
                 crate::ast::ModifierList::NIL,
                 Node::NIL,
@@ -1963,7 +1971,7 @@ fn pure_wrapper(work: &Build, function: Node, metadata: Node) -> Node {
     let meta_name = work.id("__TYPEGPU_META__");
     let map = work.factory.new_new_expression(
         work.id("WeakMap"),
-        crate::ast::NodeList::NIL,
+        work.nil_list(),
         work.empty(),
     );
     let access = work.factory.new_property_access_expression(
@@ -2002,7 +2010,7 @@ fn pure_wrapper(work: &Build, function: Node, metadata: Node) -> Node {
     let set_call = work.factory.new_call_expression(
         set,
         Node::NIL,
-        crate::ast::NodeList::NIL,
+        work.nil_list(),
         work.list(&[stored, metadata]),
         crate::flags::NodeFlags::NONE,
     );
@@ -2021,7 +2029,7 @@ fn pure_wrapper(work: &Build, function: Node, metadata: Node) -> Node {
     );
     let arrow = work.factory.new_arrow_function(
         crate::ast::ModifierList::NIL,
-        crate::ast::NodeList::NIL,
+        work.nil_list(),
         work.list(&[work.factory.new_parameter_declaration(
             crate::ast::ModifierList::NIL,
             Node::NIL,
@@ -2038,7 +2046,7 @@ fn pure_wrapper(work: &Build, function: Node, metadata: Node) -> Node {
     let call = work.factory.new_call_expression(
         arrow,
         Node::NIL,
-        crate::ast::NodeList::NIL,
+        work.nil_list(),
         work.list(&[work.factory.new_object_literal_expression(work.empty(), false)]),
         crate::flags::NodeFlags::NONE,
     );
@@ -2622,6 +2630,9 @@ fn function_marked(node: Node) -> bool {
     if body.is_nil() || body.kind() != SyntaxKind::Block {
         return false;
     }
+    if !body.can_have_statements() {
+        return false;
+    }
     let statements = body.statement_list();
     if statements.is_nil() {
         return false;
@@ -2763,14 +2774,19 @@ impl Tinyest {
 
 /// Enough of tinyest-for-wgsl for the numeric captured cases. Not full WGSL.
 fn transpile_marked(node: Node, code: &str) -> Tinyest {
-    let params = node
-        .parameters()
-        .iter()
-        .filter_map(|param| {
-            let name = param.name();
-            (name.kind() == SyntaxKind::Identifier).then(|| name.text().to_owned())
-        })
-        .collect::<Vec<_>>();
+    let parameter_list = node.parameter_list();
+    let params = if parameter_list.is_nil() {
+        Vec::new()
+    } else {
+        parameter_list
+            .nodes()
+            .iter()
+            .filter_map(|param| {
+                let name = param.name();
+                (name.kind() == SyntaxKind::Identifier).then(|| name.text().to_owned())
+            })
+            .collect::<Vec<_>>()
+    };
     let body = node.body();
     let mut ctx = TinyCtx {
         declared: params.clone(),
