@@ -244,14 +244,20 @@ impl<'a> Printer<'a> {
                 index = self.last_form_next;
                 continue;
             }
-            if self.rules_reject(nodes, index) {
-                index = self.last_form_next;
-                continue;
-            }
-            if let Some(name) = macro_head(&nodes[index]) {
-                if self.macros.iter().any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix) {
-                    index = self.expand_head(nodes, index, name);
+            // An identifier a property access owns (`service.q`, `x.service`)
+            // or a parameter list owns (`(service) =>`) is ordinary code. A
+            // form rewrite can print one that shares a macro name, so it must
+            // not reach the macro dispatch.
+            if macro_call_position(nodes, index) {
+                if self.rules_reject(nodes, index) {
+                    index = self.last_form_next;
                     continue;
+                }
+                if let Some(name) = macro_head(&nodes[index]) {
+                    if self.macros.iter().any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix) {
+                        index = self.expand_head(nodes, index, name);
+                        continue;
+                    }
                 }
             }
             // `(-> value, call(...))` is one group. The operator is its
@@ -1072,6 +1078,13 @@ impl<'a> Printer<'a> {
             return false;
         }
         if !self.macros.iter().any(|macro_| macro_.name == name) {
+            return false;
+        }
+        // A macro name that is a property (`x.service`) or is followed by
+        // one (`service.q()`) is ordinary code that shares the spelling.
+        // A form rewrite can print such an identifier, so rejecting here
+        // would discard the file the form pass just produced.
+        if property_access_at(nodes, index) {
             return false;
         }
         // `(-> ...)` is expanded as a group. Rejecting it here discards the
@@ -4063,7 +4076,7 @@ fn match_pats(
 ) -> Option<usize> {
     let start_end = nodes.get(*cursor).map(node_start).unwrap_or(0);
     let mut last_end = start_end;
-    for pat in pattern {
+    for (pat_index, pat) in pattern.iter().enumerate() {
         match pat {
             Pat::Lit(expected) => {
                 skip_comments(nodes, cursor);
@@ -4139,10 +4152,21 @@ fn match_pats(
                     last_end = end;
                     *cursor = next;
                 } else {
+                    // A literal right after an expression hole is that
+                    // hole's stop. `$left:expr === $right:expr` has the
+                    // reader's split `==` then `=`, so the hole must stop
+                    // at `==`. With no following literal the hole is
+                    // greedy, as in `unless($condition:expr) { ... }`.
+                    let stop = match pattern.get(pat_index + 1) {
+                        Some(Pat::Lit(text)) => Some(text.as_str()),
+                        _ => None,
+                    };
                     let taken = if *kind == HoleKind::Binding && pattern.len() == 1 {
                         // `rule { clamp(...) }` is a binding hole standing for the
                         // whole call. Inside `function $name(...)` it is one name.
                         take_expr(source, nodes, *cursor).or_else(|| take_ident(source, nodes, *cursor))
+                    } else if *kind == HoleKind::Expr {
+                        take_expr_until(source, nodes, *cursor, stop)
                     } else {
                         take_hole(source, nodes, *cursor, kind)
                     };
@@ -4497,6 +4521,16 @@ fn take_expr(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, u
     take_expr_until(source, nodes, cursor, None)
 }
 
+/// True when every character is one an operator can be spelled with.
+/// The reader splits `===` into `==` and `=`, so a fixed list of spellings
+/// misses the second half.
+fn is_operator_spelling(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw
+            .chars()
+            .all(|ch| "!=<>&|?+-*/%^~".contains(ch))
+}
+
 /// Operand of a right-associative operator, including another copy of that
 /// operator. `2 ** 3 ** 2` captures `3 ** 2`, not just `3`.
 fn take_right_assoc_operand(
@@ -4621,9 +4655,12 @@ fn take_expr_until(
                 index = op_end;
                 continue;
             }
-            // `!==` and `&&` are several operator characters. An expression
-            // hole includes them; a custom infix still stops at its own spelling.
-            if matches!(node, Syntax::Operator { raw, .. } if matches!(raw.as_str(), "!" | "=" | "<" | ">" | "&" | "|" | "?" | "+" | "-" | "*" | "/" | "%"))
+            // `!==` and `&&` are several operator characters. The reader
+            // splits `===` into `==` and `=`, so the spelling is not one of
+            // a fixed list; every character is an operator character. An
+            // expression hole includes them; a custom infix still stops at
+            // its own spelling.
+            if matches!(node, Syntax::Operator { raw, .. } if is_operator_spelling(raw))
                 && nodes.get(op_end).is_some_and(|next| {
                     matches!(next, Syntax::Operator { .. } | Syntax::Token { .. } | Syntax::String { .. })
                 })
@@ -4644,7 +4681,7 @@ fn take_expr_until(
     while index > cursor + 1 && matches!(nodes.get(index - 1), Some(Syntax::Operator { .. })) {
         // `!==` was consumed as operators. Do not walk back onto `!` when
         // `==` and its operand are already part of the expression.
-        let chained = matches!(nodes.get(index - 1), Some(Syntax::Operator { raw, .. }) if matches!(raw.as_str(), "!" | "=" | "<" | ">" | "&" | "|" | "?" | "+" | "-" | "*" | "/" | "%"))
+        let chained = matches!(nodes.get(index - 1), Some(Syntax::Operator { raw, .. }) if is_operator_spelling(raw))
             && nodes.get(index).is_some_and(|next| matches!(next, Syntax::Operator { .. } | Syntax::Token { .. } | Syntax::String { .. }));
         if chained {
             break;
@@ -5061,6 +5098,41 @@ fn macro_head(node: &Syntax) -> Option<&str> {
     match node {
         Syntax::Token { raw, .. } if is_ident_text(raw) => Some(raw.as_str()),
         _ => None,
+    }
+}
+
+/// True when the node at `index` is an identifier that a property access
+/// owns: `x.service` (the name follows a `.`) or `service.q` (the name is
+/// followed by a `.`). A macro call never has a `.` on either side.
+fn property_access_at(nodes: &[Syntax], index: usize) -> bool {
+    if nodes.get(index).and_then(macro_head).is_none() {
+        return false;
+    }
+    let prev_dot = index > 0 && operator_is(nodes.get(index - 1), ".");
+    let next_dot = operator_is(nodes.get(index + 1), ".");
+    prev_dot || next_dot
+}
+
+/// True when the identifier at `index` could start a macro rule. A macro
+/// head is followed by a token, a group, or `<`. A bare identifier that a
+/// parameter list or an expression owns (`(service) =>`, `service;`) is not.
+/// A name a property access owns (`Effect.gen`) is a member, never a head.
+/// A form rewrite can print such an identifier that shares a macro name.
+fn macro_call_position(nodes: &[Syntax], index: usize) -> bool {
+    if nodes.get(index).and_then(macro_head).is_none() {
+        return false;
+    }
+    if index > 0 && operator_is(nodes.get(index - 1), ".") {
+        return false;
+    }
+    let Some(next) = nodes.get(index + 1) else {
+        return false;
+    };
+    match next {
+        Syntax::Group { .. } => true,
+        Syntax::Token { .. } | Syntax::String { .. } => true,
+        Syntax::Operator { raw, .. } => matches!(raw.as_str(), "<" | "#"),
+        _ => false,
     }
 }
 

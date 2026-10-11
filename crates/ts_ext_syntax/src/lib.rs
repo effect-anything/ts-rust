@@ -15,6 +15,7 @@
 mod conformance;
 mod passes;
 pub mod session;
+pub mod structure;
 
 pub mod protocol;
 pub use session::{SessionDiagnostic, TransformSession, Transformed};
