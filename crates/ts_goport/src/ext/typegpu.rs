@@ -30,7 +30,7 @@ use crate::spanmap::{self, Feature, Kind, Segment};
 
 pub const MAPPER_NAME: &str = "typegpu";
 const MAPPER: &str = MAPPER_NAME;
-const PRELUDE: &str = super::overload::PRELUDE;
+const PRELUDE: &str = super::tsover::PRELUDE;
 const NESTING: &str = "Nesting 'use gpu' functions is not allowed";
 
 /// Virtual text, span-map tuples, and original-file diagnostics for a
@@ -38,7 +38,7 @@ const NESTING: &str = "Nesting 'use gpu' functions is not allowed";
 /// this after Sweetener expansion, or alone for an ordinary file.
 #[must_use]
 pub fn rewrite_text(filename: &str, code: &str) -> Option<Rewrite> {
-    if !super::overload::enabled(code) {
+    if !super::tsover::enabled(code) {
         return None;
     }
     let file_name = if filename.starts_with('/') {
@@ -93,7 +93,7 @@ pub fn rewrite_after_parse(
     opts: &SourceFileParseOptions,
     file: ParsedSourceFile,
 ) -> ParsedSourceFile {
-    if rewriting() || !super::overload::enabled(&file.text) {
+    if rewriting() || !super::tsover::enabled(&file.text) {
         return file;
     }
     let current = file.text.to_string();
@@ -2622,7 +2622,11 @@ fn function_marked(node: Node) -> bool {
     if body.is_nil() || body.kind() != SyntaxKind::Block {
         return false;
     }
-    for statement in body.statements().iter() {
+    let statements = body.statement_list();
+    if statements.is_nil() {
+        return false;
+    }
+    for statement in statements.nodes().iter() {
         if statement.kind() != SyntaxKind::ExpressionStatement {
             break;
         }
@@ -3373,7 +3377,7 @@ impl Walk {
 }
 
 fn overload(kind: SyntaxKind) -> Option<(&'static str, bool)> {
-    super::overload::name(kind)
+    super::tsover::name(kind)
 }
 
 fn apply_edits(original: &str, edits: &[Edit]) -> (String, Vec<Segment>) {

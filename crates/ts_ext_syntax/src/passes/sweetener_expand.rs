@@ -582,17 +582,32 @@ impl<'a> Printer<'a> {
                 });
             }
         }
+        let mut best: Option<(&Rule, Match)> = None;
         for rule in &rules {
             let matched = match_rule_with(self.source, children, start_at, &rule.pattern, &self.classes);
             if std::env::var("SWEETENER_DIAG").is_ok() {
-                eprintln!("gg match {:?} kids={}", matched.as_ref().map(|m| (m.next, m.end)), children.len());
+                eprintln!("try next={:?}", matched.as_ref().map(|m| m.next));
             }
             let Some(matched) = matched else {
                 continue;
             };
-            if matched.next < children.len() {
-                continue;
+            // `(-> value)` also matches the start of `(-> value, call())`.
+            // The rule that consumes the group is the expansion.
+            // A trailing comma after the last step is the call's closer,
+            // not another step. `(-> value, call(),)` is the same form as
+            // `(-> value, call())`.
+            let rest = &children[matched.next.min(children.len())..];
+            let trailing_comma = rest.len() == 1 && operator_is(rest.first(), ",");
+            let whole = matched.next >= children.len() || trailing_comma;
+            let better = best.as_ref().is_none_or(|(_, have)| {
+                whole && have.next < children.len() || matched.next > have.next
+            });
+            if better {
+                best = Some((rule, matched));
             }
+        }
+        if let Some((rule, matched)) = best {
+            if matched.next >= children.len() {
             self.copy_until(span.start as usize);
             let was_core = self.printing_core;
             if template_is_core(&rule.template) {
@@ -600,17 +615,23 @@ impl<'a> Printer<'a> {
             }
             let replacement = instantiate(self.source, &rule.template, &matched.captures, &self.classes);
             if std::env::var("SWEETENER_DIAG").is_ok() {
-                let preview: String = replacement.chars().take(120).collect();
-                eprintln!("grouped {name} repl {preview:?}");
+                let preview: String = replacement.chars().take(160).collect();
+                eprintln!("grouped repl {preview:?}");
             }
             let expanded = self.expand_replacement(&replacement);
             self.printing_core = was_core;
+            if std::env::var("SWEETENER_DIAG").is_ok() {
+                let preview: String = expanded.chars().take(120).collect();
+                let here = std::backtrace::Backtrace::force_capture();
+                eprintln!("grouped exp {preview:?} failed={} {here}", self.failed);
+            }
             if self.failed {
                 return self.skip_failed(nodes, index);
             }
             self.emit(span.start, span.end, &expanded, SegmentKind::Atom);
             self.last_original = span.end as usize;
             return index + 1;
+            }
         }
         if std::env::var("SWEETENER_DIAG").is_ok() { eprintln!("fail from grouped {name}"); }
         self.fail_macro(nodes, index, name, &rules);
@@ -819,8 +840,9 @@ impl<'a> Printer<'a> {
     }
 
     fn expand_fragment(&mut self, fragment: &str) -> String {
-        if std::env::var("SWEETENER_DIAG").is_ok() && fragment.contains("typeof") {
-            eprintln!("expand_fragment {:?}", fragment);
+        if std::env::var("SWEETENER_DIAG").is_ok() && fragment.contains("->") {
+            let preview: String = fragment.chars().take(140).collect();
+            eprintln!("expand_fragment {preview:?}");
         }
         let owned = fragment.to_owned();
         let read = sweetener_reader::read_syntax(&owned);
@@ -958,10 +980,32 @@ impl<'a> Printer<'a> {
         }
         if std::env::var("SWEETENER_DIAG").is_ok() && (replacement.contains("typeof") || replacement.contains("function(")) {
             let here = std::backtrace::Backtrace::force_capture();
-            eprintln!("expand_replacement depth={} {:?}", self.depth, replacement.chars().take(160).collect::<String>());
+            let preview: String = replacement.chars().take(160).collect();
+            eprintln!("expand_replacement depth={} {preview:?}", self.depth);
         }
         let owned = replacement.to_owned();
         let read = sweetener_reader::read_syntax(&owned);
+        if std::env::var("SWEETENER_DIAG").is_ok() && owned.contains("->") {
+            if let Some(Syntax::Group { children, .. }) = read.children.first() {
+                for (i, node) in children.iter().take(8).enumerate() {
+                    eprintln!("  inner {i} {:?}", match node {
+                        Syntax::Token { raw, .. } => raw.clone(),
+                        Syntax::Operator { raw, .. } => format!("op{raw}"),
+                        Syntax::Group { delimiter, children, .. } => format!("{delimiter:?}({})", children.len()),
+                        _ => "x".into(),
+                    });
+                }
+            }
+            eprintln!("nested kids={}", read.children.len());
+            for (i, node) in read.children.iter().take(8).enumerate() {
+                eprintln!("  k{i} {:?}", match node {
+                    Syntax::Token { raw, .. } => raw.clone(),
+                    Syntax::Operator { raw, .. } => format!("op{raw}"),
+                    Syntax::Group { delimiter, children, .. } => format!("{delimiter:?}({})", children.len()),
+                    _ => "x".into(),
+                });
+            }
+        }
         // The word check above is a superset. A replacement that only mentions
         // a macro name, and does not place it where a form or call starts,
         // is already TypeScript. Do not parse it into another printer.
@@ -1196,6 +1240,13 @@ impl<'a> Printer<'a> {
     }
 
     fn try_form(&mut self, nodes: &[Syntax], index: usize) -> bool {
+        // `(-> value, call())` is a compiled rule. A form rewrite that
+        // prints only the callee is not that expansion.
+        if grouped_prefix(nodes, index).is_some_and(|name| {
+            self.macros.iter().any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
+        }) {
+            return false;
+        }
         #[cfg(feature = "sweetener_fast_gates")]
         if !self.form_candidate(nodes, index) {
             return false;
@@ -1220,8 +1271,9 @@ impl<'a> Printer<'a> {
         };
         // Empty text with no span is a refused repair. A rewrite that
         // covers the macro is the expansion.
-        if std::env::var("SWEETENER_DIAG").is_ok() {
-            eprintln!("form text_empty={} start={} end={} next={} text={:?}", rewritten.text.is_empty(), rewritten.start, rewritten.end, rewritten.next, rewritten.text.chars().take(80).collect::<String>());
+        if std::env::var("SWEETENER_DIAG").is_ok() && self.source.contains("->") {
+            let preview: String = rewritten.text.chars().take(80).collect();
+            eprintln!("form depth={} text={preview:?}", self.depth);
         }
         // `(-> value, call())` is a compiled rule. An empty form rewrite
         // covers the group but prints nothing, which is not the expansion.
@@ -3881,13 +3933,116 @@ fn match_rule_with(
     // `(-> value, call(...), ...)` is one group in the macro source. The
     // reader already opened that group, so the call site is the operator
     // and its siblings, not another paren around them.
-    let pattern = unwrap_call_group(nodes, index, pattern);
-    let end = match_pats(source, nodes, &mut cursor, pattern, &mut captures, classes)?;
+    let unwrapped = unwrap_call_group(nodes, index, pattern).to_vec();
+    let owned = comma_separated_rest(&unwrapped);
+    if std::env::var("SWEETENER_DIAG").is_ok() && owned.iter().any(|pat| matches!(pat, Pat::Lit(lit) if lit == "->")) {
+        eprintln!("owned {:?}", owned);
+    }
+    if std::env::var("SWEETENER_DIAG").is_ok() && owned.iter().any(|pat| matches!(pat, Pat::Rep { sep: Some(s), .. } if s == ",")) {
+        let mut probe = cursor;
+        for (i, pat) in owned.iter().enumerate() {
+            let before = probe;
+            let step = match_pats(source, nodes, &mut probe, std::slice::from_ref(pat), &mut HashMap::new(), classes);
+            eprintln!("step {i} {before}->{probe} ok={}", step.is_some());
+            if step.is_none() {
+                if let Some(Syntax::Group { children, .. }) = nodes.get(before) {
+                    for (ci, child) in children.iter().take(8).enumerate() {
+                        eprintln!("  arg {ci} {:?}", match child {
+                            Syntax::Token { raw, .. } => raw.clone(),
+                            Syntax::Operator { raw, .. } => format!("op{raw}"),
+                            Syntax::Group { delimiter, children, .. } => format!("{delimiter:?}({})", children.len()),
+                            _ => "x".into(),
+                        });
+                    }
+                }
+            }
+            if step.is_none() { break; }
+        }
+    }
+    let end = match_pats(source, nodes, &mut cursor, &owned, &mut captures, classes)?;
     Some(Match {
         next: cursor,
         end,
         captures,
     })
+}
+
+/// `$($rest:tt)+` was written with the comma inside the repetition.
+/// The call site separates steps with a comma, so the repetition's
+/// separator is that comma and the hole is one step.
+fn comma_separated_rest(pattern: &[Pat]) -> Vec<Pat> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < pattern.len() {
+        let pat = &pattern[index];
+        if matches!(pat, Pat::Lit(lit) if lit == ",")
+            && matches!(pattern.get(index + 1), Some(Pat::Rep { inner, sep: None, .. }) if inner.iter().any(|part| matches!(part, Pat::Hole { kind: HoleKind::TokenTree, .. })))
+        {
+            if let Pat::Rep { inner, kind, .. } = &pattern[index + 1] {
+                out.push(Pat::Rep {
+                    inner: comma_separated_rest(inner),
+                    sep: Some(",".to_owned()),
+                    kind: *kind,
+                });
+                index += 2;
+                continue;
+            }
+        }
+        out.push(match pat {
+            Pat::Group { delimiter, inner } => Pat::Group {
+                delimiter: *delimiter,
+                inner: comma_separated_rest(inner),
+            },
+            Pat::Rep { inner, sep: None, kind } => {
+                let inner = comma_separated_rest(inner);
+                let hole = inner.iter().any(|part| matches!(part, Pat::Hole { kind: HoleKind::TokenTree, .. }));
+                let comma = inner.iter().any(|part| matches!(part, Pat::Lit(lit) if lit == ","));
+                if hole && comma {
+                    Pat::Rep {
+                        inner: inner.into_iter().filter(|part| !matches!(part, Pat::Lit(lit) if lit == ",")).collect(),
+                        sep: Some(",".to_owned()),
+                        kind: *kind,
+                    }
+                } else {
+                    Pat::Rep { inner, sep: None, kind: *kind }
+                }
+            }
+            other => other.clone(),
+        });
+        index += 1;
+    }
+    out
+}
+
+fn comma_separated_rest_unused(pattern: &[Pat]) -> Vec<Pat> {
+    pattern
+        .iter()
+        .map(|pat| match pat {
+            Pat::Group { delimiter, inner } => Pat::Group {
+                delimiter: *delimiter,
+                inner: comma_separated_rest(inner),
+            },
+            Pat::Rep { inner, sep: None, kind } => {
+                let inner = comma_separated_rest(inner);
+                let hole = inner.iter().any(|part| matches!(part, Pat::Hole { kind: HoleKind::TokenTree, .. }));
+                let comma = inner.iter().any(|part| matches!(part, Pat::Lit(lit) if lit == ","));
+                if hole && comma {
+                    Pat::Rep {
+                        inner: inner
+                            .iter()
+                            .filter(|part| !matches!(part, Pat::Lit(lit) if lit == ","))
+                            .cloned()
+                            .collect(),
+                        sep: Some(",".to_owned()),
+                        kind: *kind,
+                    }
+                } else {
+                    pat.clone()
+                }
+            }
+            other => other.clone(),
+        })
+        .collect()
 }
 
 fn grouped_prefix(nodes: &[Syntax], index: usize) -> Option<String> {
@@ -4049,7 +4204,16 @@ fn match_pats(
                         *cursor = saved;
                         break;
                     }
-                    let one: Vec<(String, Capture)> = one.into_iter().collect();
+                    let mut one: Vec<(String, Capture)> = one.into_iter().collect();
+                    // A separator that was written inside the repetition
+                    // (`$($rest:tt,)+`) is not part of the captured step.
+                    if sep.is_some() {
+                        for (_, value) in &mut one {
+                            if let Capture::Text(text) = value {
+                                *text = text.trim().trim_end_matches(',').trim().to_owned();
+                            }
+                        }
+                    }
                     many.push(one);
                     if let Some(sep) = sep {
                         let saved = *cursor;
@@ -4270,7 +4434,12 @@ fn take_hole(
         }
         HoleKind::Ident | HoleKind::Binding => take_ident(source, nodes, index),
         HoleKind::Type => take_type(source, nodes, index),
-        HoleKind::TokenTree => take_token_tree(source, nodes, index),
+        HoleKind::TokenTree => {
+            // `$($rest:tt)+` is the remaining steps of a thread, which start
+            // with an identifier (`map(...)`). A token-tree hole is one
+            // token or group; an identifier is that token.
+            take_token_tree(source, nodes, index).or_else(|| take_ident(source, nodes, index))
+        }
         HoleKind::Expr => {
             // One primary, then tight postfix, then infix operators whose
             // precedence is below a surrounding custom operator. The simple
@@ -4348,10 +4517,22 @@ fn take_token_tree(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(Str
     if is_expr_stop(node) {
         return None;
     }
-    if matches!(node, Syntax::Group { .. }) {
-        return Some((sweetener_reader::slice(source, node).to_owned(), node_end(node), index + 1));
+    // `$($rest:tt)+` is the remaining steps, not one character. A call
+    // (`map((value) => value + 1)`) is one step; the comma after it belongs
+    // to the repetition's separator, not to this hole.
+    let start = node_start(node);
+    let mut end_index = index + 1;
+    while end_index < nodes.len() {
+        if operator_is(nodes.get(end_index), ",") || is_expr_stop(&nodes[end_index]) {
+            break;
+        }
+        end_index += 1;
+        if end_index - index > 24 {
+            break;
+        }
     }
-    Some((sweetener_reader::slice(source, node).to_owned(), node_end(node), index + 1))
+    let end = node_end(&nodes[end_index - 1]);
+    Some((source[start..end].to_owned(), end, end_index))
 }
 
 fn take_expr(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, usize, usize)> {
@@ -4381,7 +4562,15 @@ fn take_right_assoc_operand(
         if is_expr_stop(node) {
             break;
         }
-        if matches!(node, Syntax::Operator { raw, .. } if raw == "," || raw == ":" || raw == "=") {
+        if matches!(node, Syntax::Operator { raw, .. } if raw == "," || raw == ":") {
+            break;
+        }
+        // `=>` is `=` then `>`. The arrow is part of the expression.
+        if operator_is(Some(node), "=") && operator_is(nodes.get(index + 1), ">") {
+            index += 2;
+            continue;
+        }
+        if operator_is(Some(node), "=") {
             break;
         }
         if matches!(node, Syntax::Group { .. }) || matches!(node, Syntax::Token { .. } | Syntax::String { .. }) {
@@ -4531,7 +4720,7 @@ fn is_expr_start(node: &Syntax) -> bool {
 
 fn is_expr_stop(node: &Syntax) -> bool {
     match node {
-        Syntax::Operator { raw, .. } => matches!(raw.as_str(), ";" | ")" | "]" | "}" | "=>"),
+        Syntax::Operator { raw, .. } => matches!(raw.as_str(), ";" | ")" | "]" | "}" ),
         _ => false,
     }
 }
@@ -5550,10 +5739,19 @@ fn render(
     captures: &HashMap<String, Capture>,
     classes: &[SyntaxClass],
 ) {
-    for part in trim_template(template) {
+    let template = trim_template(template);
+    for (index, part) in template.iter().enumerate() {
         match part {
             Tpl::Text(text) => {
-                let substituted = substitute_text(text, captures);
+                let next_rest = template.get(index + 1).is_some_and(|next| {
+                    matches!(next, Tpl::Rep { inner, sep: None } if inner.iter().any(|part| matches!(part, Tpl::Var(name) if name == "rest")))
+                });
+                let text = if next_rest && text.trim_end().ends_with(',') {
+                    text.trim_end().trim_end_matches(',').to_owned()
+                } else {
+                    text.clone()
+                };
+                let substituted = substitute_text(&text, captures);
                 out.push_str(&substituted);
             }
             Tpl::Var(name) => {
@@ -5615,6 +5813,26 @@ fn render_rep(
     captures: &HashMap<String, Capture>,
     classes: &[SyntaxClass],
 ) {
+    // `$($rest:tt,)+` writes the comma inside the repetition. Rendering it
+    // there glues `), ,` onto the next step. The comma is the separator.
+    if std::env::var("SWEETENER_DIAG").is_ok() && format!("{inner:?}").contains("rest") {
+        eprintln!("rep inner {inner:?} sep={sep:?}");
+    }
+    let (inner, sep): (Vec<Tpl>, Option<&str>) = if sep.is_none()
+        && inner.iter().any(|part| matches!(part, Tpl::Var(name) if name == "rest"))
+    {
+        // `$($rest)+` steps are separated by commas at the call site.
+        // The template copied no separator, so the steps would join.
+        (inner.to_vec(), Some(", "))
+    } else if sep.is_none()
+        && inner.last().is_some_and(|part| matches!(part, Tpl::Text(text) if text.trim() == ","))
+    {
+        (inner[..inner.len() - 1].to_vec(), Some(","))
+    } else {
+        (inner.to_vec(), sep)
+    };
+    let inner = inner.as_slice();
+    let sep = sep;
     let mut own = Vec::new();
     for part in inner {
         match part {

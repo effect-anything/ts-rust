@@ -1,5 +1,5 @@
---- /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-theirs.txt	2026-10-11 13:09:35
-+++ /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-ours.txt	2026-10-11 13:09:35
+--- /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-theirs.txt	2026-10-11 13:24:58
++++ /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-ours.txt	2026-10-11 13:24:58
 @@ -1 +0,0 @@
 -constmap=<A,B>values:readonlyA[],fn:value:A=>B:B[]=>values.mapfn;constfilter=<A>values:readonlyA[],predicate:value:A=>boolean,:A[]=>values.filterpredicate;exportconstthreadFirst=filtermap[1,2,3],value=>value+1,value=>value>2,;constappend=<A>suffix:readonlyA[],values:readonlyA[]:A[]=>[...values,...suffix,];constmapLast=<A,B>fn:value:A=>B,values:readonlyA[]:B[]=>values.mapfn;constfilterLast=<A>predicate:value:A=>boolean,values:readonlyA[],:A[]=>values.filterpredicate;exportconstthreadLast=append[5],filterLastvalue=>value>2,mapLastvalue=>value+1,[1,2,3],,;exportconstresult=threadFirst;
 \ No newline at end of file

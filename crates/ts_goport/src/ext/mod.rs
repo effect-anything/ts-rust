@@ -3,6 +3,6 @@
 //! The port calls [`precheck::apply`] after parse and
 //! [`precheck::emits_javascript`] when deciding emit.
 
-pub mod overload;
 pub mod precheck;
+pub mod tsover;
 pub mod typegpu;
