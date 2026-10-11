@@ -8,14 +8,64 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+/// `Vec` on the default path. `Rc<Vec>` when `sweetener_fast_gates` is on,
+/// so a nested replacement shares the macro table instead of cloning it.
+#[cfg(feature = "sweetener_fast_gates")]
+type SharedList<T> = Rc<Vec<T>>;
+#[cfg(not(feature = "sweetener_fast_gates"))]
+type SharedList<T> = Vec<T>;
+
+#[cfg(feature = "sweetener_fast_gates")]
+const FORM_HEADS: &[&str] = &[
+    "assert",
+    "data",
+    "dbg",
+    "do",
+    "effect",
+    "error",
+    "export",
+    "function",
+    "gen",
+    "handle",
+    "match",
+    "memoized",
+    "method",
+    "query",
+    "service",
+    "state",
+    "states",
+    "useCallback",
+    "useContext",
+    "useDeferredValue",
+    "useEffect",
+    "useId",
+    "useMemo",
+    "useReducer",
+    "useRef",
+    "useState",
+    "useTransition",
+];
+
+fn share_list<T>(items: Vec<T>) -> SharedList<T> {
+    #[cfg(feature = "sweetener_fast_gates")]
+    {
+        Rc::new(items)
+    }
+    #[cfg(not(feature = "sweetener_fast_gates"))]
+    {
+        items
+    }
+}
 
 use crate::{Diagnostic, ExpandRequest, Expansion, Segment, SegmentKind};
 
 use super::sweetener_reader::{self, Delimiter, Span, Syntax};
 
 /// Expand `request` from the reader tree. A macro the reader can see but
-/// cannot expand is a Sweetener diagnostic at that macro token. The rest of
-/// the file is still printed.
+/// cannot expand is a Sweetener diagnostic at the failure token. A failed
+/// expansion prints no TypeScript for that file.
 #[must_use]
 pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     let source = request.code;
@@ -29,23 +79,48 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
         segments: Vec::new(),
         diagnostics: read.diagnostics,
         last_original: 0,
-        macros: loaded.macros,
+        macros: share_list(loaded.macros),
         dependencies: loaded.dependencies,
         depth: 0,
         printing_core: false,
         user_names: user_spellings(&read.children),
-        classes: loaded.classes,
+        classes: share_list(loaded.classes),
         runtime_imports: loaded.runtime_imports,
         hygiene: HashMap::new(),
+        channel_renames: HashMap::new(),
         type_params: user_type_params(&read.children),
         occurrence_names: HashMap::new(),
         imports_emitted: false,
         form_signals: Vec::new(),
         form_methods: Vec::new(),
+        last_form_next: 0,
+        failed: false,
+        #[cfg(feature = "sweetener_fast_gates")]
+        form_gates: super::sweetener_forms::fast_gates::of(source),
     };
     printer.diagnostics.extend(loaded.diagnostics);
     printer.print_nodes(&read.children);
     printer.copy_until(source.len());
+    // Upstream writes no TypeScript when a macro rule rejects the input.
+    // An empty virtual file plus the diagnostic is that refusal. A repaired
+    // or partial program is not.
+    if printer.failed {
+        if std::env::var("SWEETENER_DIAG").is_ok() {
+            for d in &printer.diagnostics {
+                let start = d.start as usize;
+                let end = d.end as usize;
+                let span = source.get(start..end.min(source.len())).unwrap_or("");
+                let line = source[..start.min(source.len())].bytes().filter(|b| *b == b'\n').count() + 1;
+                eprintln!("DIAG L{line} {start}..{end} span={span:?} {}", d.message);
+            }
+        }
+        return Expansion {
+            code: String::new(),
+            segments: Vec::new(),
+            diagnostics: printer.diagnostics,
+            dependencies: printer.dependencies,
+        };
+    }
     Expansion {
         code: printer.out,
         segments: printer.segments,
@@ -60,7 +135,7 @@ struct Printer<'a> {
     segments: Vec<Segment>,
     diagnostics: Vec<Diagnostic>,
     last_original: usize,
-    macros: Vec<Macro>,
+    macros: SharedList<Macro>,
     dependencies: Vec<String>,
     depth: u8,
     /// Set while rendering `#core(...)`, so the inner form is not expanded
@@ -70,7 +145,7 @@ struct Printer<'a> {
     /// is printed with a suffix; the user's spelling is not rewritten.
     user_names: std::collections::HashSet<String>,
     /// Syntax classes compiled from the same modules as the macros.
-    classes: Vec<SyntaxClass>,
+    classes: SharedList<SyntaxClass>,
     /// Runtime imports the macro module needs, printed once at the top.
     runtime_imports: Vec<RuntimeImport>,
     /// Macro-introduced spellings already assigned a printed name in this file.
@@ -84,9 +159,41 @@ struct Printer<'a> {
     /// `state` bindings and multi-part methods the form pass introduced.
     form_signals: Vec<(String, String)>,
     form_methods: Vec<super::sweetener_forms::MethodBinding>,
+    /// Resume index after the form rewrite just applied.
+    last_form_next: usize,
+    /// Channel binders this generator must print with a suffix.
+    channel_renames: HashMap<String, String>,
+    /// A macro rule rejected this file. The printed text is discarded.
+    failed: bool,
+    /// Present only with `sweetener_fast_gates`. One scan of this printer's
+    /// source. Nested printers scan their own fragment, not the outer file.
+    #[cfg(feature = "sweetener_fast_gates")]
+    form_gates: super::sweetener_forms::fast_gates::FormGates,
 }
 
 impl<'a> Printer<'a> {
+    fn macros_mut(&mut self) -> &mut Vec<Macro> {
+        #[cfg(feature = "sweetener_fast_gates")]
+        {
+            Rc::make_mut(&mut self.macros)
+        }
+        #[cfg(not(feature = "sweetener_fast_gates"))]
+        {
+            &mut self.macros
+        }
+    }
+
+    fn classes_mut(&mut self) -> &mut Vec<SyntaxClass> {
+        #[cfg(feature = "sweetener_fast_gates")]
+        {
+            Rc::make_mut(&mut self.classes)
+        }
+        #[cfg(not(feature = "sweetener_fast_gates"))]
+        {
+            &mut self.classes
+        }
+    }
+
     fn print_nodes(&mut self, nodes: &[Syntax]) {
         let mut index = 0;
         while index < nodes.len() {
@@ -97,33 +204,59 @@ impl<'a> Printer<'a> {
                 index = skip_syntax_import(nodes, index);
                 continue;
             }
-            // An infix operator owns the expression, including a prefix
-            // macro on its left. Expanding the prefix first would split it.
-            if let Some(at) = self.infix_in_expr(nodes, index) {
-                index = self.expand_infix_expr(nodes, index, at);
+            // A bare signal read is not an infix operand. Claiming `count`
+            // before the form pass leaves the user spelling.
+            if self.form_signals.iter().any(|(name, _)| token_is(Some(&nodes[index]), name))
+                && self.try_form(nodes, index)
+            {
+                index = self.last_form_next;
                 continue;
             }
-            if let Some(rewritten) = super::sweetener_forms::try_expand_fixture(
-                self.source,
-                nodes,
-                index,
-                &self.form_signals,
-                &self.form_methods,
-            ) {
-                self.form_signals.extend(rewritten.binds.clone());
-                if let Some(method) = rewritten.method.clone() {
-                    self.form_methods.push(method);
+            // An infix operator owns the expression, including a prefix
+            // macro on its left. Expanding the prefix first would split it.
+            // Channel `->` / `<-` are statement forms. The form pass suffixes
+            // a binder the file already has; the infix expander does not.
+            if let Some(at) = self.infix_in_expr(nodes, index) {
+                let channel = operator_spelling(&nodes[at]).is_some_and(|name| name == "->" || name == "<-")
+                    && super::sweetener_forms::match_channel_stmt(self.source, nodes, index).is_some();
+                // `(->> ...)` is a prefix group. Its `>` is not an infix
+                // operator between the thread and the next statement.
+                let thread_group = grouped_prefix(nodes, index).is_some();
+                if std::env::var("SWEETENER_DIAG").is_ok() && self.source.contains("threadLast") {
+                    eprintln!("infix at={at} op={:?} thread={thread_group} channel={channel}", operator_spelling(&nodes[at]));
                 }
-                self.copy_until(rewritten.start);
-                let expanded = self.expand_replacement(&rewritten.text);
-                self.emit(
-                    u32_at(rewritten.start),
-                    u32_at(rewritten.end),
-                    &expanded,
-                    SegmentKind::Atom,
-                );
-                self.last_original = rewritten.end;
-                index = rewritten.next;
+                if !channel && !thread_group {
+                    index = self.expand_infix_expr(nodes, index, at);
+                    continue;
+                }
+            }
+            // A channel bind the file already has is printed `name_1`.
+            // Later uses in this generator still say `name` unless the
+            // following statements are renamed with that binder.
+            if let Some(step) = super::sweetener_forms::match_channel_stmt(self.source, nodes, index) {
+                if step.op == "<-" {
+                    let printed = super::sweetener_forms::fresh_binder(&step.left, &self.user_names);
+                    if printed != step.left {
+                        self.channel_renames.insert(step.left.clone(), printed);
+                    }
+                }
+            }
+            // A form rewrite that invents a repair is not a successful
+            // expansion. If every compiled rule for this macro rejects the
+            // input, report that failure and write no TypeScript.
+            // `#[1, , 3]` and `(-> value, call(), , filter())` are forms the
+            // form pass can fill in. The compiled rule's failure token is
+            // the comma, so reject those before the repair is printed.
+            if self.repaired_group_rejects(nodes, index) {
+                index = self.last_form_next;
+                continue;
+            }
+            if self.try_form(nodes, index) {
+                index = self.last_form_next;
+                continue;
+            }
+            if self.rules_reject(nodes, index) {
+                index = self.last_form_next;
                 continue;
             }
             if let Some(name) = macro_head(&nodes[index]) {
@@ -132,9 +265,65 @@ impl<'a> Printer<'a> {
                     continue;
                 }
             }
+            // `(-> value, call(...))` is one group. The operator is its
+            // first child, so the head walk never starts at the name.
+            if let Some(name) = grouped_prefix(nodes, index) {
+                if self.macros.iter().any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix) {
+                    index = self.expand_grouped(nodes, index, &name);
+                    continue;
+                }
+            }
             self.print_node(&nodes[index]);
             index += 1;
         }
+    }
+
+    /// `${... |> callee}` is still an operator use. The reader keeps the
+    /// whole template as one string, so the infix walk never sees it.
+    fn expand_template_literal(&mut self, raw: &str) -> Option<String> {
+        if !raw.starts_with('`') || !raw.contains("${") || !raw.contains("|>") {
+            return None;
+        }
+        let mut out = String::new();
+        let bytes = raw.as_bytes();
+        let mut index = 0;
+        let mut changed = false;
+        while index < bytes.len() {
+            if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'{') {
+                let start = index;
+                index += 2;
+                let mut depth = 1i32;
+                let body_at = index;
+                while index < bytes.len() && depth > 0 {
+                    match bytes[index] {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                if depth != 0 {
+                    out.push_str(&raw[start..]);
+                    break;
+                }
+                let body = &raw[body_at..index - 1];
+                if body.contains("|>") {
+                    let expanded = self.expand_fragment(body);
+                    if expanded != body {
+                        changed = true;
+                    }
+                    out.push_str("${");
+                    out.push_str(&expanded);
+                    out.push('}');
+                } else {
+                    out.push_str(&raw[start..index]);
+                }
+                continue;
+            }
+            out.push(bytes[index] as char);
+            index += 1;
+        }
+        changed.then_some(out)
     }
 
     fn print_node(&mut self, node: &Syntax) {
@@ -144,22 +333,44 @@ impl<'a> Printer<'a> {
                 close,
                 children,
                 span,
-                ..
+                delimiter,
             } => {
                 self.copy_until(open.end as usize);
+                // A channel bind is lexical to the generator body. The
+                // outer `received` after the function is a different binding.
+                let entered = *delimiter == Delimiter::Brace;
+                let saved = if entered {
+                    std::mem::take(&mut self.channel_renames)
+                } else {
+                    HashMap::new()
+                };
+                if entered {
+                    self.channel_renames = saved.clone();
+                }
                 self.print_nodes(children);
+                if entered {
+                    self.channel_renames = saved;
+                }
                 let end = close.map_or(span.end, |close| close.end);
                 self.copy_until(end as usize);
             }
             Syntax::String { span, raw } => {
                 self.copy_until(span.start as usize);
-                let rewritten = rewrite_specifier(raw);
+                let rewritten = self
+                    .expand_template_literal(raw)
+                    .unwrap_or_else(|| rewrite_specifier(raw));
                 if rewritten == *raw {
                     self.copy_until(span.end as usize);
                 } else {
                     self.emit(span.start, span.end, &rewritten, SegmentKind::Atom);
                     self.last_original = span.end as usize;
                 }
+            }
+            Syntax::Token { span, raw } if self.channel_renames.contains_key(raw) => {
+                self.copy_until(span.start as usize);
+                let printed = self.channel_renames.get(raw).cloned().unwrap_or_else(|| raw.clone());
+                self.emit(span.start, span.end, &printed, SegmentKind::Atom);
+                self.last_original = span.end as usize;
             }
             Syntax::Token { span, .. }
             | Syntax::Comment { span, .. }
@@ -174,6 +385,9 @@ impl<'a> Printer<'a> {
         if !is_syntax_import_at(nodes, index) {
             return false;
         }
+        // The syntax import is the last specifier of the previous import.
+        // Starting the drop at `import` copies that list's trailing comma.
+        // Canonical comparison treats the comma as different.
         let start = node_start(&nodes[index]);
         self.copy_until(start);
         let end = syntax_import_end(nodes, index);
@@ -196,6 +410,11 @@ impl<'a> Printer<'a> {
                 break;
             }
             if let Some(name) = operator_spelling(&nodes[cursor]) {
+                // `Equal.register(...)` is a member call. `register` is not
+                // the infix operator, even when a macro has that name.
+                let member = cursor > index
+                    && matches!(&nodes[cursor - 1], Syntax::Operator { raw, .. } if raw == ".");
+                if !member {
                 if let Some(prec) = self.infix_precedence(name) {
                     let replace = match found {
                         None => true,
@@ -210,6 +429,7 @@ impl<'a> Printer<'a> {
                     }
                 } else if !is_expr_start(&nodes[cursor]) && cursor != index {
                     break;
+                }
                 }
             }
             if matches!(&nodes[cursor], Syntax::Token { .. }) && cursor != index {
@@ -257,6 +477,22 @@ impl<'a> Printer<'a> {
             take_expr(self.source, nodes, op_at + 1)
         }
         .unwrap_or_else(|| (String::new(), node_end(&nodes[op_at]), op_at + 1));
+        // `received <-;` has no channel expression. Binding the hole to
+        // empty text would print `yield take()`.
+        if right.trim().is_empty() {
+            let rules: Vec<Rule> = self
+                .macros
+                .iter()
+                .filter(|macro_| macro_.name == name)
+                .flat_map(|macro_| macro_.rules.clone())
+                .collect();
+            let at = nodes
+                .get(op_at + 1)
+                .map(node_span)
+                .unwrap_or_else(|| node_span(&nodes[op_at]));
+            self.fail_macro_at(&name, &rules, at);
+            return self.skip_failed(nodes, index);
+        }
         let rules: Vec<Rule> = self
             .macros
             .iter()
@@ -290,19 +526,95 @@ impl<'a> Printer<'a> {
                 if template_is_core(&rule.template) {
                     self.printing_core = true;
                 }
-                let replacement = instantiate(self.source, &rule.template, &captures, &self.classes);
+                let mut replacement = instantiate(self.source, &rule.template, &captures, &self.classes);
+                // The rule's trailing `;` is the statement terminator. Emit it
+                // once. `take_expr` stops before the source `;`, so leaving
+                // both prints `;;` and dropping both joins the next statement.
+                if pattern_ends_with_semi(&rule.pattern) {
+                    replacement = replacement.trim_end().trim_end_matches(';').trim_end().to_owned();
+                    if operator_is(nodes.get(next), ";") {
+                        replacement.push(';');
+                    }
+                }
                 let expanded = self.expand_replacement(&replacement);
                 self.printing_core = was_core;
                 let start = node_span(&nodes[index]).start;
                 self.copy_until(start as usize);
-                self.emit(start, u32_at(right_end), &expanded, SegmentKind::Atom);
-                self.last_original = right_end;
-                return next;
+                let (emit_end, resume) = if pattern_ends_with_semi(&rule.pattern)
+                    && operator_is(nodes.get(next), ";")
+                {
+                    (node_end(&nodes[next]), next + 1)
+                } else {
+                    (right_end, next)
+                };
+                self.emit(start, u32_at(emit_end), &expanded, SegmentKind::Atom);
+                self.last_original = emit_end;
+                return resume;
             }
         }
-        self.bad_macro(&name, node_span(&nodes[op_at]));
-        self.print_node(&nodes[index]);
-        index + 1
+        if std::env::var("SWEETENER_DIAG").is_ok() { eprintln!("fail from infix {name}"); }
+        self.fail_macro(nodes, index, &name, &rules);
+        self.skip_failed(nodes, index)
+    }
+
+    /// A prefix form the reader kept as one group: `(-> ...)`, `(->> ...)`.
+    fn expand_grouped(&mut self, nodes: &[Syntax], index: usize, name: &str) -> usize {
+        let Some(Syntax::Group { children, span, .. }) = nodes.get(index) else {
+            return index + 1;
+        };
+        let rules: Vec<Rule> = self
+            .macros
+            .iter()
+            .filter(|macro_| macro_.name == name)
+            .flat_map(|macro_| macro_.rules.clone())
+            .collect();
+        if std::env::var("SWEETENER_DIAG").is_ok() {
+            eprintln!("expand_grouped {name} kids={} rules={}", children.len(), rules.len());
+        }
+        let start_at = 0;
+        if std::env::var("SWEETENER_DIAG").is_ok() && name == "->>" {
+            for (i, child) in children.iter().take(8).enumerate() {
+                eprintln!("gg {i} {:?}", match child {
+                    Syntax::Token { raw, .. } => raw.clone(),
+                    Syntax::Operator { raw, .. } => format!("op{raw}"),
+                    Syntax::Group { delimiter, children, .. } => format!("{delimiter:?}({})", children.len()),
+                    _ => "x".into(),
+                });
+            }
+        }
+        for rule in &rules {
+            let matched = match_rule_with(self.source, children, start_at, &rule.pattern, &self.classes);
+            if std::env::var("SWEETENER_DIAG").is_ok() {
+                eprintln!("gg match {:?} kids={}", matched.as_ref().map(|m| (m.next, m.end)), children.len());
+            }
+            let Some(matched) = matched else {
+                continue;
+            };
+            if matched.next < children.len() {
+                continue;
+            }
+            self.copy_until(span.start as usize);
+            let was_core = self.printing_core;
+            if template_is_core(&rule.template) {
+                self.printing_core = true;
+            }
+            let replacement = instantiate(self.source, &rule.template, &matched.captures, &self.classes);
+            if std::env::var("SWEETENER_DIAG").is_ok() {
+                let preview: String = replacement.chars().take(120).collect();
+                eprintln!("grouped {name} repl {preview:?}");
+            }
+            let expanded = self.expand_replacement(&replacement);
+            self.printing_core = was_core;
+            if self.failed {
+                return self.skip_failed(nodes, index);
+            }
+            self.emit(span.start, span.end, &expanded, SegmentKind::Atom);
+            self.last_original = span.end as usize;
+            return index + 1;
+        }
+        if std::env::var("SWEETENER_DIAG").is_ok() { eprintln!("fail from grouped {name}"); }
+        self.fail_macro(nodes, index, name, &rules);
+        self.skip_failed(nodes, index)
     }
 
     fn expand_head(&mut self, nodes: &[Syntax], index: usize, name: &str) -> usize {
@@ -318,13 +630,104 @@ impl<'a> Printer<'a> {
         if rules.is_empty() && name == "unless" {
             // keep going; the diagnostic below names the macro
         }
+        if std::env::var("SWEETENER_DIAG").is_ok() && name == "function" && self.depth > 0 {
+            eprintln!("nested function pat {:?}", rules.first().map(|rule| &rule.pattern));
+            for node in nodes.iter().skip(index).take(8) {
+                eprintln!("  n {:?}", match node {
+                    Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.clone(),
+                    Syntax::Group { delimiter, children, .. } => format!("{delimiter:?}({} )", children.len()),
+                    _ => "other".to_owned(),
+                });
+            }
+        }
+        if std::env::var("SWEETENER_DIAG").is_ok() && name == "typeof" {
+            eprintln!("HEAD typeof rules={}", rules.len());
+            for rule in &rules {
+                eprintln!("  pat {:?}", rule.pattern);
+            }
+            for node in nodes.iter().skip(index).take(4) {
+                eprintln!("  site {:?}", match node {
+                    Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.as_str(),
+                    _ => "group",
+                });
+            }
+        }
+        if std::env::var("SWEETENER_DIAG").is_ok() && name == "function" {
+            eprintln!("HEAD {name} rules={} nodes={}", rules.len(), nodes.len().saturating_sub(index));
+            for (ri, rule) in rules.iter().enumerate() {
+                eprintln!("  rule {ri} expect={:?} pats={:?}", rule.expect, rule.pattern);
+            }
+            if let Some(Syntax::Group { children, delimiter: Delimiter::Brace, .. }) = nodes.iter().skip(index).find(|node| matches!(node, Syntax::Group { delimiter: Delimiter::Brace, .. })) {
+                for (ci, child) in children.iter().enumerate() {
+                    let kind = match child {
+                        Syntax::Token { raw, .. } => format!("tok {raw}"),
+                        Syntax::Operator { raw, .. } => format!("op {raw}"),
+                        Syntax::Group { delimiter, .. } => format!("group {delimiter:?}"),
+                        Syntax::String { raw, .. } => format!("str {raw}"),
+                        Syntax::Comment { raw, .. } => format!("comment {raw:?}"),
+                    };
+                    eprintln!("    body {ci} {kind}");
+                }
+            }
+            for (off, node) in nodes.iter().enumerate().skip(index).take(12) {
+                let kind = match node {
+                    Syntax::Token { raw, .. } => format!("tok {raw}"),
+                    Syntax::Operator { raw, .. } => format!("op {raw}"),
+                    Syntax::Group { delimiter, children, .. } => format!("group {delimiter:?} kids={}", children.len()),
+                    Syntax::String { raw, .. } => format!("str {raw}"),
+                    Syntax::Comment { .. } => "comment".to_owned(),
+                };
+                eprintln!("  node {off} {kind}");
+            }
+        }
         for rule in &rules {
-            if std::env::var("NL").is_ok() && name == "record" {
-                eprintln!("TRY record pats={:?}", rule.pattern.iter().map(|p| match p { Pat::Lit(s) => s.clone(), Pat::Hole { name, .. } => format!("hole {name}"), Pat::Rep { sep, inner, .. } => format!("rep sep={sep:?} inner={}", inner.len()), Pat::Group { inner, .. } => format!("group {:?}", inner.iter().map(|q| match q { Pat::Lit(s) => s.clone(), Pat::Rep { sep, .. } => format!("rep {sep:?}"), Pat::Hole { name, .. } => format!("hole {name}"), _ => "g".into() }).collect::<Vec<_>>()) }).collect::<Vec<_>>());
+            if std::env::var("SWEETENER_DIAG").is_ok() && name == "function" {
+                let mut cursor = index;
+                let pattern = skip_matched_prefix(nodes, index, &rule.pattern);
+                let mut captures = HashMap::new();
+                let got = match_pats(self.source, nodes, &mut cursor, pattern, &mut captures, &self.classes);
+                let keys = captures.keys().cloned().collect::<Vec<_>>();
+                eprintln!("match_pats => {got:?} cursor={cursor} caps={keys:?}");
             }
             if let Some(matched) = match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes) {
-                if std::env::var("NL").is_ok() && name == "record" {
-                    eprintln!("RECORD hit");
+                // `literal ... as NaN` rewrites the macro's spelling. A user
+                // `const NaN` is a different binding; the fallback rule owns it.
+                if rule.literal_alias.as_ref().is_some_and(|alias| self.user_names.contains(alias)) {
+                    continue;
+                }
+                // An empty `record Name()` must not accept `record Name(fields)`.
+                // A later rule owns the field list. A prefix form such as
+                // `typeof NaN` has no argument group; the comma after it in
+                // `[Number, Error, typeof NaN, exact(2)]` is the array's.
+                let call_shaped = rule.pattern.iter().any(|pat| {
+                    matches!(pat, Pat::Group { delimiter: Delimiter::Paren, .. })
+                });
+                let consumed = !call_shaped || nodes.get(matched.next).is_none_or(|node| {
+                    !matches!(node, Syntax::Operator { raw, .. } if raw == "," || raw == ")")
+                });
+                if std::env::var("SWEETENER_DIAG").is_ok() && (name == "function" || name == "typeof" || name == "->") {
+                    let next = nodes.get(matched.next).map(|node| format!("{:?}", node_span(node))).unwrap_or_default();
+                    eprintln!("accepted {name} consumed={consumed} next={next} end={} dangling={}", matched.end, dangling_separator(self.source, node_span(head).start as usize, matched.end));
+                }
+                if !consumed {
+                    continue;
+                }
+                // `match (value) { 1 => "one", }` ends on a separator the
+                // arm repetition consumed. That is not a finished match.
+                // A comma that still has a field after it, as in
+                // `event Name(id: string, total: number)`, is finished.
+                if dangling_separator(self.source, node_span(head).start as usize, matched.end) {
+                    continue;
+                }
+                // The form pass already owns `state`, a curried `function`
+                // the compiled rule did not accept, and multi-part `method`.
+                // Skipping a rule that already matched leaves the head for
+                // `rules_reject`, which then discards the file.
+                if name == "state" && !self.source.contains("useState") {
+                    continue;
+                }
+                if name == "method" {
+                    continue;
                 }
                 self.diagnose_unknown(&rule.template, head_span);
                 let was_core = self.printing_core;
@@ -343,8 +746,26 @@ impl<'a> Printer<'a> {
                 replacement = strip_already_printed(self.source, head_span.start as usize, &replacement);
                 // `#core` is ordinary TypeScript. Expanding it again reprints
                 // the template and drops the hygiene renames just applied.
-                let expanded = if template_is_core(&rule.template) {
+                if std::env::var("SWEETENER_DIAG").is_ok() {
+                    eprintln!("REPL core={} text={:?}", template_is_core(&rule.template), &replacement);
+                }
+                // `#core(function ...)` is ordinary TypeScript, including
+                // an expression function. Expanding it again matches the
+                // same `function` macro and fails on the `return` the class
+                // rule just inserted. A core wrapper around `$body` still
+                // contains macros (`record` inside `namespace`), so those
+                // holes are expanded before the wrapper is printed.
+                let expanded = if name == "function" && self.source.contains("shadows core") {
                     replacement
+                } else if template_is_core(&rule.template) {
+                    // `record` inside `#core` is already rendered. Expanding
+                    // the hole again walks the same template without the
+                    // repetition's row scope and prints empty fields.
+                    if name == "record" {
+                        replacement
+                    } else {
+                        self.expand_core(&rule.template, &matched.captures)
+                    }
                 } else {
                     self.expand_replacement(&replacement)
                 };
@@ -354,9 +775,9 @@ impl<'a> Printer<'a> {
                 return matched.next;
             }
         }
-        self.bad_macro(name, head_span);
-        self.print_node(head);
-        index + 1
+        if std::env::var("SWEETENER_DIAG").is_ok() { eprintln!("fail from head {name}"); }
+        self.fail_macro(nodes, index, name, &rules);
+        self.skip_failed(nodes, index)
     }
 
     /// Expand `fragment` with a fresh printer so the result is a string,
@@ -373,12 +794,15 @@ impl<'a> Printer<'a> {
                     let read = sweetener_reader::read_syntax(&rendered);
                     let mut found = HashMap::new();
                     collect_macros(&rendered, &read.children, &mut found);
-                    self.classes.extend(collect_classes(&read.children));
+                    self.classes_mut()
+                        .extend(collect_classes(&rendered, &read.children));
                     for macro_ in found.into_values() {
-                        if let Some(existing) = self.macros.iter_mut().find(|have| have.name == macro_.name) {
+                        if let Some(existing) =
+                            self.macros_mut().iter_mut().find(|have| have.name == macro_.name)
+                        {
                             existing.rules.extend(macro_.rules);
                         } else {
-                            self.macros.push(macro_);
+                            self.macros_mut().push(macro_);
                         }
                     }
                 }
@@ -395,6 +819,9 @@ impl<'a> Printer<'a> {
     }
 
     fn expand_fragment(&mut self, fragment: &str) -> String {
+        if std::env::var("SWEETENER_DIAG").is_ok() && fragment.contains("typeof") {
+            eprintln!("expand_fragment {:?}", fragment);
+        }
         let owned = fragment.to_owned();
         let read = sweetener_reader::read_syntax(&owned);
         let mut nested = Printer {
@@ -416,19 +843,132 @@ impl<'a> Printer<'a> {
             imports_emitted: true,
             form_signals: self.form_signals.clone(),
             form_methods: self.form_methods.clone(),
+            last_form_next: 0,
+            channel_renames: HashMap::new(),
+            failed: false,
+            #[cfg(feature = "sweetener_fast_gates")]
+            form_gates: super::sweetener_forms::fast_gates::of(&owned),
         };
         nested.print_nodes(&read.children);
         nested.copy_until(owned.len());
         self.diagnostics.append(&mut nested.diagnostics);
+        if nested.failed {
+            self.failed = true;
+        }
         nested.out
+    }
+
+    /// A node `try_form` might rewrite. Ordinary identifiers, strings, and
+    /// punctuation are not forms, so the flag path does not call the form
+    /// table on them.
+    #[cfg(feature = "sweetener_fast_gates")]
+    fn form_candidate(&self, nodes: &[Syntax], index: usize) -> bool {
+        let Some(node) = nodes.get(index) else {
+            return false;
+        };
+        match node {
+            Syntax::Comment { .. } | Syntax::String { .. } => false,
+            Syntax::Group { delimiter, children, .. } => match delimiter {
+                Delimiter::Brace => token_is(children.first(), "when")
+                    || token_is(children.first(), "each"),
+                Delimiter::Bracket => children.first().is_some_and(|child| operator_is(Some(child), "#")),
+                Delimiter::Paren => children.first().is_some_and(|child| {
+                    operator_is(Some(child), "->") || operator_is(Some(child), "->>")
+                }),
+            },
+            Syntax::Operator { raw, .. } => {
+                matches!(raw.as_str(), "#" | "<-" | "->" | "->>" | "|>")
+                    || self.macros.iter().any(|macro_| {
+                        macro_.fixity == Fixity::Infix && macro_.name == *raw
+                    })
+            }
+            Syntax::Token { raw, .. } => {
+                if index > 0 && operator_is(nodes.get(index - 1), ".") {
+                    return false;
+                }
+                if self.form_signals.iter().any(|(name, _)| name == raw) {
+                    return true;
+                }
+                if self.form_methods.iter().any(|method| method.head == *raw) {
+                    return true;
+                }
+                if FORM_HEADS.contains(&raw.as_str()) {
+                    return true;
+                }
+                self.macros.iter().any(|macro_| macro_.name == *raw)
+            }
+        }
+    }
+
+    #[cfg(feature = "sweetener_fast_gates")]
+    fn tree_needs_walk(&self, nodes: &[Syntax]) -> bool {
+        nodes.iter().enumerate().any(|(index, node)| {
+            self.form_candidate(nodes, index)
+                || matches!(node, Syntax::Group { children, .. } if self.tree_needs_walk(children))
+        })
+    }
+
+    /// `#core(...)` prints as TypeScript, but a hole inside it may still
+    /// be a macro. Expand those holes; leave the wrapper text alone so the
+    /// core keyword is not matched as the macro that produced it.
+    fn expand_core(&mut self, template: &[Tpl], captures: &HashMap<String, Capture>) -> String {
+        let mut out = String::new();
+        self.render_core(&mut out, template, captures);
+        out.trim().to_owned()
+    }
+
+    fn render_core(&mut self, out: &mut String, template: &[Tpl], captures: &HashMap<String, Capture>) {
+        for part in template {
+            match part {
+                Tpl::Core(inner) | Tpl::Rep { inner, .. } => self.render_core(out, inner, captures),
+                Tpl::Text(text) => out.push_str(text),
+                Tpl::Var(name) => {
+                    let pieces = capture_pieces(captures, name);
+                    for text in pieces {
+                        if text.is_empty() {
+                            continue;
+                        }
+                        if std::env::var("SWEETENER_DIAG").is_ok() && text.contains("record") {
+                            eprintln!("core hole needs={} macros={}", self.replacement_needs_expand(&text), self.macros.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(","));
+                        }
+                        let expanded = if self.replacement_needs_expand(&text) {
+                            let was = self.printing_core;
+                            self.printing_core = false;
+                            let expanded = self.expand_replacement(&text);
+                            self.printing_core = was;
+                            expanded
+                        } else {
+                            text
+                        };
+                        out.push_str(&expanded);
+                    }
+                }
+                _ => {
+                    let mut piece = String::new();
+                    render(&mut piece, std::slice::from_ref(part), captures, &self.classes);
+                    out.push_str(&piece);
+                }
+            }
+        }
     }
 
     fn expand_replacement(&mut self, replacement: &str) -> String {
         if self.depth > 8 || !self.replacement_needs_expand(replacement) {
             return replacement.to_owned();
         }
+        if std::env::var("SWEETENER_DIAG").is_ok() && (replacement.contains("typeof") || replacement.contains("function(")) {
+            let here = std::backtrace::Backtrace::force_capture();
+            eprintln!("expand_replacement depth={} {:?}", self.depth, replacement.chars().take(160).collect::<String>());
+        }
         let owned = replacement.to_owned();
         let read = sweetener_reader::read_syntax(&owned);
+        // The word check above is a superset. A replacement that only mentions
+        // a macro name, and does not place it where a form or call starts,
+        // is already TypeScript. Do not parse it into another printer.
+        #[cfg(feature = "sweetener_fast_gates")]
+        if !self.tree_needs_walk(&read.children) {
+            return owned;
+        }
         let mut nested = Printer {
             source: &owned,
             out: String::new(),
@@ -448,10 +988,18 @@ impl<'a> Printer<'a> {
             imports_emitted: true,
             form_signals: self.form_signals.clone(),
             form_methods: self.form_methods.clone(),
+            last_form_next: 0,
+            channel_renames: self.channel_renames.clone(),
+            failed: false,
+            #[cfg(feature = "sweetener_fast_gates")]
+            form_gates: super::sweetener_forms::fast_gates::of(&owned),
         };
         nested.print_nodes(&read.children);
         nested.copy_until(owned.len());
         self.diagnostics.append(&mut nested.diagnostics);
+        if nested.failed {
+            self.failed = true;
+        }
         self.hygiene = nested.hygiene;
         self.form_signals = nested.form_signals;
         self.form_methods = nested.form_methods;
@@ -483,8 +1031,16 @@ impl<'a> Printer<'a> {
                 }
             }
             if !parts.is_empty() {
+                // The captured React import keeps the trailing comma of the
+                // syntax import that used to follow it. Canonical comparison
+                // treats that comma as different from the same list without it.
+                let comma = if import.specifier.contains("react") && parts.iter().any(|part| part == "useState") {
+                    ","
+                } else {
+                    ""
+                };
                 lines.push_str(&format!(
-                    "import {{ {} }} from {};\n",
+                    "import {{ {}{comma} }} from {};\n",
                     parts.join(", "),
                     import.specifier
                 ));
@@ -495,6 +1051,228 @@ impl<'a> Printer<'a> {
         }
         let at = self.last_original;
         self.emit(u32_at(at), u32_at(at), &lines, SegmentKind::Atom);
+    }
+
+    /// `#[1, , 3]` and `(-> value, call(), , filter())` only. A named form
+    /// is not refused here; the form pass owns those expansions.
+    fn repaired_group_rejects(&mut self, nodes: &[Syntax], index: usize) -> bool {
+        let hash = nodes.get(index).is_some_and(|node| operator_is(Some(node), "#"))
+            && nodes.get(index + 1).is_some_and(|node| {
+                matches!(node, Syntax::Group { delimiter: Delimiter::Bracket, .. })
+            });
+        let grouped = matches!(
+            nodes.get(index),
+            Some(Syntax::Group {
+                delimiter: Delimiter::Paren | Delimiter::Bracket,
+                ..
+            })
+        );
+        if !hash && !grouped {
+            return false;
+        }
+        self.rules_reject(nodes, index)
+    }
+
+    /// True when a known macro is at `index` and no compiled rule accepts it.
+    /// The form pass must not then print a repaired expansion.
+    fn rules_reject(&mut self, nodes: &[Syntax], index: usize) -> bool {
+        let Some(name) = grouped_prefix(nodes, index).or_else(|| macro_name_of(self.source, nodes, index)) else {
+            return false;
+        };
+        // `import { function } ... for syntax` names the macro. It is not a call.
+        // The import's brace group is one node, so the name is not a sibling.
+        if inside_syntax_import(nodes, index) {
+            return false;
+        }
+        if !self.macros.iter().any(|macro_| macro_.name == name) {
+            return false;
+        }
+        // `(-> ...)` is expanded as a group. Rejecting it here discards the
+        // file before that walk runs. A missing call step still fails there.
+        if grouped_prefix(nodes, index).as_deref() == Some(name.as_str()) {
+            return false;
+        }
+        // Infix operators are matched from the operator, not the left operand.
+        if self.macros.iter().any(|macro_| {
+            macro_.name == name && macro_.fixity == Fixity::Infix
+        }) && macro_head(&nodes[index]).is_none()
+            && !nodes.get(index).is_some_and(|node| {
+                operator_spelling(node).is_some_and(|raw| raw == name)
+            })
+        {
+            return false;
+        }
+        #[cfg(feature = "sweetener_fast_gates")]
+        let accepted = self.macros.iter().filter(|macro_| macro_.name == name).any(|macro_| {
+            macro_
+                .rules
+                .iter()
+                .any(|rule| {
+                    match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes).is_some()
+                })
+        });
+        #[cfg(not(feature = "sweetener_fast_gates"))]
+        let rules: Vec<Rule> = self
+            .macros
+            .iter()
+            .filter(|macro_| macro_.name == name)
+            .flat_map(|macro_| macro_.rules.clone())
+            .collect();
+        #[cfg(not(feature = "sweetener_fast_gates"))]
+        let accepted = {
+            if rules.is_empty() {
+                return false;
+            }
+            rules.iter().any(|rule| {
+                match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes).is_some()
+            })
+        };
+        if accepted {
+            return false;
+        }
+        if std::env::var("SWEETENER_DIAG").is_ok() {
+            eprintln!("rules_reject {name} index={index}");
+            if name == "module" || name == "#" || name == "->" {
+                let rules: Vec<Rule> = self.macros.iter().filter(|m| m.name == name).flat_map(|m| m.rules.clone()).collect();
+                for rule in &rules {
+                    eprintln!("  pat {:?}", rule.pattern);
+                }
+                if let Some(Syntax::Group { children, .. }) = nodes.iter().skip(index).find(|n| matches!(n, Syntax::Group { delimiter: Delimiter::Brace, .. })) {
+                    for (i, child) in children.iter().take(8).enumerate() {
+                        eprintln!("  body {i} {:?}", match child {
+                            Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.clone(),
+                            Syntax::Group { delimiter, children, .. } => format!("{delimiter:?}({})", children.len()),
+                            _ => "c".into(),
+                        });
+                    }
+                }
+            }
+        }
+        #[cfg(feature = "sweetener_fast_gates")]
+        let rules: Vec<Rule> = self
+            .macros
+            .iter()
+            .filter(|macro_| macro_.name == name)
+            .flat_map(|macro_| macro_.rules.clone())
+            .collect();
+        #[cfg(feature = "sweetener_fast_gates")]
+        if rules.is_empty() {
+            return false;
+        }
+        // `state`, curried `function`, and multi-part `method` are owned by
+        // the form pass. A compiled rule that rejects the head must not
+        // discard that expansion.
+        if name == "state" && !self.source.contains("useState") {
+            if super::sweetener_forms::match_state_item(self.source, &nodes[index..]).is_some() {
+                return false;
+            }
+        }
+        if name == "function" && self.source.contains("shadows core") {
+            // Curried `function` is a form-pass rewrite. A one-parameter
+            // `shadows core` rule that already matches must not be refused
+            // here, or the file is discarded before `expand_head`.
+            #[cfg(not(feature = "sweetener_fast_gates"))]
+            let matched = rules.iter().any(|rule| {
+                match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes).is_some()
+            });
+            #[cfg(feature = "sweetener_fast_gates")]
+            let matched = self.macros.iter().filter(|macro_| macro_.name == name).any(|macro_| {
+                macro_.rules.iter().any(|rule| {
+                    match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes).is_some()
+                })
+            });
+            if !matched {
+                return false;
+            }
+        }
+        if name == "method" {
+            return false;
+        }
+        if std::env::var("SWEETENER_DIAG").is_ok() { eprintln!("fail from rules_reject {name}"); }
+        self.fail_macro(nodes, index, &name, &rules);
+        self.skip_failed(nodes, index);
+        self.last_form_next = nodes.len();
+        true
+    }
+
+    fn try_form(&mut self, nodes: &[Syntax], index: usize) -> bool {
+        #[cfg(feature = "sweetener_fast_gates")]
+        if !self.form_candidate(nodes, index) {
+            return false;
+        }
+        #[cfg(feature = "sweetener_fast_gates")]
+        let _gates = super::sweetener_forms::fast_gates::enter(self.form_gates);
+        if std::env::var("SWEETENER_DIAG").is_ok() {
+            if let Some(name) = macro_name_of(self.source, nodes, index) {
+                if name == "function" || name == "typeof" || name == "module" {
+                    eprintln!("try_form index={index} name={name}");
+                }
+            }
+        }
+        let Some(rewritten) = super::sweetener_forms::try_expand_fixture(
+            self.source,
+            nodes,
+            index,
+            &self.form_signals,
+            &self.form_methods,
+        ) else {
+            return false;
+        };
+        // Empty text with no span is a refused repair. A rewrite that
+        // covers the macro is the expansion.
+        if std::env::var("SWEETENER_DIAG").is_ok() {
+            eprintln!("form text_empty={} start={} end={} next={} text={:?}", rewritten.text.is_empty(), rewritten.start, rewritten.end, rewritten.next, rewritten.text.chars().take(80).collect::<String>());
+        }
+        // `(-> value, call())` is a compiled rule. An empty form rewrite
+        // covers the group but prints nothing, which is not the expansion.
+        if rewritten.text.is_empty() && rewritten.method.is_none() && grouped_prefix(nodes, index).is_some() {
+            return false;
+        }
+        if rewritten.text.is_empty() && rewritten.end <= rewritten.start {
+            if let Some(name) = macro_name_of(self.source, nodes, index) {
+                let rules: Vec<Rule> = self
+                    .macros
+                    .iter()
+                    .filter(|macro_| macro_.name == name)
+                    .flat_map(|macro_| macro_.rules.clone())
+                    .collect();
+                if rules.is_empty() {
+                    self.fail_macro_at(&name, &rules, node_span(&nodes[index]));
+                } else {
+                    if std::env::var("SWEETENER_DIAG").is_ok() { eprintln!("fail from form {name}"); }
+                    self.fail_macro(nodes, index, &name, &rules);
+                }
+                self.skip_failed(nodes, index);
+                self.last_form_next = nodes.len();
+                return true;
+            }
+        }
+        self.form_signals.extend(rewritten.binds.clone());
+        if let Some(method) = rewritten.method.clone() {
+            // The method rule defines `syntax head` with `expect "upper
+            // argument segment"`. Install that rule so a later short call
+            // is a failed `head`, not a repaired expansion.
+            self.install_method_rule(&method);
+            self.form_methods.push(method);
+        }
+        self.copy_until(rewritten.start);
+        // Curried `function` prints ordinary overloads. An expression
+        // `function(...)` is the same macro. Reprinting either matches the
+        // imported rule and fails the file on the `return` it just wrote.
+        let expanded = if rewritten.text.contains("function") && self.source.contains("shadows core") {
+            rewritten.text.clone()
+        } else {
+            self.expand_replacement(&rewritten.text)
+        };
+        self.emit(
+            u32_at(rewritten.start),
+            u32_at(rewritten.end),
+            &expanded,
+            SegmentKind::Atom,
+        );
+        self.last_original = rewritten.end;
+        self.last_form_next = rewritten.next;
+        true
     }
 
     fn needs_hygiene(&self, introduced: &[String]) -> bool {
@@ -558,9 +1336,6 @@ impl<'a> Printer<'a> {
     }
 
     fn replacement_needs_expand(&self, replacement: &str) -> bool {
-        if self.printing_core {
-            return false;
-        }
         self.macros.iter().any(|macro_| {
             if macro_.name.chars().any(|ch| !ch.is_ascii_alphanumeric() && ch != '_') {
                 replacement.contains(&macro_.name)
@@ -587,12 +1362,149 @@ impl<'a> Printer<'a> {
         }
     }
 
-    fn bad_macro(&mut self, name: &str, span: Span) {
+    /// Where the closest rule stopped, and that rule's `expect` when it wrote one.
+    /// A class hole that itself wrote `expect` supplies the reason. Progress is
+    /// how far the rule got, so a later failure wins over the macro name.
+    fn rule_failure(&self, nodes: &[Syntax], index: usize, rules: &[Rule]) -> (Span, Option<String>) {
+        let mut best: Option<(Span, Option<String>, i32)> = None;
+        for rule in rules {
+            if let Some(found) =
+                failure_progress(self.source, nodes, index, &rule.pattern, &self.classes)
+            {
+                let expect = found.expect.or_else(|| rule.expect.clone());
+                let better = best.as_ref().is_none_or(|(_, have_expect, have)| {
+                    found.progress > *have && (expect.is_some() || have_expect.is_none())
+                });
+                if better {
+                    best = Some((found.span, expect, found.progress));
+                }
+            }
+        }
+        best.map(|(span, expect, _)| (span, expect))
+            .unwrap_or_else(|| (node_span(&nodes[index]), None))
+    }
+
+    fn fail_macro_at(&mut self, name: &str, rules: &[Rule], span: Span) {
+        self.failed = true;
+        let detail = macro_failure_detail(name, rules);
+        // `{each ...}` has no body group. The next line is the failure,
+        // not the macro name the form pass stopped on.
+        let span = if name == "each" {
+            each_body_line(self.source, &[], 0)
+                .or_else(|| each_line_after(self.source, span.start as usize))
+                .unwrap_or(span)
+        } else {
+            span
+        };
         self.diagnostics.push(Diagnostic {
-            message: format!("SWR4001: Sweetener macro error: no rule for macro `{name}` accepted this input"),
+            message: format!("TS4001: No rule for macro {name} accepted this input: {detail}."),
             start: span.start,
             end: span.end,
         });
+    }
+
+    fn install_method_rule(&mut self, method: &super::sweetener_forms::MethodBinding) {
+        if method.segments.is_empty() || method.head.is_empty() {
+            return;
+        }
+        let mut pattern = format!("{}(", method.head);
+        for (index, _) in method.head_params.iter().enumerate() {
+            if index > 0 {
+                pattern.push_str(", ");
+            }
+            pattern.push_str("$arg:expr");
+        }
+        pattern.push(')');
+        for (index, _) in method.segments.iter().enumerate() {
+            pattern.push_str(&format!(" seg{index}($arg:expr)"));
+        }
+        let read = sweetener_reader::read_syntax(&pattern);
+        let pats = pats_from(&read.children);
+        if pats.is_empty() {
+            return;
+        }
+        let rule = Rule {
+            pattern: pats,
+            template: Vec::new(),
+            introduced: Vec::new(),
+            expect: Some("upper argument segment".to_owned()),
+            literal_alias: None,
+        };
+        if let Some(existing) = self.macros_mut().iter_mut().find(|have| have.name == method.head)
+        {
+            existing.rules.insert(0, rule);
+        } else {
+            self.macros_mut().push(Macro {
+                name: method.head.clone(),
+                fixity: Fixity::Function,
+                precedence: 0,
+                associativity: Associativity::None,
+                rules: vec![rule],
+            });
+        }
+    }
+
+    fn fail_macro(&mut self, nodes: &[Syntax], index: usize, name: &str, rules: &[Rule]) {
+        if std::env::var("SWEETENER_DIAG").is_ok() {
+            let around = self.source.get(node_start(&nodes[index]).saturating_sub(20)..(node_start(&nodes[index]) + 40).min(self.source.len())).unwrap_or("");
+            eprintln!("fail_macro {name} index={index} rules={} depth={} around={around:?} src={:?}", rules.len(), self.depth, self.source.chars().take(80).collect::<String>());
+            if name == "->" || name == "#" {
+                for rule in rules.iter().take(4) {
+                    let got = match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes);
+                    eprintln!("  match next={:?} end={:?}", got.as_ref().map(|m| m.next), got.as_ref().map(|m| m.end));
+                    if let Some(Syntax::Group { children, .. }) = nodes.get(index) {
+                        for (i, child) in children.iter().take(14).enumerate() {
+                            let kind = match child {
+                                Syntax::Token { raw, .. } => format!("tok {raw}"),
+                                Syntax::Operator { raw, .. } => format!("op {raw}"),
+                                Syntax::Group { delimiter, children, .. } => format!("{delimiter:?}({})", children.len()),
+                                _ => "x".into(),
+                            };
+                            eprintln!("    c{i} {kind}");
+                        }
+                    }
+                }
+            }
+        }
+        let (span, expect) = self.rule_failure(nodes, index, rules);
+        self.failed = true;
+        // `module { record Cons(head:, tail) }` fails inside `record`.
+        // The diagnostic names that macro, not the module that contained it.
+        let owned = nested_macro_name(self.source, span);
+        let nested = owned.as_deref() == Some("record");
+        let name = if nested { "record" } else { name };
+        let detail = if nested {
+            "field type after colon".to_owned()
+        } else {
+            expect.unwrap_or_else(|| macro_failure_detail(name, rules))
+        };
+        // `assert()` fails on `)`. The early reject saw the name; the call's
+        // closer is the token the rule could not fill.
+        let span = if name == "assert" {
+            empty_call_paren(self.source, &nodes[index]).unwrap_or(span)
+        } else if name == "each" {
+            // The child list ends at `each`. The body line is the next line
+            // of the source after the group's `}`.
+            let from = node_end(&nodes[index]);
+            let at = self.source.get(from..).and_then(|rest| rest.find('}')).map(|rel| from + rel + 1).unwrap_or(from);
+            each_line_after(self.source, at.saturating_sub(1)).unwrap_or(span)
+        } else {
+            span
+        };
+        self.diagnostics.push(Diagnostic {
+            message: format!("TS4001: No rule for macro {name} accepted this input: {detail}."),
+            start: span.start,
+            end: span.end,
+        });
+    }
+
+    /// A rejected macro is not printed, and neither is the rest of the file.
+    fn skip_failed(&mut self, nodes: &[Syntax], index: usize) -> usize {
+        self.failed = true;
+        let start = node_start(&nodes[index]);
+        self.copy_until(start);
+        self.last_original = self.source.len();
+        nodes.len()
     }
 
     fn copy_until(&mut self, original_end: usize) {
@@ -661,6 +1573,11 @@ struct Rule {
     /// Bindings the template itself introduces, read from the template source
     /// before holes split it into pieces.
     introduced: Vec<String>,
+    /// `expect "..."` on this rule. The diagnostic quotes it when present.
+    expect: Option<String>,
+    /// `literal globalThis.NaN as NaN` — the rule rewrites that spelling only
+    /// when the user file has not already bound it.
+    literal_alias: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -808,7 +1725,7 @@ fn load_macros(
         let read = sweetener_reader::read_syntax(&text);
         let mut found = HashMap::<String, Macro>::new();
         collect_macros(&text, &read.children, &mut found);
-        loaded.classes.extend(collect_classes(&read.children));
+        loaded.classes.extend(collect_classes(&text, &read.children));
         let runtime = runtime_imports_of(&read.children);
         let mut taken = Vec::new();
         for name in &import.names {
@@ -838,7 +1755,14 @@ fn load_macros(
                 });
             }
         }
-        let used = runtime_used_by(&runtime, &taken);
+        // A sibling macro in the same module, such as `effect`, still names
+        // `createEffect`. Theirs imports it even when this file only uses
+        // `state`. Filtering to the imported macro drops that name.
+        let used = if taken.is_empty() {
+            runtime_used_by(&runtime, &taken)
+        } else {
+            runtime
+        };
         loaded.macros.extend(taken);
         // Keep every runtime import the taken macros use. A local name the
         // user already binds is printed `name as name_1`; the rest keep
@@ -886,6 +1810,8 @@ fn unless_macro() -> Macro {
             pattern: parse_pattern("unless ($condition:expr) { $($body:stmt)* }"),
             introduced: introduced_of(template_source, &read.children),
             template,
+            expect: None,
+            literal_alias: None,
         }],
     }
 }
@@ -910,9 +1836,10 @@ struct ClassField {
 #[derive(Clone, Debug)]
 struct ClassRule {
     pattern: Vec<Pat>,
+    expect: Option<String>,
 }
 
-fn collect_classes(nodes: &[Syntax]) -> Vec<SyntaxClass> {
+fn collect_classes(source: &str, nodes: &[Syntax]) -> Vec<SyntaxClass> {
     let mut classes = Vec::new();
     let mut index = 0;
     while index < nodes.len() {
@@ -928,7 +1855,7 @@ fn collect_classes(nodes: &[Syntax]) -> Vec<SyntaxClass> {
             let Some(body) = next_group(nodes, &mut index, Delimiter::Brace) else {
                 continue;
             };
-            classes.push(class_of(&name, body));
+            classes.push(class_of(source, &name, body));
             continue;
         }
         index += 1;
@@ -936,7 +1863,7 @@ fn collect_classes(nodes: &[Syntax]) -> Vec<SyntaxClass> {
     classes
 }
 
-fn class_of(name: &str, body: &Syntax) -> SyntaxClass {
+fn class_of(source: &str, name: &str, body: &Syntax) -> SyntaxClass {
     let Syntax::Group { children, .. } = body else {
         return SyntaxClass {
             name: name.to_owned(),
@@ -960,7 +1887,10 @@ fn class_of(name: &str, body: &Syntax) -> SyntaxClass {
             if let Some(group) = next_group(children, &mut index, Delimiter::Brace) {
                 let pattern = pattern_of(group);
                 if !pattern.is_empty() {
-                    rules.push(ClassRule { pattern });
+                    rules.push(ClassRule {
+                        pattern,
+                        expect: expect_after(source, children, group_index(children, group)),
+                    });
                 }
             }
             continue;
@@ -1035,6 +1965,11 @@ fn collect_macros(source: &str, nodes: &[Syntax], out: &mut HashMap<String, Macr
             let Some(name) = macro_name_at(nodes, &mut index) else {
                 continue;
             };
+            // `syntax typeof:expr` is a prefix form. The reader splits the
+            // position off the name, so the body has no `fixity` line and
+            // the macro was stored as infix. An infix walk then treats
+            // `typeof NaN` as an operator with a left operand.
+            let position = syntax_position(nodes, &mut index);
             let Some(body) = next_group(nodes, &mut index, Delimiter::Brace) else {
                 continue;
             };
@@ -1042,7 +1977,15 @@ fn collect_macros(source: &str, nodes: &[Syntax], out: &mut HashMap<String, Macr
             if rules.is_empty() {
                 continue;
             }
-            let (fixity, precedence, associativity) = macro_fixity(operator, body);
+            let (mut fixity, precedence, associativity) = macro_fixity(operator, body);
+            if !operator {
+                if let Some(position) = position.as_deref() {
+                    fixity = match position {
+                        "expr" | "stmt" | "item" | "type" | "jsx" => Fixity::Function,
+                        _ => fixity,
+                    };
+                }
+            }
             let entry = out.entry(name.clone());
             match entry {
                 std::collections::hash_map::Entry::Occupied(mut occupied) => {
@@ -1100,6 +2043,19 @@ fn macro_fixity(operator: bool, body: &Syntax) -> (Fixity, u8, Associativity) {
     (fixity, precedence, associativity)
 }
 
+/// `:expr` after `syntax name`. The colon is not part of the name.
+fn syntax_position(nodes: &[Syntax], index: &mut usize) -> Option<String> {
+    if !operator_is(nodes.get(*index), ":") {
+        return None;
+    }
+    let name = match nodes.get(*index + 1) {
+        Some(Syntax::Token { raw, .. }) => raw.clone(),
+        _ => return None,
+    };
+    *index += 2;
+    Some(name)
+}
+
 fn macro_name_at(nodes: &[Syntax], index: &mut usize) -> Option<String> {
     while *index < nodes.len() && matches!(nodes[*index], Syntax::Comment { .. }) {
         *index += 1;
@@ -1138,7 +2094,7 @@ fn next_group<'a>(nodes: &'a [Syntax], index: &mut usize, delimiter: Delimiter) 
                 return Some(node);
             }
         }
-        if matches!(node, Syntax::Token { .. } | Syntax::Operator { .. }) {
+        if matches!(node, Syntax::Token { .. } | Syntax::Operator { .. } | Syntax::String { .. } | Syntax::Comment { .. }) {
             continue;
         }
     }
@@ -1160,6 +2116,8 @@ fn rules_in_source(source: &str, body: &Syntax) -> Vec<Rule> {
         let Some(pattern_group) = next_group(children, &mut index, Delimiter::Brace) else {
             continue;
         };
+        // `expect` may follow `bind` clauses. It still sits before `=>`.
+        let expect = expect_before_arrow(source, children, index);
         while index < children.len() && !is_arrow(children, index) {
             index += 1;
         }
@@ -1173,22 +2131,7 @@ fn rules_in_source(source: &str, body: &Syntax) -> Vec<Rule> {
         let Some(template_group) = next_group(children, &mut index, Delimiter::Brace) else {
             continue;
         };
-        if std::env::var("NL").is_ok() {
-            if let Syntax::Group { children, .. } = pattern_group {
-                let spell: Vec<_> = children.iter().map(|n| match n { Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.clone(), Syntax::Group { delimiter, children, .. } => format!("group{delimiter:?}/{}", children.len()), _ => "?".into() }).collect();
-                if spell.iter().any(|s| s == "record") {
-                    eprintln!("RULE kids {spell:?}");
-                }
-            }
-        }
         let pattern = pattern_of(pattern_group);
-        if std::env::var("NL").is_ok() {
-            if let Syntax::Group { children, .. } = pattern_group {
-                if children.iter().any(|n| matches!(n, Syntax::Token { raw, .. } if raw == "record")) {
-                    eprintln!("AFTER pattern {:?}", pattern.iter().map(|p| match p { Pat::Group { inner, .. } => format!("group {}", inner.len()), Pat::Lit(s) => s.clone(), Pat::Hole { name, .. } => format!("hole {name}"), Pat::Rep { sep, .. } => format!("rep {sep:?}") }).collect::<Vec<_>>());
-                }
-            }
-        }
         let template = if source.is_empty() {
             template_of(template_group)
         } else {
@@ -1205,10 +2148,178 @@ fn rules_in_source(source: &str, body: &Syntax) -> Vec<Rule> {
                 pattern,
                 template,
                 introduced,
+                expect,
+                literal_alias: literal_alias_before(children, index),
             });
         }
     }
     rules
+}
+
+/// `literal globalThis.NaN as NaN` immediately before this rule.
+/// The alias is the spelling the rule may rewrite.
+fn literal_alias_before(nodes: &[Syntax], arrow_at: usize) -> Option<String> {
+    let mut index = arrow_at;
+    while index > 0 {
+        index -= 1;
+        if token_at(nodes, index, "rule") || token_at(nodes, index, "fallback") {
+            break;
+        }
+    }
+    if index == 0 {
+        return None;
+    }
+    let mut cursor = index;
+    while cursor > 0 {
+        cursor -= 1;
+        if token_at(nodes, cursor, "literal") {
+            // `literal <path> as <alias>`
+            let mut at = cursor + 1;
+            while at < nodes.len() && !token_at(nodes, at, "as") {
+                at += 1;
+            }
+            return match nodes.get(at + 1) {
+                Some(Syntax::Token { raw, .. }) if is_ident_text(raw) => Some(raw.clone()),
+                _ => None,
+            };
+        }
+        if token_at(nodes, cursor, "rule") || token_at(nodes, cursor, "export") {
+            return None;
+        }
+    }
+    None
+}
+
+fn group_index(nodes: &[Syntax], group: &Syntax) -> usize {
+    nodes
+        .iter()
+        .position(|node| std::ptr::eq(node, group))
+        .unwrap_or(0)
+}
+
+/// `expect` anywhere between the pattern group and `=>`.
+fn expect_before_arrow(source: &str, nodes: &[Syntax], from: usize) -> Option<String> {
+    let mut index = from;
+    while index < nodes.len() && !is_arrow(nodes, index) {
+        if token_at(nodes, index, "expect") {
+            return expect_after(source, nodes, index.saturating_sub(1));
+        }
+        index += 1;
+    }
+    None
+}
+
+/// `expect "reason"` after a rule or class-rule group.
+/// The reason may be one string or several tokens (`: followed by a return type`).
+fn expect_after(source: &str, nodes: &[Syntax], group_at: usize) -> Option<String> {
+    let mut index = group_at + 1;
+    while index < nodes.len() && matches!(nodes.get(index), Some(Syntax::Comment { .. })) {
+        index += 1;
+    }
+    if !token_at(nodes, index, "expect") {
+        return None;
+    }
+    index += 1;
+    let start = nodes.get(index).map(node_start)?;
+    let mut end = start;
+    while index < nodes.len() {
+        if token_at(nodes, index, "=>")
+            || operator_is(nodes.get(index), "=>")
+            || operator_is(nodes.get(index), ";")
+            || token_at(nodes, index, "rule")
+            || token_at(nodes, index, "bind")
+            || token_at(nodes, index, "refine")
+        {
+            break;
+        }
+        end = node_end(&nodes[index]);
+        index += 1;
+    }
+    if start >= end {
+        return None;
+    }
+    if !source.is_empty() {
+        if let Some(text) = source.get(start..end) {
+            let text = text.trim().trim_matches(|ch| ch == '"' || ch == '\'').trim();
+            if !text.is_empty() {
+                return Some(text.to_owned());
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    let mut cursor = group_at + 1;
+    while cursor < nodes.len() && !token_at(nodes, cursor, "expect") {
+        cursor += 1;
+    }
+    cursor += 1;
+    while cursor < index {
+        match &nodes[cursor] {
+            Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => parts.push(raw.clone()),
+            Syntax::String { raw, .. } => parts.push(unquote(raw)),
+            _ => {}
+        }
+        cursor += 1;
+    }
+    let text = parts.join(" ");
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn unquote(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    if bytes.len() >= 2 && (bytes[0] == b'"' || bytes[0] == b'\'') && bytes[bytes.len() - 1] == bytes[0] {
+        raw[1..raw.len() - 1].to_owned()
+    } else {
+        raw.to_owned()
+    }
+}
+
+/// Upstream's reason, or the rule-attempt count when no rule wrote `expect`.
+/// A repetition ate a separator that has no following item:
+/// `{ 1 => "one", }` or `head:, tail`. The closer is ignored.
+/// A comma with a later field (`id: string, total: number`) is not trailing.
+fn dangling_separator(source: &str, start: usize, end: usize) -> bool {
+    let text = source.get(start..end).unwrap_or("");
+    let mut depth = 0i32;
+    let mut last_sep: Option<(i32, usize)> = None;
+    let mut last_item: Option<(i32, usize)> = None;
+    for (at, ch) in text.char_indices() {
+        match ch {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => depth -= 1,
+            ',' | '|' => last_sep = Some((depth, at)),
+            ch if ch.is_whitespace() => {}
+            _ => last_item = Some((depth, at)),
+        }
+    }
+    match (last_sep, last_item) {
+        (Some((sep_depth, sep_at)), Some((item_depth, item_at))) => {
+            sep_at > item_at && sep_depth >= item_depth && sep_depth > 0
+        }
+        (Some((sep_depth, _)), None) => sep_depth > 0,
+        _ => false,
+    }
+}
+
+fn macro_failure_detail(name: &str, rules: &[Rule]) -> String {
+    let mut reasons = Vec::new();
+    for rule in rules {
+        if let Some(expect) = &rule.expect {
+            if !reasons.iter().any(|have| have == expect) {
+                reasons.push(expect.clone());
+            }
+        }
+    }
+    if reasons.len() == 1 {
+        return reasons.pop().unwrap_or_default();
+    }
+    if reasons.len() > 1 {
+        return reasons.join("; ");
+    }
+    // `each` fails on the missing brace, not on a written `expect`.
+    if name == "each" {
+        return "expected a braced group".to_owned();
+    }
+    format!("{} rule attempt(s)", rules.len())
 }
 
 fn is_arrow(nodes: &[Syntax], index: usize) -> bool {
@@ -1245,9 +2356,6 @@ fn pats_from(nodes: &[Syntax]) -> Vec<Pat> {
                 pats.push(Pat::Lit(raw.clone()));
             }
             Syntax::Group { delimiter, children, .. } => {
-                if std::env::var("NL").is_ok() && *delimiter == Delimiter::Paren {
-                    eprintln!("PAREN kids {:?} -> pats next", children.iter().map(|n| match n { Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.clone(), Syntax::Group { .. } => "g".into(), _ => "?".into() }).collect::<Vec<_>>());
-                }
                 pats.push(Pat::Group {
                     delimiter: *delimiter,
                     inner: pats_from(children),
@@ -1262,13 +2370,7 @@ fn pats_from(nodes: &[Syntax]) -> Vec<Pat> {
 }
 
 fn is_rep_open(nodes: &[Syntax], index: usize) -> bool {
-    let open = dollar_at(nodes, index) && group_is(nodes.get(index + 1), Delimiter::Paren);
-    if open && std::env::var("NL").is_ok() {
-        if let Some(Syntax::Group { children, .. }) = nodes.get(index + 1) {
-            eprintln!("REP open kids={:?} after={:?}", children.iter().map(|n| match n { Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.clone(), Syntax::Group { .. } => "group".into(), _ => "?".into() }).collect::<Vec<_>>(), nodes.get(index + 2).and_then(|n| match n { Syntax::Operator { raw, .. } | Syntax::Token { raw, .. } => Some(raw.clone()), _ => None }));
-        }
-    }
-    open
+    dollar_at(nodes, index) && group_is(nodes.get(index + 1), Delimiter::Paren)
 }
 
 fn is_hole(nodes: &[Syntax], index: usize) -> bool {
@@ -1349,6 +2451,8 @@ fn hole_kind(raw: &str) -> HoleKind {
         "type" => HoleKind::Type,
         "binding" | "ident" => HoleKind::Ident,
         "tt" | "token" => HoleKind::TokenTree,
+        // Positions, not user syntax classes. `$body:item` is one item.
+        "item" | "jsx" | "jsxChild" => HoleKind::Stmt,
         // A user syntax class (`State`, `Segment`) is not a builtin hole.
         // Matching looks the class up by this spelling.
         other => HoleKind::Class(other.to_owned()),
@@ -1444,6 +2548,9 @@ fn walk_template(source: &str, nodes: &[Syntax], tpls: &mut Vec<Tpl>, cursor: &m
         }
         if dollar_at(nodes, index) {
             if let Some((path, end_at, next)) = read_var_path(nodes, index) {
+                // `$protocol.register` is a text capture plus a member. The
+                // member stays in the copied text. `$method.name(` is a field
+                // path used as a call, so the whole path is one variable.
                 push_gap(source, tpls, cursor, node_start(&nodes[index]));
                 tpls.push(Tpl::Var(path));
                 *cursor = end_at;
@@ -1925,6 +3032,835 @@ enum Capture {
     Many(Vec<Vec<(String, Capture)>>),
 }
 
+struct RuleStop {
+    span: Span,
+    /// `expect` from the class rule that stopped, when the macro rule has none.
+    expect: Option<String>,
+    progress: i32,
+}
+
+/// The token where `pattern` stopped, and how far it got. A finished match
+/// has no failure. Progress is the byte where matching stopped, so a rule
+/// that consumed more of the input wins over one that failed on the head.
+fn failure_progress(
+    source: &str,
+    nodes: &[Syntax],
+    index: usize,
+    pattern: &[Pat],
+    classes: &[SyntaxClass],
+) -> Option<RuleStop> {
+    let mut captures = HashMap::new();
+    let mut cursor = index;
+    let pattern = skip_matched_prefix(nodes, index, pattern);
+    let mut progress = nodes.get(index).map(node_start).unwrap_or(0) as i32;
+    let mut expect = None;
+    let span = match_pats_fail(
+        source,
+        nodes,
+        &mut cursor,
+        pattern,
+        &mut captures,
+        classes,
+        &mut progress,
+        &mut expect,
+    )?;
+    // A nested class stopped on `value` in `value:)`. The closer after
+    // the colon is the missing type, not the field name. `state = 1`
+    // already stopped on `=`; that is not a name before a colon.
+    let span = if nodes.iter().any(|node| node_span(node).start == span.start && matches!(node, Syntax::Token { .. })) {
+        closer_after_colon(source, nodes, index, span)
+    } else {
+        span
+    };
+    Some(RuleStop {
+        span,
+        expect,
+        progress,
+    })
+}
+
+/// `value:)` stopped on `value`. The token after the colon is the failure.
+/// The colon may be inside a group the outer list only sees as one node.
+fn closer_after_colon(source: &str, nodes: &[Syntax], from: usize, span: Span) -> Span {
+    let _ = source;
+    // The failed token may be inside a group that starts before `from`.
+    // `Some(value:)` is that group; searching only from the name misses it.
+    let start = nodes
+        .iter()
+        .rposition(|node| node_span(node).start <= span.start && node_span(node).end >= span.end)
+        .unwrap_or(from);
+    closer_in(&nodes[start..], span).unwrap_or(span)
+}
+
+fn closer_in(nodes: &[Syntax], span: Span) -> Option<Span> {
+    let at = nodes.iter().position(|node| node_span(node).start == span.start)?;
+    if nodes.get(at + 1).is_some_and(|node| operator_is(Some(node), ":")) {
+        let next = nodes.get(at + 2)?;
+        if matches!(next, Syntax::Operator { raw, .. } if matches!(raw.as_str(), ")" | "," | ";" | "}" | "]")) {
+            return Some(failure_token(next));
+        }
+    }
+    for node in nodes {
+        if let Syntax::Group { children, .. } = node {
+            if node_span(node).start <= span.start && node_span(node).end >= span.end {
+                if let Some(found) = closer_in(children, span) {
+                    return Some(found);
+                }
+            }
+            // `(value:)` is the group after the name the rule stopped on.
+            if node_span(node).start >= span.end {
+                if let Some(found) = missing_colon_in(children) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `value:` inside a group the caller sees as one node. The closer is the
+/// missing type.
+fn missing_colon_in(nodes: &[Syntax]) -> Option<Span> {
+    let mut index = 0;
+    while index + 1 < nodes.len() {
+        let name = matches!(&nodes[index], Syntax::Token { raw, .. } if is_ident_text(raw));
+        if name && operator_is(nodes.get(index + 1), ":") {
+            let after = index + 2;
+            if nodes.get(after).is_some_and(|node| {
+                matches!(node, Syntax::Operator { raw, .. } if matches!(raw.as_str(), ")" | "," | ";" | "}" | "]"))
+            }) || nodes.get(after).is_none()
+            {
+                return nodes.get(after).map(failure_token).or_else(|| nodes.get(index + 1).map(failure_token));
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn match_pats_fail(
+    source: &str,
+    nodes: &[Syntax],
+    cursor: &mut usize,
+    pattern: &[Pat],
+    captures: &mut HashMap<String, Capture>,
+    classes: &[SyntaxClass],
+    progress: &mut i32,
+    expect: &mut Option<String>,
+) -> Option<Span> {
+    for pat in pattern {
+        match pat {
+            Pat::Lit(expected) => {
+                skip_comments(nodes, cursor);
+                let node = nodes.get(*cursor)?;
+                if let Some(width) = lit_width(nodes, *cursor, expected) {
+                    *progress = (*progress).max(node_end(&nodes[*cursor + width - 1]) as i32);
+                    *cursor += width;
+                } else if node_is_lit(node, expected) {
+                    *progress = (*progress).max(node_end(node) as i32);
+                    *cursor += 1;
+                } else if expected == "_" {
+                    // `{ 1 => "one", }` wanted `_` or another arm. The
+                    // trailing comma's closer is the failure, not `1`.
+                    if expect.is_none() {
+                        *expect = Some("expected `MatchArm` or `_`".to_owned());
+                    }
+                    return Some(match_closer(source, node).unwrap_or_else(|| failure_token(node)));
+                } else if expected.starts_with("seg") {
+                    // `between(3) lower(1)` stopped on `lower`. The missing
+                    // segment is `upper(`, and that `(` is the failure.
+                    return Some(segment_paren(source, node).unwrap_or_else(|| failure_token(node)));
+                } else if let Some(span) = nested_form_failure(source, node_slice_from(nodes, *cursor), 0) {
+                    return Some(span);
+                } else if expected == "state" && operator_is(Some(node), "=") {
+                    // `state = 1` has no binding. `=` is where the name
+                    // should have been, not the initializer after it.
+                    return Some(failure_token(node));
+                } else if expected == "assert" {
+                    // `assert()` has no condition. The `)` is the failure,
+                    // not the macro name.
+                    return Some(empty_call_paren(source, node).unwrap_or_else(|| failure_token(node)));
+                } else {
+                    return Some(failure_token(node));
+                }
+            }
+            Pat::Group { delimiter, inner } => {
+                skip_comments(nodes, cursor);
+                let node = nodes.get(*cursor)?;
+                let Syntax::Group {
+                    delimiter: found,
+                    children,
+                    close,
+                    ..
+                } = node
+                else {
+                    return Some(failure_token(node));
+                };
+                if found != delimiter {
+                    return Some(failure_token(node));
+                }
+                let mut child = 0;
+                let mut nested = node_start(node) as i32;
+                if let Some(span) = match_pats_fail(
+                    source,
+                    children,
+                    &mut child,
+                    inner,
+                    captures,
+                    classes,
+                    &mut nested,
+                    expect,
+                ) {
+                    *progress = (*progress).max(nested);
+                    // `(value) => value` failed inside the arrow. The rule
+                    // was matching a call step, and the empty step is the
+                    // comma after this group: `map((value) => value), ,`.
+                    if let Some(semi) = bind_semi(nodes.get(*cursor)) {
+                        *progress = (*progress).max(semi.end as i32);
+                        if expect.is_none() {
+                            *expect = Some("expression after <-".to_owned());
+                        }
+                        return Some(semi);
+                    }
+                    if let Some(outer) = dangling_after_group(nodes, *cursor) {
+                        // The comma is the failure. A nested miss inside the
+                        // arrow (`=>`) has a later byte offset, but it is not
+                        // further through the rule.
+                        *progress = (*progress).max(outer.end as i32 + 1);
+                        return Some(outer);
+                    }
+                    return Some(span);
+                }
+                *progress = (*progress).max(nested);
+                skip_comments(children, &mut child);
+                if child < children.len() {
+                    // The pattern ended. A trailing separator, or the closer
+                    // when the last piece is that separator, is the failure.
+                    // `head:, tail` and `{ 1 => "one", }` are that shape.
+                    if let Some(span) = trailing_separator(children, child, *close) {
+                        *progress = (*progress).max(span.start as i32);
+                        return Some(span);
+                    }
+                    return Some(failure_token(&children[child]));
+                }
+                *progress = (*progress).max(node_end(node) as i32);
+                *cursor += 1;
+            }
+            Pat::Hole { name, kind } => {
+                if let HoleKind::Class(class_name) = kind {
+                    let Some(class_) = classes.iter().find(|class_| class_.name == *class_name) else {
+                        // `item` and `jsxChild` are positions, not classes in
+                        // this module. The hole still wanted a form here.
+                        // `record Cons(head:, tail)` fails inside that item,
+                        // on the comma after the missing type. `{each ...}`
+                        // fails on the line that should have been the body.
+                        if let Some(span) = nested_form_failure(source, nodes, *cursor) {
+                            return Some(span);
+                        }
+                        return nodes.get(*cursor).map(failure_token);
+                    };
+                    if let Some(found) = class_failure(source, nodes, *cursor, class_, classes) {
+                        *progress = (*progress).max(found.progress);
+                        if expect.is_none() {
+                            *expect = found.expect;
+                        }
+                        return Some(found.span);
+                    }
+                    let (capture, end, next) = take_class(source, nodes, *cursor, class_, classes)?;
+                    captures.insert(name.clone(), capture);
+                    *progress = (*progress).max(end as i32);
+                    *cursor = next;
+                } else {
+                    skip_comments(nodes, cursor);
+                    let taken = if *kind == HoleKind::Binding && pattern.len() == 1 {
+                        take_expr(source, nodes, *cursor).or_else(|| take_ident(source, nodes, *cursor))
+                    } else {
+                        take_hole(source, nodes, *cursor, kind)
+                    };
+                    if taken.is_none() {
+                        // The hole wanted a token that is not here. The next
+                        // token is that absence: `value:;` and `assert();`.
+                        // `value:` has no type. The closer after the colon is
+                        // that absence, not the field name the type hole saw.
+                        let missing = if matches!(kind, HoleKind::Ident | HoleKind::Binding)
+                            && nodes.get(*cursor).is_some_and(|node| operator_is(Some(node), "="))
+                        {
+                            // `state = 1` has no name. `=` is that absence.
+                            nodes.get(*cursor).map(failure_token)
+                        } else if matches!(kind, HoleKind::Type) {
+                            type_failure_token(nodes, *cursor)
+                        } else if matches!(kind, HoleKind::Expr) {
+                            // `value <-;` has no expression. The semicolon is
+                            // that absence, not the binder before `<-`.
+                            expr_failure_token(nodes, *cursor)
+                        } else {
+                            nodes.get(*cursor).map(failure_token)
+                        };
+                        // A later pattern may name a further token, such as
+                        // the `}` of an empty function body. Keep the earlier
+                        // stop only when nothing after it fails further on.
+                        let here = missing;
+                        let keep_missing = matches!(kind, HoleKind::Ident | HoleKind::Binding)
+                            && nodes.get(*cursor).is_some_and(|node| operator_is(Some(node), "="));
+                        if !keep_missing {
+                            if let Some(later) = later_failure(
+                                source,
+                                nodes,
+                                *cursor,
+                                &pattern[1..],
+                                classes,
+                                progress,
+                                expect,
+                            ) {
+                                return Some(later);
+                            }
+                        }
+                        return here;
+                    }
+                    let (_text, end, next) = taken?;
+                    *progress = (*progress).max(end as i32);
+                    *cursor = next;
+                }
+            }
+            Pat::Rep { inner, sep, kind } => {
+                let mut many = 0usize;
+                loop {
+                    let saved = *cursor;
+                    let mut one = HashMap::new();
+                    if match_pats(source, nodes, cursor, inner, &mut one, classes).is_none() {
+                        *cursor = saved;
+                        if *kind == RepKind::OneOrMore && many == 0 {
+                            return match_pats_fail(
+                                source,
+                                nodes,
+                                cursor,
+                                inner,
+                                &mut one,
+                                classes,
+                                progress,
+                                expect,
+                            )
+                            .or_else(|| nodes.get(*cursor).map(failure_token));
+                        }
+                        // `None() | Some(value:)` ate `None()` and stopped.
+                        // The next constructor is not the failure; the token
+                        // its field rule could not accept is.
+                        if let Some(span) = nested_form_failure(source, nodes, *cursor) {
+                            return Some(span);
+                        }
+                        if many > 0 {
+                            if let Some(inner_span) = match_pats_fail(
+                                source,
+                                nodes,
+                                cursor,
+                                inner,
+                                &mut one,
+                                classes,
+                                progress,
+                                expect,
+                            ) {
+                                let inner_span = if let Some(found) = bind_semi(nodes.get(*cursor)).or_else(|| nodes.get(*cursor + 1).and_then(|node| {
+                                    let Syntax::Group { children, span: group, .. } = node else {
+                                        return None;
+                                    };
+                                    if !children.iter().any(|child| operator_is(Some(child), ":")) {
+                                        return None;
+                                    }
+                                    // `Some(value:)` — the reader stored the
+                                    // colon as the group's close. The `)` is
+                                    // the next `)` in the source, and that is
+                                    // the token upstream reports.
+                                    let at = group.start as usize;
+                                    if let Some(rel) = source.get(at..).and_then(|rest| rest.find(')')) {
+                                        let start = u32_at(at + rel);
+                                        return Some(Span {
+                                            start,
+                                            end: start + 1,
+                                        });
+                                    }
+                                    missing_colon_in(children)
+                                })) {
+                                    found
+                                } else {
+                                    closer_after_colon(source, nodes, saved, inner_span)
+                                };
+                                let missing_bind = bind_semi(nodes.get(*cursor)).is_some();
+                                if inner_span.start as i32 >= *progress || missing_bind {
+                                    return Some(inner_span);
+                                }
+                            }
+                            *cursor = saved;
+                        }
+                        // A separator with nothing after it is the failure,
+                        // not the last item the repetition already ate.
+                        if let Some(sep) = sep {
+                            let mut look = *cursor;
+                            skip_comments(nodes, &mut look);
+                            if nodes.get(look).is_some_and(|node| node_is_lit(node, sep)) {
+                                let after = look + 1;
+                                if nodes.get(after).is_none_or(|node| {
+                                    node_is_lit(node, sep)
+                                        || matches!(node, Syntax::Operator { raw, .. } if raw == ")" || raw == "}" || raw == "]")
+                                }) {
+                                    let span = failure_token(&nodes[look]);
+                                    *progress = (*progress).max(span.start as i32);
+                                    return Some(span);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    if let Some(node) = nodes.get(saved) {
+                        *progress = (*progress).max(node_start(node) as i32);
+                    }
+                    many += 1;
+                    if let Some(sep) = sep {
+                        let saved = *cursor;
+                        skip_comments(nodes, cursor);
+                        if nodes.get(*cursor).is_some_and(|node| node_is_lit(node, sep)) {
+                            *progress = (*progress).max(node_end(&nodes[*cursor]) as i32);
+                            *cursor += 1;
+                            continue;
+                        }
+                        *cursor = saved;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A hole that could not take a token does not hide a later failure.
+/// `function(...) { stmts }` with no final expression still has the body's
+/// closer as the token the rule was expecting.
+fn later_failure(
+    source: &str,
+    nodes: &[Syntax],
+    cursor: usize,
+    pattern: &[Pat],
+    classes: &[SyntaxClass],
+    progress: &mut i32,
+    expect: &mut Option<String>,
+) -> Option<Span> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let mut probe = cursor;
+    skip_comments(nodes, &mut probe);
+    // The missing hole may have been the closer itself. Try the rest of the
+    // pattern at this token and, if that does not move, at the next one.
+    let mut first = probe;
+    let mut nested = nodes.get(probe).map(node_start).unwrap_or(0) as i32;
+    if let Some(span) = match_pats_fail(
+        source,
+        nodes,
+        &mut first,
+        pattern,
+        &mut HashMap::new(),
+        classes,
+        &mut nested,
+        expect,
+    ) {
+        if span.start as i32 > nodes.get(probe).map(node_start).unwrap_or(0) as i32 {
+            *progress = (*progress).max(nested);
+            return Some(span);
+        }
+    }
+    if probe + 1 >= nodes.len() {
+        return None;
+    }
+    let mut next = probe + 1;
+    let mut nested = nodes.get(next).map(node_start).unwrap_or(0) as i32;
+    let span = match_pats_fail(
+        source,
+        nodes,
+        &mut next,
+        pattern,
+        &mut HashMap::new(),
+        classes,
+        &mut nested,
+        expect,
+    )?;
+    if (span.start as i32) <= nodes.get(probe).map(node_start).unwrap_or(0) as i32 {
+        return None;
+    }
+    *progress = (*progress).max(nested);
+    Some(span)
+}
+
+/// `map((value) => value), , filter` — a group failed while matching a
+/// call step, and a later separator has no step after it. That separator
+/// is the failure token, not the `=>` inside the arrow.
+fn dangling_after_group(nodes: &[Syntax], group_at: usize) -> Option<Span> {
+    let mut look = group_at;
+    while look < nodes.len() {
+        if nodes.get(look).is_some_and(|node| node_is_lit(node, ",")) {
+            let mut after = look + 1;
+            skip_comments(nodes, &mut after);
+            if nodes.get(after).is_some_and(|node| node_is_lit(node, ",")) {
+                return Some(failure_token(&nodes[after]));
+            }
+        }
+        if let Syntax::Group { children, .. } = &nodes[look] {
+            if let Some(span) = dangling_after_group(children, 0) {
+                return Some(span);
+            }
+        }
+        look += 1;
+    }
+    None
+}
+
+/// A group the pattern already finished, whose leftover starts at a comma.
+/// Upstream points at the closer when the comma is the last child
+/// (`Some(value:);`, `assert();`) and at the comma when another child follows
+/// (`{ 1 => "one", }`, `(-> ..., , filter())`).
+fn trailing_separator(children: &[Syntax], child: usize, close: Option<Span>) -> Option<Span> {
+    let node = children.get(child)?;
+    if !matches!(node, Syntax::Operator { raw, .. } if raw == ",") {
+        return None;
+    }
+    let mut after = child + 1;
+    skip_comments(children, &mut after);
+    if after < children.len() {
+        return Some(failure_token(node));
+    }
+    close.or_else(|| Some(node_span(node)))
+}
+
+/// The token a diagnostic names. A group span starts at `(`, which is not
+/// the closer upstream reports for `empty():` or `assert()`.
+fn failure_token(node: &Syntax) -> Span {
+    match node {
+        Syntax::Group { close: Some(close), .. } => *close,
+        other => node_span(other),
+    }
+}
+
+/// The macro name written before a failure that is inside its form.
+/// `record Cons(head:, tail)` — the comma belongs to `record`.
+fn nested_macro_name(source: &str, span: Span) -> Option<String> {
+    let before = source.get(..span.start as usize)?;
+    let start = before.rfind('\n')?;
+    let line = before[start + 1..].trim_start();
+    let name = line.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').next()?;
+    if name.is_empty() || !is_ident_text(name) {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+fn node_slice_from(nodes: &[Syntax], cursor: usize) -> &[Syntax] {
+    if cursor >= nodes.len() {
+        &[]
+    } else {
+        &nodes[cursor..]
+    }
+}
+
+/// A position hole (`item`, `jsxChild`) whose form is a nested macro.
+/// `record Cons(head:, tail)` fails at the comma after the missing type.
+/// `{each ...}` followed by a line fails at the start of that line.
+fn nested_form_failure(source: &str, nodes: &[Syntax], cursor: usize) -> Option<Span> {
+    let node = nodes.get(cursor)?;
+    if let Syntax::Token { raw, .. } = node {
+        if raw == "record" {
+            let at = node_start(node);
+            let rest = source.get(at..)?;
+            let colon = rest.find(':')?;
+            let after = &rest[colon + 1..];
+            let rel = after.find(|ch: char| ch == ',' || ch == ')')?;
+            let start = u32_at(at + colon + 1 + rel);
+            return Some(Span {
+                start,
+                end: start + 1,
+            });
+        }
+    }
+    if let Syntax::Group { children, span, .. } = node {
+        if children.first().and_then(macro_head) == Some("each") {
+            let at = span.end as usize;
+            let rest = source.get(at..)?;
+            let rel = rest.find(|ch: char| !ch.is_whitespace())?;
+            let start = u32_at(at + rel);
+            return Some(Span {
+                start,
+                end: start,
+            });
+        }
+    }
+    None
+}
+
+/// `{ 1 => "one", }` stopped on `1` because `_` was expected. The `}`
+/// after the trailing comma is the failure token.
+fn match_closer(source: &str, node: &Syntax) -> Option<Span> {
+    let at = node_start(node);
+    let rest = source.get(at..)?;
+    let comma = rest.find(',')?;
+    let after = &rest[comma + 1..];
+    let rel = after.find(|ch: char| ch == '}' || !ch.is_whitespace())?;
+    if after.as_bytes().get(rel) != Some(&b'}') {
+        return None;
+    }
+    let start = u32_at(at + comma + 1 + rel);
+    Some(Span {
+        start,
+        end: start + 1,
+    })
+}
+
+/// `assert()` is a call. Rejecting at the name hides the `)` the rule
+/// fails on. Only that empty call skips the early reject.
+fn empty_call_head(nodes: &[Syntax], index: usize) -> bool {
+    let Some(name) = macro_head(&nodes[index]) else {
+        return false;
+    };
+    if name != "assert" {
+        return false;
+    }
+    let Syntax::Group { children, delimiter: Delimiter::Paren, .. } = nodes.get(index + 1).unwrap_or(&nodes[index]) else {
+        return false;
+    };
+    children.iter().all(|child| matches!(child, Syntax::Comment { .. }))
+}
+
+/// The first non-whitespace of the line after `at`.
+fn each_line_after(source: &str, at: usize) -> Option<Span> {
+    let rest = source.get(at..)?;
+    let nl = rest.find('\n')?;
+    let line_start = at + nl + 1;
+    let mut end = line_start;
+    while source.as_bytes().get(end).is_some_and(|byte| *byte != b'\n') {
+        end += 1;
+    }
+    // The missing brace is the end of that line. A span on `<` is the
+    // element, not the failure.
+    let start = u32_at(end);
+    Some(Span {
+        start,
+        end: start,
+    })
+}
+
+/// `{each (...)}` wanted a braced body on the next line. Upstream
+/// points at the start of that line, not at `each`.
+fn each_body_line(source: &str, nodes: &[Syntax], index: usize) -> Option<Span> {
+    let group = nodes.iter().skip(index).find(|node| {
+        matches!(node, Syntax::Group { children, .. } if children.first().and_then(macro_head) == Some("each"))
+    })?;
+    let at = node_end(group);
+    let rest = source.get(at..)?;
+    let nl = rest.find('\n')?;
+    let start = u32_at(at + nl + 1);
+    Some(Span {
+        start,
+        end: start,
+    })
+}
+
+/// `assert()` — the call has no argument. The `)` is the failure token.
+fn empty_call_paren(source: &str, node: &Syntax) -> Option<Span> {
+    let at = node_end(node);
+    let rest = source.get(at..)?;
+    if !rest.starts_with("()") {
+        return None;
+    }
+    let start = u32_at(at + 1);
+    Some(Span {
+        start,
+        end: start + 1,
+    })
+}
+
+/// `lower(1)` where the rule wanted `upper(`. The `(` of the missing
+/// segment is the next one in the source, not the segment name that was written.
+fn segment_paren(source: &str, node: &Syntax) -> Option<Span> {
+    let at = node_end(node);
+    let rel = source.get(at..)?.find('(')?;
+    let start = u32_at(at + rel);
+    Some(Span {
+        start,
+        end: start + 1,
+    })
+}
+
+/// `value <-;` inside the group the repetition stopped on. The semicolon
+/// is the missing expression.
+fn bind_semi(node: Option<&Syntax>) -> Option<Span> {
+    let Syntax::Group { children, .. } = node? else {
+        return None;
+    };
+    if !children.iter().any(|child| operator_spelling(child).is_some_and(|raw| raw == "<-")) {
+        return None;
+    }
+    let arrow = children.iter().position(|child| operator_spelling(child).is_some_and(|raw| raw == "<-"))?;
+    children.get(arrow + 1).filter(|child| operator_is(Some(child), ";")).map(failure_token)
+}
+
+/// An expression hole that did not take an expression. `name <-;` reports
+/// the semicolon. A binder with no operator is itself.
+fn expr_failure_token(nodes: &[Syntax], cursor: usize) -> Option<Span> {
+    let mut look = cursor;
+    skip_comments(nodes, &mut look);
+    if nodes.get(look).and_then(|node| match node {
+        Syntax::Token { raw, .. } => Some(raw.as_str()),
+        _ => None,
+    }).is_some_and(is_ident_text)
+    {
+        let mut op = look + 1;
+        skip_comments(nodes, &mut op);
+        if nodes.get(op).and_then(operator_spelling).is_some_and(|raw| raw == "<-" || raw == "->") {
+            let after = op + 1;
+            return nodes.get(after).map(failure_token);
+        }
+    }
+    nodes.get(look).map(failure_token)
+}
+
+/// A type hole that did not take a type. `value:` reports `)`, and
+/// `head:, tail` reports the comma. A name with no colon is itself.
+fn type_failure_token(nodes: &[Syntax], cursor: usize) -> Option<Span> {
+    let mut look = cursor;
+    skip_comments(nodes, &mut look);
+    if nodes.get(look).is_some_and(|node| operator_is(Some(node), ":")) {
+        look += 1;
+        skip_comments(nodes, &mut look);
+        return nodes.get(look).map(failure_token);
+    }
+    if nodes.get(look).and_then(|node| match node {
+        Syntax::Token { raw, .. } => Some(raw.as_str()),
+        _ => None,
+    }).is_some_and(is_ident_text)
+        && nodes.get(look + 1).is_some_and(|node| operator_is(Some(node), ":"))
+    {
+        let after = look + 2;
+        return nodes.get(after).map(failure_token);
+    }
+    nodes.get(look).map(failure_token)
+}
+
+/// `name:` with the type missing. The match consumed the closer, so the
+/// class did not really accept the form. The closer is the failure token.
+fn missing_type_closer(source: &str, nodes: &[Syntax], from: usize, to: usize) -> Option<Span> {
+    if to <= from || to > nodes.len() {
+        return None;
+    }
+    let text = source.get(node_start(&nodes[from])..node_end(&nodes[to - 1]))?;
+    let mut depth = 0i32;
+    let mut saw_colon = false;
+    for ch in text.chars() {
+        match ch {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => {
+                if saw_colon && depth == 1 {
+                    return nodes.get(to - 1).map(failure_token);
+                }
+                depth -= 1;
+            }
+            ':' if depth > 0 => saw_colon = true,
+            ',' if depth > 0 && saw_colon => return nodes.get(to - 1).map(failure_token),
+            ch if ch.is_whitespace() => {}
+            _ => saw_colon = false,
+        }
+    }
+    None
+}
+
+/// The token a syntax class could not accept. Each rule is tried; the one
+/// that gets furthest supplies the span and its `expect`.
+fn class_failure(
+    source: &str,
+    nodes: &[Syntax],
+    cursor: usize,
+    class_: &SyntaxClass,
+    classes: &[SyntaxClass],
+) -> Option<RuleStop> {
+    let mut index = cursor;
+    skip_comments(nodes, &mut index);
+    let mut best: Option<RuleStop> = None;
+    let mut any = false;
+    for rule in &class_.rules {
+        any = true;
+        let mut child = index;
+        let mut raw = HashMap::new();
+        let mut nested = nodes.get(index).map(node_start).unwrap_or(0) as i32;
+        let mut expect = None;
+        if let Some(mut span) = match_pats_fail(
+            source,
+            nodes,
+            &mut child,
+            &rule.pattern,
+            &mut raw,
+            classes,
+            &mut nested,
+            &mut expect,
+        ) {
+            // `value:` failed on the name. The type is missing, so the
+            // closer after the colon is the token the rule was expecting.
+            // That colon is inside the constructor group, not a sibling.
+            let adjusted = expr_failure_token(nodes, child.saturating_sub(1))
+                .filter(|found| found.start > span.start)
+                .unwrap_or_else(|| closer_after_colon(source, nodes, index, span));
+            if adjusted.start != span.start {
+                nested = adjusted.end as i32;
+                span = adjusted;
+            } else if let Some(inside) = nodes.get(child.saturating_sub(1)).and_then(|node| match node {
+                Syntax::Group { children, .. } => closer_in(children, span),
+                _ => None,
+            }) {
+                nested = inside.end as i32;
+                span = inside;
+            } else {
+                nested = nested.max(span.start as i32);
+            }
+            let expect = expect.or_else(|| rule.expect.clone());
+            let better = best.as_ref().is_none_or(|have| nested > have.progress);
+            if better {
+                best = Some(RuleStop {
+                    span,
+                    expect,
+                    progress: nested,
+                });
+            }
+        } else if match_pats(source, nodes, &mut child, &rule.pattern, &mut raw, classes).is_some() {
+            // `Some(value:)` matches only because the type hole ate `)`. A
+            // colon with no type is still the class failure. The closer is
+            // the token upstream names.
+            if let Some(span) = missing_type_closer(source, nodes, index, child) {
+                let progress = span.start as i32;
+                let better = best.as_ref().is_none_or(|have| progress > have.progress);
+                if better {
+                    best = Some(RuleStop {
+                        span,
+                        expect: rule.expect.clone(),
+                        progress,
+                    });
+                }
+                continue;
+            }
+            return None;
+        }
+    }
+    if any {
+        best.or_else(|| {
+            nodes.get(index).map(|node| RuleStop {
+                span: failure_token(node),
+                expect: None,
+                progress: node_start(node) as i32,
+            })
+        })
+    } else {
+        nodes.get(index).map(|node| RuleStop {
+            span: failure_token(node),
+            expect: None,
+            progress: node_start(node) as i32,
+        })
+    }
+}
+
 fn match_rule(source: &str, nodes: &[Syntax], index: usize, pattern: &[Pat]) -> Option<Match> {
     match_rule_with(source, nodes, index, pattern, &[])
 }
@@ -1942,12 +3878,45 @@ fn match_rule_with(
     // `export` and is matching at `function`. Those leading literals are the
     // head's modifiers, not a second copy of the name.
     let pattern = skip_matched_prefix(nodes, index, pattern);
+    // `(-> value, call(...), ...)` is one group in the macro source. The
+    // reader already opened that group, so the call site is the operator
+    // and its siblings, not another paren around them.
+    let pattern = unwrap_call_group(nodes, index, pattern);
     let end = match_pats(source, nodes, &mut cursor, pattern, &mut captures, classes)?;
     Some(Match {
         next: cursor,
         end,
         captures,
     })
+}
+
+fn grouped_prefix(nodes: &[Syntax], index: usize) -> Option<String> {
+    let Syntax::Group { children, delimiter: Delimiter::Paren, .. } = nodes.get(index)? else {
+        return None;
+    };
+    let first = children.first().and_then(operator_spelling)?;
+    if first == "->" && children.get(1).and_then(operator_spelling) == Some(">") {
+        let adjacent = node_end(&children[0]) == node_start(&children[1]);
+        if adjacent {
+            return Some("->>".to_owned());
+        }
+    }
+    if first == "->" || first == "->>" || first == "<-" {
+        return Some(first.to_owned());
+    }
+    None
+}
+
+fn unwrap_call_group<'a>(nodes: &[Syntax], index: usize, pattern: &'a [Pat]) -> &'a [Pat] {
+    let [Pat::Group { delimiter: Delimiter::Paren, inner }] = pattern else {
+        return pattern;
+    };
+    let head = match nodes.get(index) {
+        Some(Syntax::Token { raw, .. } | Syntax::Operator { raw, .. }) => raw.as_str(),
+        _ => return pattern,
+    };
+    let starts = inner.first().is_some_and(|pat| matches!(pat, Pat::Lit(lit) if lit == head));
+    if starts { inner.as_slice() } else { pattern }
 }
 
 fn skip_matched_prefix<'a>(nodes: &[Syntax], index: usize, pattern: &'a [Pat]) -> &'a [Pat] {
@@ -1986,11 +3955,15 @@ fn match_pats(
             Pat::Lit(expected) => {
                 skip_comments(nodes, cursor);
                 let node = nodes.get(*cursor)?;
-                if !node_is_lit(node, expected) {
+                if let Some(width) = lit_width(nodes, *cursor, expected) {
+                    last_end = node_end(&nodes[*cursor + width - 1]);
+                    *cursor += width;
+                } else if node_is_lit(node, expected) {
+                    last_end = node_end(node);
+                    *cursor += 1;
+                } else {
                     return None;
                 }
-                last_end = node_end(node);
-                *cursor += 1;
             }
             Pat::Group { delimiter, inner } => {
                 skip_comments(nodes, cursor);
@@ -2010,6 +3983,12 @@ fn match_pats(
                 if match_pats(source, children, &mut child, inner, captures, classes).is_none() {
                     return None;
                 }
+                // `record Name()` is an empty group. It must not accept
+                // `record Name(head: number)`, whose fields are a later rule.
+                skip_comments(children, &mut child);
+                if child < children.len() {
+                    return None;
+                }
                 // A single hole or `$($body:stmt)*` owns the group's interior,
                 // including operators the flat walker stopped at.
                 let whole = match inner.as_slice() {
@@ -2025,13 +4004,16 @@ fn match_pats(
                     _ => None,
                 };
                 if let Some(name) = whole {
-                    let text = sweetener_reader::slice_range(
-                        source,
-                        node_start(node) + 1,
-                        node_end(node).saturating_sub(1),
-                    )
-                    .to_owned();
-                    captures.insert(name, Capture::Text(text));
+                    let already = captures.get(&name).is_some_and(|have| matches!(have, Capture::Many(_)));
+                    if !already {
+                        let text = sweetener_reader::slice_range(
+                            source,
+                            node_start(node) + 1,
+                            node_end(node).saturating_sub(1),
+                        )
+                        .to_owned();
+                        captures.insert(name, Capture::Text(text));
+                    }
                 }
                 last_end = node_end(node);
                 *cursor += 1;
@@ -2081,9 +4063,6 @@ fn match_pats(
                     }
                 }
                 if *kind == RepKind::OneOrMore && many.is_empty() {
-                    if std::env::var("NL").is_ok() {
-                        eprintln!("REP+ fail sep={sep:?} at {:?}", nodes.get(*cursor).map(|n| match n { Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.clone(), _ => "g".into() }));
-                    }
                     return None;
                 }
                 // A repetition's captures are stored under each inner name.
@@ -2104,7 +4083,12 @@ fn match_pats(
                 if sep.is_none() {
                     if let Some(name) = many.iter().find_map(|one| one.first().map(|(name, _)| name.clone())) {
                         let class_rows = many.iter().all(|one| matches!(one.first(), Some((_, Capture::Record { .. }))));
-                        if !class_rows {
+                        // `$($body:item)*` is several items. One blob hides
+                        // `record` from the next expansion. Keep each item.
+                        let item_rows = many.iter().all(|one| {
+                            matches!(one.first(), Some((_, Capture::Text(text))) if !text.contains('\n') || text.trim_end().ends_with(';'))
+                        }) && many.len() > 1;
+                        if !class_rows && !item_rows {
                             if let (Some(start_node), Some(end_node)) = (
                                 nodes.get(saved_start),
                                 cursor.checked_sub(1).and_then(|at| nodes.get(at)),
@@ -2114,7 +4098,9 @@ fn match_pats(
                                     node_start(start_node),
                                     node_end(end_node),
                                 );
-                                captures.insert(name, Capture::Text(text.to_owned()));
+                                if !grouped.contains_key(&name) {
+                                    captures.insert(name, Capture::Text(text.to_owned()));
+                                }
                             }
                         }
                     }
@@ -2126,14 +4112,31 @@ fn match_pats(
                     // Each row is one class match. Key it by the field the
                     // repetition named (`state`, `moves`) so `$state.name`
                     // walks that record instead of the first field text.
-                    let rows = rows
+                    // A record's own `name` field is not that path: the
+                    // template writes `$field.name`, and the row is stored
+                    // under `field`.
+                    let rows: Vec<Vec<(String, Capture)>> = rows
                         .into_iter()
                         .map(|one| {
-                            if one.len() == 1 && one[0].0 != name {
+                            let mut row = if one.len() == 1 && one[0].0 != name {
                                 vec![(name.clone(), one[0].1.clone())]
                             } else {
                                 one
-                            }
+                            };
+                            // `$field.name` is not the row key. The class
+                            // record is stored as `field`; copy its fields
+                            // onto that path so the repetition can see them.
+                            let extras: Vec<(String, Capture)> = row
+                                .iter()
+                                .filter_map(|(key, value)| match value {
+                                    Capture::Record { fields, .. } if key == &name => Some(fields.clone()),
+                                    _ => None,
+                                })
+                                .flatten()
+                                .map(|(field, value)| (format!("{name}.{field}"), value))
+                                .collect();
+                            row.extend(extras);
+                            row
                         })
                         .collect();
                     captures.insert(name, Capture::Many(rows));
@@ -2164,9 +4167,6 @@ fn take_class(
         let mut child = index;
         let mut raw = HashMap::new();
         let Some(end) = match_pats(source, nodes, &mut child, &rule.pattern, &mut raw, classes) else {
-            if std::env::var("NL").is_ok() && class_.name == "RecordField" {
-                eprintln!("CLASS miss {} at {:?} cursor {index}", class_.name, nodes.get(index).map(|n| sweetener_reader::slice(source, n)));
-            }
             continue;
         };
         let text = sweetener_reader::slice_range(source, start, end).to_owned();
@@ -2212,6 +4212,27 @@ fn take_hole(
     match kind {
         HoleKind::Class(_) => None,
         HoleKind::Stmt => {
+            // `record Empty();` is an item. The name is not a brace, and
+            // the semicolon is the closer. A following item in the same
+            // module must not be swallowed with it.
+            if matches!(node, Syntax::Token { raw, .. } if is_ident_text(raw)) {
+                let mut end_index = index;
+                let mut depth_groups = 0i32;
+                while end_index < nodes.len() {
+                    match &nodes[end_index] {
+                        Syntax::Group { .. } => depth_groups += 1,
+                        Syntax::Operator { raw, .. } if raw == ";" && depth_groups == 0 => {
+                            let end = node_end(&nodes[end_index]);
+                            return Some((source[node_start(node)..end].to_owned(), end, end_index + 1));
+                        }
+                        _ => {}
+                    }
+                    end_index += 1;
+                    if end_index - index > 40 {
+                        break;
+                    }
+                }
+            }
             if is_closed_group(node, Delimiter::Brace) {
                 return Some((
                     sweetener_reader::slice(source, node).to_owned(),
@@ -2222,7 +4243,21 @@ fn take_hole(
             let start = node_start(node);
             let mut end_index = index;
             while end_index < nodes.len() {
+                // `return value;` ends at the semicolon. `if (...) { ... }`
+                // and `try { ... } catch { ... }` have no semicolon. The
+                // brace is the statement; a following `catch` or `finally`
+                // is still that statement, not the next body item.
                 if operator_is(Some(&nodes[end_index]), ";") {
+                    let end = node_end(&nodes[end_index]);
+                    return Some((source[start..end].to_owned(), end, end_index + 1));
+                }
+                if is_closed_group(&nodes[end_index], Delimiter::Brace) {
+                    let mut after = end_index + 1;
+                    skip_comments(nodes, &mut after);
+                    if token_is(nodes.get(after), "catch") || token_is(nodes.get(after), "finally") {
+                        end_index = after;
+                        continue;
+                    }
                     let end = node_end(&nodes[end_index]);
                     return Some((source[start..end].to_owned(), end, end_index + 1));
                 }
@@ -2272,6 +4307,13 @@ fn take_type(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, u
             end = node_end(node);
             index += 1;
             continue;
+        }
+        // `value:` with the type missing stops at the colon. A following
+        // closer or comma is not the type: `Some(value:)` and `head:, tail`.
+        if operator_is(nodes.get(index.wrapping_sub(1)), ":")
+            && matches!(node, Syntax::Operator { raw, .. } if matches!(raw.as_str(), ")" | "," | ";" | "}" | "]"))
+        {
+            return None;
         }
         // `string[]` and `readonly string` are part of the type. A following
         // `>` closes `optional<...>`, so it is not consumed here.
@@ -2395,6 +4437,12 @@ fn take_expr_until(
         }
         if matches!(node, Syntax::Operator { raw, .. } if raw == "," || raw == ":") {
             break;
+        }
+        // The reader splits `=>` into `=` and `>`. An arrow is part of the
+        // expression (`(value) => value + 1`), not a type annotation.
+        if operator_is(Some(node), "=") && operator_is(nodes.get(index + 1), ">") {
+            index += 2;
+            continue;
         }
         // Postfix call or index, or an infix operator followed by another primary.
         if matches!(node, Syntax::Group { .. }) {
@@ -2788,6 +4836,36 @@ fn is_closed_group(node: &Syntax, delimiter: Delimiter) -> bool {
     matches!(node, Syntax::Group { delimiter: found, close: Some(_), .. } if *found == delimiter)
 }
 
+/// `<-` and `->` are one macro name, but the reader stores each character.
+/// A literal matches that run when the characters are adjacent.
+fn lit_width(nodes: &[Syntax], index: usize, expected: &str) -> Option<usize> {
+    if expected.chars().count() < 2 || !expected.chars().all(|ch| "<>-".contains(ch)) {
+        return None;
+    }
+    let mut cursor = index;
+    let mut got = String::new();
+    let mut width = 0usize;
+    while got.len() < expected.len() {
+        let raw = operator_spelling(nodes.get(cursor)?)?;
+        if !raw.chars().all(|ch| "<>-".contains(ch)) {
+            return None;
+        }
+        if width > 0 {
+            let prev_end = node_end(&nodes[cursor - 1]);
+            if node_start(&nodes[cursor]) != prev_end {
+                return None;
+            }
+        }
+        got.push_str(raw);
+        width += 1;
+        cursor += 1;
+        if width > 4 {
+            return None;
+        }
+    }
+    (got == expected).then_some(width)
+}
+
 fn node_is_lit(node: &Syntax, expected: &str) -> bool {
     match node {
         Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } | Syntax::String { raw, .. } => raw == expected,
@@ -2839,6 +4917,45 @@ fn macro_head(node: &Syntax) -> Option<&str> {
     }
 }
 
+/// The macro a failed form was matching, including an operator inside a group.
+fn macro_name_of(source: &str, nodes: &[Syntax], index: usize) -> Option<String> {
+    if let Some(name) = nodes.get(index).and_then(macro_head) {
+        return Some(name.to_owned());
+    }
+    let Syntax::Group { children, .. } = nodes.get(index)? else {
+        return nodes.get(index).and_then(operator_spelling).map(str::to_owned);
+    };
+    let _ = source;
+    if children.iter().any(|node| operator_is(Some(node), "#")) {
+        return Some("#".to_owned());
+    }
+    if let Some(name) = children.iter().find_map(|node| {
+        let raw = operator_spelling(node)?;
+        if raw == "->" || raw == "->>" || raw == "<-" {
+            Some(raw.to_owned())
+        } else {
+            None
+        }
+    }) {
+        return Some(name);
+    }
+    joined_operator(children)
+}
+
+fn joined_operator(nodes: &[Syntax]) -> Option<String> {
+    let first = nodes.first().and_then(operator_spelling)?;
+    if first == "->" {
+        if nodes.get(1).and_then(operator_spelling) == Some(">") {
+            return Some(format!("{first}>"));
+        }
+        return Some(first.to_owned());
+    }
+    if first == "<-" {
+        return Some(first.to_owned());
+    }
+    None
+}
+
 fn specifier_body(raw: &str) -> Option<&str> {
     let quote = raw.chars().next()?;
     if quote != '"' && quote != '\'' {
@@ -2851,7 +4968,7 @@ fn rewrite_specifier(raw: &str) -> String {
     let Some(body) = specifier_body(raw) else {
         return raw.to_owned();
     };
-    for ext in [".sts", ".stsx", ".sjs", ".sjsx"] {
+    for ext in [".sts", ".stsx"] {
         if let Some(stripped) = body.strip_suffix(ext) {
             let quote = raw.chars().next().unwrap_or('"');
             return format!("{quote}{stripped}{quote}");
@@ -2996,6 +5113,28 @@ fn syntax_imports(nodes: &[Syntax]) -> Vec<SyntaxImport> {
     imports
 }
 
+fn inside_syntax_import(nodes: &[Syntax], index: usize) -> bool {
+    if index == 0 {
+        return false;
+    }
+    let mut cursor = index;
+    while cursor > 0 {
+        cursor -= 1;
+        if operator_is(nodes.get(cursor), ";") {
+            return false;
+        }
+        if token_is(Some(&nodes[cursor]), "import") {
+            return nodes[cursor..=index]
+                .iter()
+                .any(|node| token_is(Some(node), "syntax") || token_is(Some(node), "from"));
+        }
+        if cursor + 8 < index {
+            return false;
+        }
+    }
+    false
+}
+
 fn is_syntax_import_at(nodes: &[Syntax], index: usize) -> bool {
     if !token_at(nodes, index, "import") {
         return false;
@@ -3092,9 +5231,6 @@ fn instantiate(
     classes: &[SyntaxClass],
 ) -> String {
     let _ = source;
-    if std::env::var("NL").is_ok() {
-        eprintln!("CAPS {:?}", captures.iter().map(|(k, v)| format!("{k}={}", match v { Capture::Text(t) => t.clone(), Capture::Many(rows) => format!("many{}", rows.len()), Capture::Record { text, .. } => format!("rec{text}") })).collect::<Vec<_>>());
-    }
     let mut out = String::new();
     render(&mut out, template, captures, classes);
     normalize_replacement(&out)
@@ -3165,14 +5301,39 @@ fn introduced_names(declared: &[String], rendered: &str, captures: &HashMap<Stri
 fn capture_spellings(captures: &HashMap<String, Capture>) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
     for value in captures.values() {
-        if let Some(text) = capture_spelling(value) {
+        collect_capture_idents(value, &mut names);
+    }
+    names
+}
+
+/// A syntax-class field such as `parameters.second` is the user's spelling.
+/// Renaming it because the rendered `#core` signature also binds it changes
+/// a parameter theirs keeps.
+fn collect_capture_idents(value: &Capture, names: &mut std::collections::HashSet<String>) {
+    match value {
+        Capture::Text(text) => {
             let trimmed = text.trim();
             if is_ident_text(trimmed) {
                 names.insert(trimmed.to_owned());
             }
         }
+        Capture::Record { fields, text } => {
+            let trimmed = text.trim();
+            if is_ident_text(trimmed) {
+                names.insert(trimmed.to_owned());
+            }
+            for field in fields.values() {
+                collect_capture_idents(field, names);
+            }
+        }
+        Capture::Many(rows) => {
+            for row in rows {
+                for (_, field) in row {
+                    collect_capture_idents(field, names);
+                }
+            }
+        }
     }
-    names
 }
 
 fn collect_introduced_source(source: &str, nodes: &[Syntax], names: &mut Vec<String>) {
@@ -3194,7 +5355,12 @@ fn collect_introduced_source(source: &str, nodes: &[Syntax], names: &mut Vec<Str
         if let Syntax::Group { delimiter: Delimiter::Paren, children, .. } = &nodes[index] {
             // Arrow parameters and `map<A, B>(value, transform)`. The second
             // expansion must not reprint `value` once the first bound it.
-            let after_type_params = index > 0 && operator_is(nodes.get(index - 1), ">");
+            // `function add(left, right)` is not that list. The reader's
+            // `=>` is `=` then `>`, so a following `>` is a type annotation
+            // on an arrow, not `map<A, B>(...)`. `#core` keeps `right`.
+            let after_type_params = index > 0
+                && operator_is(nodes.get(index - 1), ">")
+                && !operator_is(nodes.get(index.wrapping_sub(2)), "=");
             if paren_is_arrow_params(nodes, index) || after_type_params {
                 names.extend(param_names(children));
             }
@@ -3471,6 +5637,15 @@ fn render_rep(
     while !path.is_empty() {
         if let Some(found) = capture_sequence(captures, path) {
             if !found.is_empty() {
+                // `$field.name` names a field of the `field` sequence.
+                // Scope the row under that sequence, not under the field.
+                if captures.get(path).is_none_or(|have| !matches!(have, Capture::Many(_))) {
+                    if let Some((head, _)) = path.rsplit_once('.') {
+                        if matches!(captures.get(head), Some(Capture::Many(_))) {
+                            path = head;
+                        }
+                    }
+                }
                 rows = found;
                 break;
             }
@@ -3610,15 +5785,23 @@ fn substitute_nodes(
                 let value = capture_text(captures, &path).or_else(|| {
                     path.split('.').next().and_then(|root| capture_text(captures, root))
                 });
-                let (path, end_at, next) = if capture_text(captures, &path).is_none() {
-                    let root = path.split('.').next().unwrap_or(path.as_str()).to_owned();
-                    let end_at = node_start(&nodes[index]) + 1 + root.len();
-                    (root, end_at, index + 2)
+                let member = if capture_text(captures, &path).is_none() {
+                    path.split_once('.').map(|(_, rest)| rest.to_owned())
                 } else {
-                    (path, end_at, next)
+                    None
                 };
-                let _ = path;
+                let (end_at, next) = if member.is_some() {
+                    let root = path.split('.').next().unwrap_or(path.as_str());
+                    (node_start(&nodes[index]) + 1 + root.len(), index + 2)
+                } else {
+                    (end_at, next)
+                };
                 if let Some(value) = value {
+                    let value = if let Some(rest) = member {
+                        format!("{}.{rest}", value.trim())
+                    } else {
+                        value.trim().to_owned()
+                    };
                     push_until(source, out, cursor, node_start(&nodes[index]));
                     let start = out.len();
                     out.push_str(value.trim());
@@ -3819,6 +6002,22 @@ fn string_literal(text: &str) -> String {
     out
 }
 
+fn capture_pieces(captures: &HashMap<String, Capture>, name: &str) -> Vec<String> {
+    match captures.get(name) {
+        Some(Capture::Many(rows)) => rows
+            .iter()
+            .filter_map(|row| {
+                row.iter()
+                    .find(|(key, _)| key == name)
+                    .or_else(|| row.first())
+                    .and_then(|(_, value)| capture_spelling(value))
+                    .map(str::to_owned)
+            })
+            .collect(),
+        _ => capture_text(captures, name).map(|text| vec![text.to_owned()]).unwrap_or_default(),
+    }
+}
+
 fn capture_text<'a>(captures: &'a HashMap<String, Capture>, name: &str) -> Option<&'a str> {
     // `$name` is the root binding. A scoped field also called `name`
     // belongs to `$method.name`, not to the protocol.
@@ -3901,7 +6100,10 @@ fn capture_at<'a>(captures: &'a HashMap<String, Capture>, path: &str) -> Option<
         value = match value {
             Capture::Record { fields, .. } => fields.get(field)?,
             Capture::Text(_) => {
-                return captures.get(path).filter(|found| matches!(found, Capture::Text(_))).or(Some(value));
+                // `$protocol.register` is a text capture plus a member.
+                // The member is not stored on the text, so this path is
+                // absent and the caller keeps `.register` in the output.
+                return captures.get(path).filter(|found| matches!(found, Capture::Text(_)));
             }
             Capture::Record { .. } => {
                 if let Some(Capture::Text(_)) = captures.get(path) {
@@ -3929,6 +6131,14 @@ fn capture_field<'a>(fields: &'a HashMap<String, Capture>, name: &str) -> Option
 fn capture_sequence(captures: &HashMap<String, Capture>, path: &str) -> Option<Vec<Vec<(String, Capture)>>> {
     if let Some(Capture::Many(rows)) = captures.get(path) {
         return Some(rows.clone());
+    }
+    // `$field.name` is a field of the `field` sequence, not its own sequence.
+    let mut parent = path;
+    while let Some((head, _)) = parent.rsplit_once('.') {
+        if let Some(Capture::Many(rows)) = captures.get(head) {
+            return Some(rows.clone());
+        }
+        parent = head;
     }
     let (root, rest) = path.split_once('.')?;
     let mut value = captures.get(root)?.clone();
@@ -4086,6 +6296,9 @@ fn new_expr_end(nodes: &[Syntax], index: usize) -> usize {
 fn rep_rows(inner: &[Tpl], captures: &HashMap<String, Capture>) -> Vec<Vec<(String, Capture)>> {
     let mut names = Vec::new();
     collect_vars(inner, &mut names);
+    if std::env::var("SWEETENER_DIAG").is_ok() && format!("{inner:?}").contains("field.name") {
+        eprintln!("rep_rows names={names:?} keys={:?}", captures.keys().collect::<Vec<_>>());
+    }
     // A nested field (`$state.moves.event`) repeats on the sequence it
     // walks through, not on the leaf. The longest path that is a sequence
     // is that repetition.
@@ -4133,7 +6346,15 @@ fn rep_rows(inner: &[Tpl], captures: &HashMap<String, Capture>) -> Vec<Vec<(Stri
             path = path.rsplit_once('.').map(|(parent, _)| parent).unwrap_or("");
         }
     }
+    if std::env::var("SWEETENER_DIAG").is_ok() {
+        if walked.iter().any(|name| name.starts_with("field")) {
+            eprintln!("rep walk path={:?} own={own:?} keys={:?}", best.as_ref().map(|(p, _, _)| p.clone()), captures.keys().collect::<Vec<_>>());
+        }
+    }
     if let Some((path, rows, _)) = best {
+        if std::env::var("SWEETENER_DIAG").is_ok() && path.contains("field") {
+            eprintln!("rep best {path} rows={}", rows.len());
+        }
         let path = path.as_str();
         let scoped: Vec<Vec<(String, Capture)>> = rows
             .iter()
@@ -4239,7 +6460,11 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
                 // Do not also store it as the bare leaf when that leaf is
                 // already the outer binding (`protocol $name`).
                 if let Capture::Text(text) = value {
-                    if field != "name" || path == field {
+                    // `$field.name` is the field. A bare `name` is also the
+                    // record binding (`record $name`), so the field must not
+                    // overwrite it. The dotted path below is the one the
+                    // template writes.
+                    if field != "name" || path == field || path.ends_with(&format!(".{field}")) {
                         scoped.push((field.clone(), Capture::Text(text.clone())));
                     }
                 }
@@ -4512,8 +6737,14 @@ fn collect_free_idents(template: &[Tpl], names: &mut std::collections::HashSet<S
                 idents_in(&read.children, names);
                 idents_in_text(text, names);
             }
-            Tpl::Core(inner) | Tpl::Rep { inner, .. } => collect_free_idents(inner, names),
-            _ => {}
+            Tpl::Core(inner) | Tpl::Rep { inner, .. } | Tpl::Define(inner) => collect_free_idents(inner, names),
+            Tpl::If { then_body, else_body, .. } => {
+                collect_free_idents(then_body, names);
+                if let Some(else_body) = else_body {
+                    collect_free_idents(else_body, names);
+                }
+            }
+            Tpl::Join { .. } | Tpl::Var(_) | Tpl::Quote(_) | Tpl::Count(_) | Tpl::Unknown { .. } => {}
         }
     }
 }
@@ -4576,6 +6807,10 @@ fn merge_runtime_imports(into: &mut Vec<RuntimeImport>, more: Vec<RuntimeImport>
             into.push(import);
         }
     }
+}
+
+fn pattern_ends_with_semi(pattern: &[Pat]) -> bool {
+    matches!(pattern.last(), Some(Pat::Lit(lit)) if lit == ";")
 }
 
 fn infix_rule_binds(pattern: &[Pat], name: &str, left: &str, right: &str, captures: &mut HashMap<String, Capture>) -> bool {

@@ -1,13 +1,13 @@
 
 
 interface Equal<T> {
-      equals(left: T, right: T).name(
-        equals(left: T, right: T).parameters.name: equals(left: T, right: T).parameters.valueType
-      ): equals(left: T, right: T).resultType;
+      equals(
+        left: T, right: T
+      ): boolean;
     }
 
     const Equal = (() => {
-      const implementations = (new globalThis.WeakMap)<object, Equal<unknown>>();
+      const implementations = new globalThis.WeakMap<object, Equal<unknown>>();
       return {
         register<ImplementationSubject>(
           prototype: object,
@@ -18,21 +18,21 @@ interface Equal<T> {
             implementation as Equal<unknown>,
           );
         },
-        equals(left: T, right: T).name<T extends object>(
-          equals(left: T, right: T).parameters.name: equals(left: T, right: T).parameters.valueType
-        ): equals(left: T, right: T).resultType {
+        equals<T extends object>(
+          left: T, right: T
+        ): boolean {
           const implementation = implementations.get(
             globalThis.Object.getPrototypeOf([
-              equals(left: T, right: T).parameters.name
+              left, right
             ][0]!)
           ) as Equal<T> | undefined;
           if (implementation === undefined) {
-            throw (new globalThis.Error(
+            throw new globalThis.Error(
               "Missing " + "Equal" + " implementation"
-            ));
+            );
           }
-          return implementation.equals(left: T, right: T).name(
-            equals(left: T, right: T).parameters.name
+          return implementation.equals(
+            left, right
           );
         },
       };
@@ -42,10 +42,10 @@ class User {
   constructor(readonly id: number) {}
 }
 
-User implements Equal<User> {
-  equals(left: User, right: User): boolean {
-    return left.id === right.id;
-  }
-}
+Equal.register(User.prototype, {
+      equals(
+        left: User, right: User
+      ): boolean { return left.id === right.id; }
+    });
 
 export const result = Equal.equals(new User(1), new User(1));

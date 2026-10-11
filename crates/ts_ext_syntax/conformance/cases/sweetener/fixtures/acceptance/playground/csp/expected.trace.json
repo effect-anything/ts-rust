@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    { "macro": "->", "rule": "send", "parent": null },
+    { "macro": "<-", "rule": "receive", "parent": null }
+  ],
+  "order": "source-order"
+}

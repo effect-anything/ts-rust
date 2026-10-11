@@ -43,7 +43,7 @@ fn transform_cli(path: Option<String>) -> ExitCode {
         }
     };
     let response = protocol::transform_file(&path, &content);
-    let virtual_path = format!("{path}.virtual.ts");
+    let virtual_path = format!("{path}.virtual{}", response.extension);
     let map_path = format!("{path}.mappings.json");
     if let Err(err) = fs::write(&virtual_path, &response.text) {
         eprintln!("{virtual_path}: {err}");

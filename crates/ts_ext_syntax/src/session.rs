@@ -4,7 +4,7 @@
 //! call this session. A bundler has no `tsc`, so the plugin does both
 //! steps when the file needs them:
 //!
-//! - Sweetener source (`.sts`, `.stsx`, `.sjs`, `.sjsx`): macro expansion,
+//! - Sweetener source (`.sts`, `.stsx`): macro expansion,
 //!   then TypeGPU on the expanded text.
 //! - Any other file: TypeGPU only, and only when the text has `"use gpu"`.
 
@@ -193,10 +193,7 @@ fn with_prelude(code: &str) -> String {
 /// TypeScript, so the specifier must name the virtual extension. A later
 /// bundler then resolves `logic.ts`, not `logic.sts`.
 fn rewrite_specifiers(code: &str) -> String {
-    code.replace(".stsx", "")
-        .replace(".sjsx", "")
-        .replace(".sts", "")
-        .replace(".sjs", "")
+    code.replace(".stsx", "").replace(".sts", "")
 }
 
 fn diagnostics_of(expansion: &crate::Expansion) -> Vec<SessionDiagnostic> {
@@ -235,14 +232,10 @@ fn compose(
 
 pub fn virtual_extension(path: &str) -> &'static str {
     let path = path.split(['?', '#']).next().unwrap_or(path);
-    if path.ends_with(".tsx")
-        || path.ends_with(".jsx")
-        || path.ends_with(".stsx")
-        || path.ends_with(".sjsx")
-    {
-        ".tsx"
-    } else {
-        ".ts"
+    let ext = path.rsplit_once('.').map_or("", |(_, ext)| ext);
+    match ext {
+        "tsx" | "stsx" => ".tsx",
+        _ => ".ts",
     }
 }
 

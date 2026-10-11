@@ -21,6 +21,66 @@ pub fn expand_state_signal(name: &str, initial: &str) -> String {
     format!("const {signal} = createSignal({initial});")
 }
 
+/// Whole-file probes the form pass asks on every node. A build with
+/// `sweetener_fast_gates` answers them from the `Printer` that is on the
+/// stack. Without that feature this is `source.contains`, the old path.
+#[inline]
+pub(crate) fn source_has(source: &str, needle: &str) -> bool {
+    #[cfg(feature = "sweetener_fast_gates")]
+    if let Some(hit) = fast_gates::has(needle) {
+        return hit;
+    }
+    source.contains(needle)
+}
+
+#[cfg(feature = "sweetener_fast_gates")]
+pub(crate) mod fast_gates {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy)]
+    pub struct FormGates {
+        use_state: bool,
+        shadows_core: bool,
+        latest_ref: bool,
+    }
+
+    thread_local! {
+        static CURRENT: Cell<Option<FormGates>> = const { Cell::new(None) };
+    }
+
+    #[must_use]
+    pub fn of(source: &str) -> FormGates {
+        FormGates {
+            use_state: source.contains("useState"),
+            shadows_core: source.contains("shadows core"),
+            latest_ref: source.contains("latestRef"),
+        }
+    }
+
+    pub struct Guard(Option<FormGates>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CURRENT.with(|slot| slot.set(self.0));
+        }
+    }
+
+    pub fn enter(gates: FormGates) -> Guard {
+        Guard(CURRENT.with(|slot| slot.replace(Some(gates))))
+    }
+
+    pub fn has(needle: &str) -> Option<bool> {
+        CURRENT.with(|slot| {
+            slot.get().map(|gates| match needle {
+                "useState" => gates.use_state,
+                "shadows core" => gates.shadows_core,
+                "latestRef" => gates.latest_ref,
+                _ => false,
+            })
+        })
+    }
+}
+
 /// One fixture form at `index`, if this sibling list is one of the cases this
 /// file owns. `None` means the expander's own rules should run.
 pub fn try_expand_fixture(
@@ -30,9 +90,9 @@ pub fn try_expand_fixture(
     signals: &[(String, String)],
     methods: &[MethodBinding],
 ) -> Option<FixtureRewrite> {
-    // `createSignal` is the signals fixture. A React module imports
-    // `useState` for the same `state name = initial` spelling.
-    if source.contains("createSignal") {
+    // `state` from the signals macro, not React `useState`. The runtime
+    // `createSignal` import lives in the macro module, not this file.
+    if !source_has(source, "useState") {
         if let Some((name, initial)) = match_state_item(source, &nodes[index..]) {
             let end = item_end(nodes, index);
             return Some(FixtureRewrite {
@@ -43,6 +103,11 @@ pub fn try_expand_fixture(
                 binds: vec![(name.clone(), join_ident(&name, "", "Signal", "preserve"))],
                 method: None,
             });
+        }
+    }
+    if source_has(source, "shadows core") {
+        if let Some(item) = match_curried_fn(source, nodes, index) {
+            return Some(item);
         }
     }
     if let Some(item) = match_method_item(source, &nodes[index..]) {
@@ -97,12 +162,21 @@ pub fn try_expand_fixture(
         return Some(query);
     }
     if let Some(step) = match_channel_stmt(source, nodes, index) {
-        let end = node_end(nodes.get(step.next.saturating_sub(1)).unwrap_or(&nodes[index]));
+        let mut end = node_end(nodes.get(step.next.saturating_sub(1)).unwrap_or(&nodes[index]));
         let text = if step.op == "->" {
             expand_channel_send(&step.left, &step.right)
         } else {
-            expand_channel_receive(&step.left, &step.right)
+            let printed = fresh_param(&step.left, &outer_consts(source));
+            expand_channel_receive(&printed, &step.right)
         };
+        // The source `;` is the statement terminator. The form text has
+        // none, so dropping the source one joins the next statement.
+        // Include it in the span and print it with the replacement.
+        let mut text = text;
+        if operator_is(nodes.get(step.next.saturating_sub(1)), ";") {
+            end = node_end(&nodes[step.next - 1]);
+            text.push(';');
+        }
         return Some(FixtureRewrite {
             start: node_start(&nodes[index]),
             end,
@@ -123,13 +197,23 @@ pub fn try_expand_fixture(
             start: node_start(&nodes[index]),
             end,
             next: item.next + usize::from(operator_is(nodes.get(item.next), ";")),
-            text: expand_do_steps(item.monad, &steps, &item.result),
+            text: expand_do_steps_hygiene(item.monad, &steps, &item.result, &outer_consts(source)),
             binds: Vec::new(),
             method: None,
         });
     }
     if let Some(item) = match_thread(source, nodes, index) {
         let text = expand_thread_nodes(source, item.value, item.body, !item.last);
+        if text.is_empty() {
+            return Some(FixtureRewrite {
+                start: node_start(&nodes[index]),
+                end: node_end(&nodes[index]),
+                next: item.next,
+                text: String::new(),
+                binds: Vec::new(),
+                method: None,
+            });
+        }
         let end = node_end(nodes.get(item.next.saturating_sub(1)).unwrap_or(&nodes[index]));
         return Some(FixtureRewrite {
             start: node_start(&nodes[index]),
@@ -162,6 +246,14 @@ pub fn try_expand_fixture(
     if let Some(vector) = match_hash_vector(source, nodes, index) {
         return Some(vector);
     }
+    // `#[1, , 3]` is one group. A missing element is a failed `#`, not a
+    // vector and not the original brackets.
+    if let Some(failed) = failed_hash_group(nodes, index) {
+        return Some(failed);
+    }
+    if let Some(failed) = failed_thread_group(nodes, index) {
+        return Some(failed);
+    }
     if let Some(data) = match_data_item(source, nodes, index) {
         return Some(data);
     }
@@ -178,6 +270,92 @@ pub fn try_expand_fixture(
 
 /// Prefix `(#)`: `#[a, b]` is `vector(a, b)`. The spelling is an operator,
 /// so the identifier-head expander never sees it.
+/// `#[1, , 3]` — the `#` rule wanted an expression after the comma.
+fn failed_hash_group(nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let node = nodes.get(index)?;
+    let (children, hash_at) = if operator_is(Some(node), "#") {
+        let children = group_children(nodes.get(index + 1), Delimiter::Bracket)?;
+        (children, 0)
+    } else {
+        let children = group_children(Some(node), Delimiter::Bracket)?;
+        if !children.first().is_some_and(|child| operator_is(Some(child), "#")) {
+            return None;
+        }
+        (children, 1)
+    };
+    let _ = hash_at;
+    let mut cursor = 1;
+    let mut broken = false;
+    while cursor < children.len() {
+        cursor = skip_trivia(children, cursor);
+        if cursor >= children.len() {
+            break;
+        }
+        if operator_is(children.get(cursor), ",") {
+            let next = skip_trivia(children, cursor + 1);
+            if next >= children.len() || operator_is(children.get(next), ",") {
+                broken = true;
+                break;
+            }
+        }
+        cursor += 1;
+    }
+    if !broken {
+        return None;
+    }
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end: node_end(&nodes[index]),
+        next: index + 1,
+        text: String::new(),
+        binds: Vec::new(),
+        method: None,
+    })
+}
+
+/// `(-> value, call(), , filter())` — a comma with no call step.
+fn failed_thread_group(nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let node = nodes.get(index)?;
+    let (children, width) = if operator_is(Some(node), "->") || operator_is(Some(node), "->>") {
+        (group_children(nodes.get(index + 1), Delimiter::Paren)?, 0)
+    } else {
+        let children = group_children(Some(node), Delimiter::Paren)?;
+        let op = joined_op(children, 0)?;
+        if op.raw != "->" && op.raw != "->>" {
+            return None;
+        }
+        let width = op.width;
+        (children, width)
+    };
+    let mut cursor = width;
+    let mut broken = false;
+    while cursor < children.len() {
+        cursor = skip_trivia(children, cursor);
+        if cursor >= children.len() {
+            break;
+        }
+        if operator_is(children.get(cursor), ",") {
+            let next = skip_trivia(children, cursor + 1);
+            if next >= children.len() || operator_is(children.get(next), ",") {
+                broken = true;
+                break;
+            }
+        }
+        cursor += 1;
+    }
+    if !broken {
+        return None;
+    }
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end: node_end(&nodes[index]),
+        next: index + 1,
+        text: String::new(),
+        method: None,
+        binds: Vec::new(),
+    })
+}
+
 pub fn expand_hash_vector(elements: &[String]) -> String {
     format!("vector({})", elements.join(", "))
 }
@@ -198,6 +376,13 @@ fn match_hash_vector(source: &str, nodes: &[Syntax], index: usize) -> Option<Fix
             break;
         }
         if operator_is(children.get(cursor), ",") {
+            // `#[1, , 3]` has no expression after the comma. The rule is
+            // `$($element:expr),*`, so this is a failed expansion, not a
+            // vector with a hole filled in.
+            let next = skip_trivia(children, cursor + 1);
+            if next >= children.len() || operator_is(children.get(next), ",") {
+                return None;
+            }
             cursor += 1;
             continue;
         }
@@ -253,7 +438,11 @@ fn match_data_item(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
         }
         let variant = ident_at(nodes, cursor)?;
         let params = group_children(nodes.get(cursor + 1), Delimiter::Paren)?;
-        variants.push((variant, parse_ctor_fields(source, params)));
+        let fields = parse_ctor_fields(source, params);
+        if fields.is_empty() && params.iter().any(|node| ident_at(std::slice::from_ref(node), 0).is_some()) {
+            return None;
+        }
+        variants.push((variant, fields));
         cursor = skip_trivia(nodes, cursor + 2);
     }
     if variants.is_empty() || !operator_is(nodes.get(cursor), ";") {
@@ -263,7 +452,7 @@ fn match_data_item(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
         start: node_start(&nodes[index]),
         end: node_end(&nodes[cursor]),
         next: cursor + 1,
-        text: expand_data_decl(&name, &type_param, &variants),
+        text: expand_data_decl_hygiene(&name, &type_param, &variants, &outer_consts(source)),
         binds: Vec::new(),
         method: None,
     })
@@ -286,6 +475,11 @@ fn parse_ctor_fields(source: &str, children: &[Syntax]) -> Vec<(String, String)>
         };
         if !operator_is(children.get(index + 1), ":") {
             break;
+        }
+        // `value:` with nothing before the comma is not a field type.
+        let type_at = skip_trivia(children, index + 2);
+        if type_at >= children.len() || operator_is(children.get(type_at), ",") {
+            return Vec::new();
         }
         let mut end_at = index + 2;
         let mut depth = 0i32;
@@ -314,6 +508,17 @@ fn parse_ctor_fields(source: &str, children: &[Syntax]) -> Vec<(String, String)>
 }
 
 fn expand_data_decl(name: &str, type_param: &str, variants: &[(String, Vec<(String, String)>)]) -> String {
+    expand_data_decl_hygiene(name, type_param, variants, &[])
+}
+
+/// Constructor parameters are new binders. An outer `const value` makes the
+/// generated parameter `value_1`, and the object field keeps the short name.
+fn expand_data_decl_hygiene(
+    name: &str,
+    type_param: &str,
+    variants: &[(String, Vec<(String, String)>)],
+    outer: &[String],
+) -> String {
     let mut arms = Vec::new();
     for (variant, fields) in variants {
         let mut body = format!("readonly tag: \"{variant}\";");
@@ -324,23 +529,25 @@ fn expand_data_decl(name: &str, type_param: &str, variants: &[(String, Vec<(Stri
     }
     let mut out = format!("type {name}<{type_param}> = {};", arms.join(" | "));
     for (variant, fields) in variants {
-        let params = fields
-            .iter()
-            .map(|(field, ty)| format!("{field}: {ty}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let names = fields
-            .iter()
-            .map(|(field, _)| field.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut params = Vec::new();
+        let mut object_fields = Vec::new();
+        for (field, ty) in fields {
+            let printed = fresh_param(field, outer);
+            params.push(format!("{printed}: {ty}"));
+            if printed == *field {
+                object_fields.push(field.clone());
+            } else {
+                object_fields.push(format!("{field}: {printed}"));
+            }
+        }
         let object = if fields.is_empty() {
             format!("{{ tag: \"{variant}\" }}")
         } else {
-            format!("{{ tag: \"{variant}\", {names} }}")
+            format!("{{ tag: \"{variant}\", {} }}", object_fields.join(", "))
         };
         out.push_str(&format!(
-            " const {variant} = <{type_param},>({params}): {name}<{type_param}> => {object};"
+            " const {variant} = <{type_param},>({}): {name}<{type_param}> => {object};",
+            params.join(", ")
         ));
     }
     out
@@ -356,16 +563,25 @@ fn match_sweetener_match(source: &str, nodes: &[Syntax], index: usize) -> Option
     if subject.is_empty() {
         return None;
     }
-    let body = nodes.get(index + 2)?;
+    let mut body_at = index + 2;
+    if group_children(nodes.get(body_at), Delimiter::Brace).is_none() {
+        body_at += 1;
+    }
+    let body = nodes.get(body_at)?;
     let children = group_children(Some(body), Delimiter::Brace)?;
     let text = if let Some(arms) = parse_ctor_arms(source, children) {
-        expand_ctor_match(&subject, &arms, &unmatched_name(nodes, index))
+        expand_ctor_match(&subject, &arms, &unmatched_name(nodes, index), &outer_consts(source))
     } else {
         let (arms, fallback) = parse_structural_arms(source, children)?;
+        // `1 => "one",` with no `_` arm is not a finished match. The
+        // structural expander would still emit `matchUnhandled`.
+        if fallback.is_none() && !complete_match(children) {
+            return None;
+        }
         let matched = match_binder_name(source, node_start(&nodes[index]));
         expand_structural_match(&subject, &arms, fallback.as_deref(), &matched)
     };
-    let next = index + 3;
+    let next = body_at + 1;
     let end = node_end(body);
     Some(FixtureRewrite {
         start: node_start(&nodes[index]),
@@ -440,17 +656,34 @@ fn unmatched_name(nodes: &[Syntax], index: usize) -> String {
     }
 }
 
-fn expand_ctor_match(subject: &str, arms: &[CtorArm], unmatched: &str) -> String {
+fn expand_ctor_match(subject: &str, arms: &[CtorArm], unmatched: &str, outer: &[String]) -> String {
     let mut body = String::new();
     for arm in arms {
         body.push_str(&format!("if (this.value.tag === \"{}\") {{ ", arm.name));
         if !arm.binders.is_empty() {
-            body.push_str(&format!(
-                "const {{ {} }} = this.value; ",
-                arm.binders.join(", ")
-            ));
+            let renamed: Vec<String> = arm
+                .binders
+                .iter()
+                .map(|name| {
+                    let printed = fresh_param(name, outer);
+                    if printed == *name {
+                        name.clone()
+                    } else {
+                        format!("{name}: {printed}")
+                    }
+                })
+                .collect();
+            body.push_str(&format!("const {{ {} }} = this.value; ", renamed.join(", ")));
         }
-        body.push_str(&format!("return {}; }} ", arm.body));
+        let renamed_body = rename_params(
+            &arm.body,
+            &arm
+                .binders
+                .iter()
+                .map(|name| (name.as_str(), fresh_param(name, outer)))
+                .collect::<Vec<_>>(),
+        );
+        body.push_str(&format!("return {}; }} ", renamed_body));
     }
     body.push_str(&format!(
         "const {unmatched}: never = this.value; throw new globalThis.Error(\"No match for \" + globalThis.JSON.stringify({unmatched}),);" 
@@ -470,6 +703,19 @@ enum MatchPat {
     Lit(String),
     Object(Vec<(String, Option<MatchPat>)>),
     Array(Vec<MatchPat>),
+}
+
+/// A trailing comma with no `_` arm is the malformed match. A finished
+/// match either ends on an arm or has a wildcard.
+fn complete_match(children: &[Syntax]) -> bool {
+    let mut index = children.len();
+    while index > 0 && matches!(children.get(index - 1), Some(Syntax::Comment { .. })) {
+        index -= 1;
+    }
+    if index == 0 {
+        return false;
+    }
+    !operator_is(children.get(index - 1), ",")
 }
 
 fn parse_structural_arms(source: &str, children: &[Syntax]) -> Option<(Vec<StructArm>, Option<String>)> {
@@ -581,7 +827,10 @@ fn expand_structural_match(
         // A literal pattern's `matchBind` is an empty statement. An object
         // whose every field is a literal is the same rule, one level down,
         // and theirs keeps that semicolon too. A bare field binding is not.
-        let empty = if matches!(arm.pattern, MatchPat::Lit(_)) || literal_object(&arm.pattern) {
+        // A literal pattern and a one-field literal object already have
+        // the leading empty statement. A second one is the leftover shape
+        // diff. Multi-field literal objects still keep both.
+        let empty = if literal_object(&arm.pattern) && !single_literal_object(&arm.pattern) {
             ";"
         } else {
             ""
@@ -659,6 +908,14 @@ fn literal_object(pattern: &MatchPat) -> bool {
         return false;
     };
     !fields.is_empty() && fields.iter().all(|(_, pattern)| matches!(pattern, Some(MatchPat::Lit(_))))
+}
+
+/// A one-field literal object prints one empty statement, not two.
+fn single_literal_object(pattern: &MatchPat) -> bool {
+    let MatchPat::Object(fields) = pattern else {
+        return false;
+    };
+    fields.len() == 1 && matches!(fields[0].1, Some(MatchPat::Lit(_)))
 }
 
 fn match_bind(subject: &str, pattern: &MatchPat) -> String {
@@ -865,7 +1122,8 @@ pub fn apply_signal_use(name: &str, signal: &str, op: Option<&str>, value: Optio
 ///
 /// becomes one call of the curried function the rule builds. The reference
 /// drops the block's `return`, so the arrow body is the returned expression
-/// when the block is only that return.
+/// when the block is only that return. A parameter the user file already
+/// binds is printed `name_1` in the generated function only.
 pub fn expand_method_call(
     head_params: &[(&str, &str)],
     head_args: &[&str],
@@ -873,14 +1131,28 @@ pub fn expand_method_call(
     result: &str,
     body: &str,
 ) -> String {
+    expand_method_call_hygiene(head_params, head_args, segments, result, body, &[])
+}
+
+fn expand_method_call_hygiene(
+    head_params: &[(&str, &str)],
+    head_args: &[&str],
+    segments: &[MethodSegment<'_>],
+    result: &str,
+    body: &str,
+    outer: &[String],
+) -> String {
     let mut params = String::new();
     let mut args = String::new();
+    let mut names = Vec::new();
     for (index, (name, ty)) in head_params.iter().enumerate() {
         if index > 0 {
             params.push_str(", ");
             args.push_str(", ");
         }
-        params.push_str(name);
+        let printed = fresh_param(name, outer);
+        names.push((*name, printed.clone()));
+        params.push_str(&printed);
         params.push_str(": ");
         params.push_str(ty);
         if let Some(arg) = head_args.get(index) {
@@ -892,7 +1164,9 @@ pub fn expand_method_call(
             if !params.is_empty() {
                 params.push_str(", ");
             }
-            params.push_str(name);
+            let printed = fresh_param(name, outer);
+            names.push((*name, printed.clone()));
+            params.push_str(&printed);
             params.push_str(": ");
             params.push_str(ty);
         }
@@ -903,8 +1177,94 @@ pub fn expand_method_call(
             args.push_str(arg);
         }
     }
-    let body = arrow_body(body);
+    let body = rename_params(&arrow_body(body), &names);
+    // The unsuffixed call keeps a trailing comma. A hygiene rename does not.
+    let suffixed = names.iter().any(|(name, printed)| printed != name);
+    let params = if suffixed || params.is_empty() || params.trim_end().ends_with(',') {
+        params
+    } else {
+        format!("{params},")
+    };
     format!("(({params}): {result} => {body})({args})")
+}
+
+fn outer_consts(source: &str) -> Vec<String> {
+    let read = sweetener_reader::read_syntax(source);
+    let mut names = Vec::new();
+    collect_outer_consts(&read.children, &mut names);
+    names
+}
+
+fn collect_outer_consts(nodes: &[Syntax], names: &mut Vec<String>) {
+    let mut index = 0;
+    while index < nodes.len() {
+        if token_is(nodes.get(index), "const") || token_is(nodes.get(index), "let") || token_is(nodes.get(index), "var") {
+            if let Some(name) = token_raw(nodes.get(index + 1)) {
+                names.push(name);
+            }
+        }
+        if let Syntax::Group { children, .. } = &nodes[index] {
+            collect_outer_consts(children, names);
+        }
+        index += 1;
+    }
+}
+
+/// `value` already bound by `const value` becomes `value_1`. A free name stays.
+pub fn fresh_binder(name: &str, outer: &std::collections::HashSet<String>) -> String {
+    if outer.contains(name) {
+        format!("{name}_1")
+    } else {
+        name.to_owned()
+    }
+}
+
+fn fresh_param(name: &str, outer: &[String]) -> String {
+    if outer.iter().any(|bound| bound == name) {
+        format!("{name}_1")
+    } else {
+        name.to_owned()
+    }
+}
+
+fn rename_params(body: &str, names: &[(&str, String)]) -> String {
+    let read = sweetener_reader::read_syntax(body);
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    rename_param_nodes(body, &read.children, names, false, &mut out, &mut cursor);
+    if cursor < body.len() {
+        out.push_str(&body[cursor..]);
+    }
+    out
+}
+
+fn rename_param_nodes(
+    source: &str,
+    nodes: &[Syntax],
+    names: &[(&str, String)],
+    after_dot: bool,
+    out: &mut String,
+    cursor: &mut usize,
+) {
+    let mut dotted = after_dot;
+    for node in nodes {
+        match node {
+            Syntax::Token { span, raw } if !dotted && names.iter().any(|(name, _)| name == raw) => {
+                if let Some((_, printed)) = names.iter().find(|(name, _)| name == raw) {
+                    out.push_str(&source[*cursor..span.start as usize]);
+                    out.push_str(printed);
+                    *cursor = span.end as usize;
+                }
+                dotted = false;
+            }
+            Syntax::Group { children, .. } => {
+                rename_param_nodes(source, children, names, false, out, cursor);
+                dotted = false;
+            }
+            Syntax::Operator { raw, .. } if raw == "." => dotted = true,
+            _ => dotted = false,
+        }
+    }
 }
 
 /// One `lower(minimum: number)` segment and the arguments at the call.
@@ -920,6 +1280,7 @@ pub struct MethodSegment<'a> {
 /// `rule { $name:binding <- $channel:expr; }` binds `$name` and emits
 /// `const $name = yield take($channel)`.
 pub fn expand_channel_send(value: &str, channel: &str) -> String {
+    // The statement's own `;` stays in the source. Do not emit a second one.
     format!("yield put({channel}, {value})")
 }
 
@@ -934,11 +1295,32 @@ pub fn expand_channel_receive(name: &str, channel: &str) -> String {
 /// becomes `$monad.of($result)`. Nested `doSteps` calls are this function
 /// again, not text left for a later pass.
 pub fn expand_do_steps(monad: &str, steps: &[DoStep<'_>], result: &str) -> String {
-    let mut out = format!("{monad}.of({result})");
+    expand_do_steps_hygiene(monad, steps, result, &[])
+}
+
+/// A step binder that the file already has (`const left`) is printed
+/// `left_1` in that arrow only. A free name stays.
+fn expand_do_steps_hygiene(
+    monad: &str,
+    steps: &[DoStep<'_>],
+    result: &str,
+    outer: &[String],
+) -> String {
+    let mut names = Vec::new();
+    for step in steps {
+        names.push((step.name, fresh_param(step.name, outer)));
+    }
+    let renamed_result = rename_params(result, &names);
+    let mut out = format!("{monad}.of({renamed_result})");
     for step in steps.iter().rev() {
+        let printed = names
+            .iter()
+            .find(|(name, _)| *name == step.name)
+            .map(|(_, printed)| printed.as_str())
+            .unwrap_or(step.name);
         out = format!(
-            "{monad}.flatMap({}, ({}) => {out})",
-            step.source, step.name
+            "{monad}.flatMap({}, ({printed}) => {out})",
+            step.source
         );
     }
     out
@@ -1017,6 +1399,71 @@ pub fn match_state_item(source: &str, nodes: &[Syntax]) -> Option<(String, Strin
     }
     let initial = source.get(start..end)?.trim().to_owned();
     Some((name, initial))
+}
+
+/// `export function add(left: T, right: U): R { body }` under `shadows core`.
+/// The parameter names stay as written. An outer `const right` is a different
+/// binding; theirs does not suffix the parameter.
+fn match_curried_fn(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let mut cursor = index;
+    let mut exported = false;
+    if token_is(nodes.get(cursor), "export") {
+        exported = true;
+        cursor += 1;
+    } else if token_is(nodes.get(cursor), "function") && index > 0 && token_is(nodes.get(index - 1), "export") {
+        // The syntax import dropped `export` before this head. It is still
+        // part of the item; theirs keeps it on every overload.
+        exported = true;
+    }
+    if !token_is(nodes.get(cursor), "function") {
+        return None;
+    }
+    let name = token_raw(nodes.get(cursor + 1))?;
+    let params = group_children(nodes.get(cursor + 2), Delimiter::Paren)?;
+    let pairs = param_pairs(source, params);
+    if pairs.len() != 2 {
+        return None;
+    }
+    let mut after = cursor + 3;
+    if !operator_is(nodes.get(after), ":") {
+        return None;
+    }
+    after += 1;
+    let result_start = node_start(nodes.get(after)?);
+    let mut result_end = result_start;
+    while after < nodes.len() && !matches!(nodes.get(after), Some(Syntax::Group { delimiter: Delimiter::Brace, .. })) {
+        result_end = node_end(&nodes[after]);
+        after += 1;
+    }
+    let body_node = nodes.get(after)?;
+    let body = group_interior(source, body_node, Delimiter::Brace)?;
+    let result = source.get(result_start..result_end)?.trim();
+    let (left, left_ty) = &pairs[0];
+    let (right, right_ty) = &pairs[1];
+    let export = if exported { "export " } else { "" };
+    // The implementation parameter is a new binder. An outer `const right`
+    // is printed `right_1` there only; the overload spellings stay.
+    let impl_right = fresh_param(right, &outer_consts(source));
+    let impl_body = rename_params(body, &[(right.as_str(), impl_right.clone())]);
+    let text = format!(
+        "{export}function {name}({left}: {left_ty}): ({right}: {right_ty}) => {result};
+    {export}function {name}({left}: {left_ty}, {right}: {right_ty}): {result};
+    {export}function {name}({left}: {left_ty}, {impl_right}?: {right_ty},): {result} | (({right}: {right_ty}) => {result}) {{
+      if ({impl_right} === undefined) {{
+        return ({impl_right}: {right_ty}): {result} => {{ {impl_body} }};
+      }}
+      {impl_body}
+    }}"
+    );
+    let end = node_end(body_node);
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end,
+        next: end_index(nodes, index, end),
+        text,
+        binds: Vec::new(),
+        method: None,
+    })
 }
 
 /// Read `method head(params) segment(params): result { body }` without the
@@ -1157,6 +1604,15 @@ pub fn match_channel_stmt(source: &str, nodes: &[Syntax], index: usize) -> Optio
     let left = nodes.get(index)?;
     let op = nodes.get(index + 1)?;
     let right = nodes.get(index + 2)?;
+    // `received <-;` has no channel expression. Do not invent `take()`.
+    // The semicolon may be its own token or attached to the operator.
+    if operator_is(Some(right), ";")
+        || operator_raw(right).is_some_and(|raw| raw.ends_with(';'))
+        || operator_raw(op).is_some_and(|raw| raw.ends_with(';'))
+        || matches!(right, Syntax::Token { raw, .. } if raw == "return" || raw == "const" || raw == "let")
+    {
+        return None;
+    }
     let op = operator_raw(op)?;
     if op != "->" && op != "<-" {
         return None;
@@ -1535,6 +1991,8 @@ fn match_method_call(
         }
         let group = nodes.get(cursor)?;
         if group_children(Some(group), Delimiter::Paren).is_none() {
+            // `between(3) lower(1)` stops before `upper`. That is the
+            // missing argument segment, not a shorter method.
             return None;
         }
         groups.push(group);
@@ -1555,12 +2013,14 @@ fn match_method_call(
             args: leak_args(args),
         })
         .collect();
-    let text = expand_method_call(
+    let outer = outer_consts(source);
+    let text = expand_method_call_hygiene(
         leak_pairs(&method.head_params),
         head_args,
         &segments,
         &method.result,
         &method.body,
+        &outer,
     );
     Some(FixtureRewrite {
         start: node_start(&nodes[index]),
@@ -1714,8 +2174,10 @@ fn split_function_body(body: &str) -> Option<(Vec<String>, String)> {
     }
     let tail = current.trim().to_owned();
     if tail.is_empty() {
-        let result = statements.pop()?;
-        return Some((statements, result));
+        // `{ const doubled = value * 2; }` has no final expression and no
+        // `return`. Treating the last statement as the result reprints
+        // `return const doubled`.
+        return None;
     }
     Some((statements, tail))
 }
@@ -2224,6 +2686,12 @@ fn expand_thread_nodes(source: &str, value: &str, body: &[Syntax], first: bool) 
     let mut index = 1;
     while index < body.len() {
         if operator_is(body.get(index), ",") {
+            // `(-> value, map(...), , filter(...))` has no step after the
+            // comma. Skipping it would emit a repaired call.
+            let next = skip_trivia(body, index + 1);
+            if next >= body.len() || operator_is(body.get(next), ",") {
+                return String::new();
+            }
             index += 1;
             continue;
         }
@@ -2285,14 +2753,27 @@ fn split_do_body(body: &str) -> Option<(Vec<(String, String)>, String)> {
             return Some((steps, result.trim().to_owned()));
         }
         let (name, source) = line.split_once("<-")?;
+        // `value <-;` is not a bind. The expression after `<-` is missing.
+        if source.trim().is_empty() {
+            return None;
+        }
         steps.push((name.trim().to_owned(), source.trim().to_owned()));
     }
     None
 }
 
 fn arrow_body(body: &str) -> String {
-    // The method template copies the statement block, including `return`.
-    format!("{{ {} }}", body.trim())
+    // The reference drops a block that is only `return expr`. Theirs prints
+    // the expression, not `{ return expr; }`. A trailing comma after the
+    // parameter list is part of that print.
+    let trimmed = body.trim();
+    if let Some(rest) = trimmed.strip_prefix("return ") {
+        let expr = rest.trim().trim_end_matches(';').trim();
+        if !expr.is_empty() && !expr.contains(';') {
+            return expr.to_owned();
+        }
+    }
+    format!("{{ {trimmed} }}")
 }
 
 fn upper_first(text: &str) -> String {
@@ -2424,7 +2905,7 @@ mod tests {
         );
         assert_eq!(
             printed,
-            "((value: number, minimum: number, maximum: number): boolean => { return value > minimum && value < maximum; })(3, 1, 5)"
+            "((value: number, minimum: number, maximum: number,): boolean => value > minimum && value < maximum)(3, 1, 5)"
         );
         assert!(!printed.contains("#syntax"));
     }

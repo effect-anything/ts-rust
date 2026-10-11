@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    { "macro": "#", "rule": "prefix-vector", "parent": null },
+    { "macro": "|>", "rule": "pipeline", "parent": null },
+    { "macro": "==", "rule": "core-equality", "parent": null }
+  ],
+  "order": "Pratt grouping order with prefix before tighter infix before equality"
+}

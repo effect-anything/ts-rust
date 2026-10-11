@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "diagnostics": [
+    "TS4001: No rule for macro assert accepted this input: 3 rule attempt(s)."
+  ]
+}

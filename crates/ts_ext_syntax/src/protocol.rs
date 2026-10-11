@@ -24,6 +24,15 @@ pub struct ProtocolDiagnostic {
     pub code: i32,
 }
 
+/// `TS4001` is the Sweetener macro-rule failure. Other messages stay `0`.
+fn diagnostic_code(message: &str) -> i32 {
+    if message.starts_with("TS4001") {
+        4001
+    } else {
+        0
+    }
+}
+
 /// Run the transform the file asks for.
 ///
 /// Content mapper path: Sweetener only. `tsc` runs TypeGPU itself after
@@ -49,10 +58,10 @@ pub fn transform_file(file_name: &str, content: &str) -> TransformResponse {
             .diagnostics
             .into_iter()
             .map(|item| ProtocolDiagnostic {
-                message_text: item.message,
+                message_text: item.message.clone(),
                 start: i32::try_from(item.start).unwrap_or(0),
                 length: i32::try_from(item.end.saturating_sub(item.start)).unwrap_or(0),
-                code: 0,
+                code: diagnostic_code(&item.message),
             })
             .collect(),
     }

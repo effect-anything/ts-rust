@@ -26,9 +26,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 VENDOR = (ROOT / "vendor" / "sweetener").resolve()
 CASES = ROOT / "crates" / "ts_ext_syntax" / "conformance" / "cases" / "sweetener"
-EXTS = {".sts", ".stsx", ".sjs", ".sjsx"}
+EXTS = {".sts", ".stsx"}
 SYNTAX_IMPORT = re.compile(r"""from\s+['"](\.[^'"]+)['"]\s+for\s+syntax""")
-NAMED_SOURCE = re.compile(r"""['"]([^'"]+\.(?:sts|stsx|sjs|sjsx))['"]""")
+NAMED_SOURCE = re.compile(r"""['"]([^'"]+\.(?:sts|stsx))['"]""")
 SKIP_PARTS = {"node_modules", ".worktrees", "dist", "target"}
 
 
@@ -79,8 +79,9 @@ def program_entries(root: Path) -> list[tuple[str, Path]]:
         if "fixtures" in path.parts:
             continue
         text = read(path)
-        if SYNTAX_IMPORT.search(text):
-            found.append(("syntax-import", path))
+        if not SYNTAX_IMPORT.search(text) or is_macro_only(path):
+            continue
+        found.append(("syntax-import", path))
     for script in list(root.rglob("run.mjs")) + list(root.rglob("package.json")):
         if skip(script) or "fixtures" in script.parts:
             continue
@@ -119,6 +120,14 @@ def covered(path: Path, captured: set[tuple[str, str]]) -> bool:
     # examples/language-tour/new/power-operator/main.sts
     # becomes cases/.../examples/language-tour/new/power-operator/main
     without_vendor = rel
+    # These twelve recovered tours are the same programs as
+    # fixtures/acceptance/playground. The playground copies are the ones we keep.
+    recovered = "examples/language-tour/recovered/"
+    if rel.startswith(recovered):
+        feature = rel[len(recovered):].split("/")[0]
+        playground = f"fixtures/acceptance/playground/{feature}"
+        if any(parent.endswith(playground) or f"/{playground}/" in f"/{parent}/" for parent, _ in captured):
+            return True
     for parent, original in captured:
         if original != path.name:
             continue

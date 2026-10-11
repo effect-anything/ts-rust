@@ -1,0 +1,6 @@
+upstream expand did not produce TypeScript.
+The diagnostic is the reference. Do not treat this case as an expansion pass.
+
+/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/rewritten-if/malformed/input.sts:7:5 TS4001: No rule for macro if accepted this input: return statement in else block.
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/rewritten-if/malformed/input.sts:4:3 In this use of if
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/rewritten-if/malformed/declarative.sts:8:7 The closest rule was still expecting syntax here

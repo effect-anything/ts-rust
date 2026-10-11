@@ -1,0 +1,5 @@
+--- /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-theirs.txt	2026-10-11 12:48:12
++++ /var/folders/hs/8q_g5sfn1bv56k9y2yr3nm5r0000gn/T/ext-syntax-ours.txt	2026-10-11 12:48:12
+@@ -1 +0,0 @@
+-constObject="call-siteObject";constvector=<T>...values:T[]:readonlyT[]=>values;constcount=values:readonlyunknown[]:number=>values.length;exportconsthygieneResult=[Object,globalThis.Object.iscountvector1,2,3,3,];
+\ No newline at end of file

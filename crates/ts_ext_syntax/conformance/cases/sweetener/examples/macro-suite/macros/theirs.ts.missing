@@ -1,3 +1,0 @@
-pin 2e78489 live sweetener expand (CLI expand and session.transformSync, mode test) returned empty code and no diagnostics.
-This file is a macro-definition module, not a call-site program. explain reports: "This position produced no generated TypeScript."
-Empty expansion is the compiler result, not a missed run. No theirs.ts because there is no generated TypeScript to snapshot.

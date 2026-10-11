@@ -222,7 +222,7 @@ fn filter_stub_noise(report: &str) -> String {
 }
 
 fn input_file(dir: &Path) -> Option<PathBuf> {
-    for name in ["input.ts", "input.sts", "input.stsx", "input.sjs", "input.sjsx"] {
+    for name in ["input.ts", "input.sts", "input.stsx"] {
         let path = dir.join(name);
         if path.is_file() {
             return Some(path);

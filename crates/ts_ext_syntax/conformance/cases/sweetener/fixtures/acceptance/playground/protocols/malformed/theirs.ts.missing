@@ -1,0 +1,6 @@
+upstream expand did not produce TypeScript.
+The diagnostic is the reference. Do not treat this case as an expansion pass.
+
+/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/protocols/malformed/input.sts:4:29 TS4001: No rule for macro protocol accepted this input: : followed by a return type.
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/protocols/malformed/input.sts:3:1 In this use of protocol
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/protocols/malformed/declarative.sts:18:52 The closest rule was still expecting syntax here

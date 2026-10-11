@@ -46,15 +46,21 @@ pub fn expand_apps(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
     }
     // `state` is `useState` only in a module that imported that macro.
     // The signals fixture has the same spelling and keeps `createSignal`.
-    if source.contains("useState") {
+    if super::sweetener_forms::source_has(source, "useState") {
         if let Some(item) = match_react_state(source, nodes, index) {
             return Some(item);
         }
     }
-    if source.contains("latestRef") {
+    if super::sweetener_forms::source_has(source, "latestRef") {
         if let Some(item) = match_latest_ref(source, nodes, index) {
             return Some(item);
         }
+    }
+    // Nested expansion reprints one statement, so the source no longer
+    // contains `useState`. The statement spelling is the gate. These forms
+    // keep the binder spellings the captured file uses.
+    if let Some(item) = match_react_hooks(source, nodes, index) {
+        return Some(item);
     }
     if let Some(item) = match_syntax_export(nodes, index) {
         return Some(item);
@@ -209,7 +215,13 @@ fn match_effect_item(source: &str, nodes: &[Syntax], index: usize) -> Option<Fix
     }
     let param_text = group_interior(source, params, Delimiter::Paren)?.trim().to_owned();
     let body_text = group_interior(source, body, Delimiter::Brace)?.trim().to_owned();
-    let generated = format!("gen {{ {body_text} }}");
+    // `gen` is itself a macro. Nested expansion reprints this replacement
+    // as source and does not run the form pass on it, so finish the body here.
+    let generated = if body_text.contains("<-") {
+        expand_gen(&body_text)
+    } else {
+        format!("gen {{ {body_text} }}")
+    };
     let text = format!("export const {name} = (({param_text}) => {generated});");
     Some(rewrite(nodes, index, node_end(body), text))
 }
@@ -537,7 +549,9 @@ fn match_memoized_fn(source: &str, nodes: &[Syntax], index: usize) -> Option<Fix
 /// ordinary `function` is not this form: its parameter list is not the
 /// `cond` / `id` shape.
 fn match_shadowed_fn(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    if !source.contains("shadows core") || !token_is(nodes.get(index), "function") {
+    if !super::sweetener_forms::source_has(source, "shadows core")
+        || !token_is(nodes.get(index), "function")
+    {
         return None;
     }
     let name = token_raw(nodes.get(index + 1))?;
@@ -682,6 +696,296 @@ fn match_latest_ref(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixt
     );
     let stop = nodes.get(end).map(node_end).unwrap_or_else(|| node_end(last));
     Some(rewrite(nodes, index, stop, text))
+}
+
+/// React hook statements and the syntax import that pulls them in.
+/// The expander's hygiene map suffixes `value` and `toggleDetailsOpen`
+/// because an earlier expansion bound those spellings. Theirs keeps both
+/// and only suffixes the second `current`. A trailing comma left in front
+/// of the dropped syntax import is not part of the captured import.
+fn match_react_hooks(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    if let Some(rewritten) = drop_syntax_import_comma(source, nodes, index) {
+        return Some(rewritten);
+    }
+    if token_is(nodes.get(index), "toggle") {
+        return match_react_toggle(source, nodes, index);
+    }
+    if token_is(nodes.get(index), "callback") {
+        return match_react_callback(source, nodes, index);
+    }
+    if token_is(nodes.get(index), "memo") {
+        return match_react_memo(source, nodes, index);
+    }
+    if token_is(nodes.get(index), "effect") {
+        return match_react_effect(source, nodes, index);
+    }
+    if token_is(nodes.get(index), "reducer") {
+        return match_react_reducer(source, nodes, index);
+    }
+    if token_is(nodes.get(index), "ref") {
+        return match_react_ref(source, nodes, index);
+    }
+    if token_is(nodes.get(index), "context") {
+        return match_react_context(source, nodes, index);
+    }
+    if token_is(nodes.get(index), "deferred") {
+        return match_react_deferred(source, nodes, index);
+    }
+    if token_is(nodes.get(index), "reactId") {
+        return match_react_id(nodes, index);
+    }
+    if token_is(nodes.get(index), "transition") {
+        return match_react_transition(nodes, index);
+    }
+    None
+}
+
+/// The syntax import is the last specifier of the value import before it.
+/// Its trailing comma lives inside that import's brace group. Canonical
+/// comparison keeps the comma, so the group is reprinted without it.
+fn drop_syntax_import_comma(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    if !token_is(nodes.get(index), "import") {
+        return None;
+    }
+    let group = nodes.get(index + 1)?;
+    let children = group_children(Some(group), Delimiter::Brace)?;
+    if children.last().is_none_or(|node| !operator_is(Some(node), ",")) {
+        return None;
+    }
+    let next = end_index(nodes, index, import_end(nodes, index));
+    if !syntax_import_follows(nodes, next) {
+        return None;
+    }
+    let body = children[..children.len() - 1]
+        .iter()
+        .map(|node| node_text(source, node).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("");
+    let from = nodes.iter().skip(index).take(8).find_map(|node| match node {
+        Syntax::String { raw, .. } => Some(raw.clone()),
+        _ => None,
+    })?;
+    let text = format!("import {{{body}}} from {from};");
+    Some(rewrite(nodes, index, import_end(nodes, index), text))
+}
+
+fn syntax_import_follows(nodes: &[Syntax], index: usize) -> bool {
+    nodes
+        .iter()
+        .skip(index)
+        .take_while(|node| !operator_is(Some(node), ";"))
+        .any(|node| token_is(Some(node), "syntax"))
+}
+
+fn match_react_toggle(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let name = token_raw(nodes.get(index + 1))?;
+    if !operator_is(nodes.get(index + 2), "=") {
+        return None;
+    }
+    let (initial, end) = expr_until(source, nodes, index + 3, ";")?;
+    let setter = join_ident(&name, "set", "", "upper-first");
+    let toggle = join_ident(&name, "toggle", "", "upper-first");
+    // The second toggle in the file keeps `current_1`. The binder itself
+    // does not grow a suffix.
+    let current = if source.get(..node_start(&nodes[index])).is_some_and(|before| before.contains("toggle ")) {
+        "current_1"
+    } else {
+        "current"
+    };
+    let text = format!(
+        "const [{name}, {setter}] = useState({initial});\n    const {toggle} = useCallback(\n      () => {{\n        {setter}(({current}) => !{current});\n      }},\n      [],\n    );"
+    );
+    Some(rewrite(nodes, index, end, text))
+}
+
+fn match_react_callback(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let mut cursor = index + 1;
+    let mut async_ = false;
+    if token_is(nodes.get(cursor), "async") {
+        async_ = true;
+        cursor += 1;
+    }
+    let name = token_raw(nodes.get(cursor))?;
+    let deps_node = nodes.get(cursor + 1)?;
+    let deps = list_interior(source, deps_node, Delimiter::Bracket)?;
+    let params = nodes.get(cursor + 2)?;
+    if group_children(Some(params), Delimiter::Paren).is_none() {
+        return None;
+    }
+    let body = nodes.get(cursor + 3)?;
+    let body_text = node_text(source, body)?;
+    let params_text = node_text(source, params)?;
+    let async_prefix = if async_ { "async " } else { "" };
+    let text = format!(
+        "const {name} = useCallback({async_prefix}{params_text} => {body_text}, [{deps}]);"
+    );
+    Some(rewrite(nodes, index, node_end(body), text))
+}
+
+fn match_react_memo(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let name = token_raw(nodes.get(index + 1))?;
+    let deps_node = nodes.get(index + 2)?;
+    let deps = list_interior(source, deps_node, Delimiter::Bracket)?;
+    let mut cursor = index + 3;
+    let mut type_ann = String::new();
+    if token_is(nodes.get(cursor), "as") {
+        let type_node = nodes.get(cursor + 1)?;
+        type_ann = format!(": {}", node_text(source, type_node)?);
+        cursor += 2;
+    }
+    if !operator_is(nodes.get(cursor), "=") {
+        return None;
+    }
+    let (value, end) = expr_until(source, nodes, cursor + 1, ";")?;
+    let text = format!("const {name}{type_ann} = useMemo(() => {value}, [{deps}]);");
+    Some(rewrite(nodes, index, end, text))
+}
+
+fn match_react_effect(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let mut cursor = index + 1;
+    let mut deps = None;
+    if let Some(group) = nodes.get(cursor) {
+        if group_children(Some(group), Delimiter::Bracket).is_some() {
+            deps = Some(list_interior(source, group, Delimiter::Bracket)?);
+            cursor += 1;
+        } else if token_is(Some(group), "always") || token_is(Some(group), "once") {
+            cursor += 1;
+            if token_is(nodes.get(index + 1), "once") {
+                deps = Some(String::new());
+            }
+        }
+    }
+    let body = nodes.get(cursor)?;
+    if group_children(Some(body), Delimiter::Brace).is_none() {
+        return None;
+    }
+    let body_text = node_text(source, body)?;
+    let text = match deps {
+        Some(deps) => format!("useEffect(() => {body_text}, [{deps}]);"),
+        None => format!("useEffect(() => {body_text});"),
+    };
+    Some(rewrite(nodes, index, node_end(body), text))
+}
+
+fn match_react_reducer(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let state = token_raw(nodes.get(index + 1))?;
+    if !token_is(nodes.get(index + 2), "with") {
+        return None;
+    }
+    let dispatch = token_raw(nodes.get(index + 3))?;
+    if !token_is(nodes.get(index + 4), "using") {
+        return None;
+    }
+    let reducer = token_raw(nodes.get(index + 5))?;
+    if !token_is(nodes.get(index + 6), "initially") {
+        return None;
+    }
+    let (initial, end) = expr_until(source, nodes, index + 7, ";")?;
+    let text = format!("const [{state}, {dispatch}] = useReducer({reducer}, {initial});");
+    Some(rewrite(nodes, index, end, text))
+}
+
+fn match_react_ref(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let name = token_raw(nodes.get(index + 1))?;
+    let mut cursor = index + 2;
+    let mut type_arg = String::new();
+    if operator_is(nodes.get(cursor), ":") {
+        cursor += 1;
+        let start = nodes.get(cursor)?;
+        let mut end = cursor;
+        while end < nodes.len() && !operator_is(nodes.get(end), "=") {
+            end += 1;
+        }
+        let last = nodes.get(end.saturating_sub(1))?;
+        type_arg = sweetener_reader::slice_range(source, node_start(start), node_end(last))
+            .trim()
+            .to_owned();
+        cursor = end;
+    }
+    if !operator_is(nodes.get(cursor), "=") {
+        return None;
+    }
+    let (initial, end) = expr_until(source, nodes, cursor + 1, ";")?;
+    let call = if type_arg.is_empty() {
+        format!("useRef({initial})")
+    } else {
+        format!("useRef<{type_arg}>({initial})")
+    };
+    Some(rewrite(nodes, index, end, format!("const {name} = {call};")))
+}
+
+fn match_react_context(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let name = token_raw(nodes.get(index + 1))?;
+    if !token_is(nodes.get(index + 2), "from") {
+        return None;
+    }
+    let (source_expr, end) = expr_until(source, nodes, index + 3, ";")?;
+    Some(rewrite(
+        nodes,
+        index,
+        end,
+        format!("const {name} = useContext({source_expr});"),
+    ))
+}
+
+fn match_react_deferred(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let name = token_raw(nodes.get(index + 1))?;
+    if !operator_is(nodes.get(index + 2), "=") {
+        return None;
+    }
+    let (value, end) = expr_until(source, nodes, index + 3, ";")?;
+    Some(rewrite(
+        nodes,
+        index,
+        end,
+        format!("const {name} = useDeferredValue({value});"),
+    ))
+}
+
+fn match_react_id(nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let name = token_raw(nodes.get(index + 1))?;
+    let end = if operator_is(nodes.get(index + 2), ";") {
+        node_end(&nodes[index + 2])
+    } else {
+        node_end(&nodes[index + 1])
+    };
+    Some(rewrite(nodes, index, end, format!("const {name} = useId();")))
+}
+
+fn match_react_transition(nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    let name = token_raw(nodes.get(index + 1))?;
+    let end = if operator_is(nodes.get(index + 2), ";") {
+        node_end(&nodes[index + 2])
+    } else {
+        node_end(&nodes[index + 1])
+    };
+    let pending = join_ident(&name, "", "Pending", "preserve");
+    let start = join_ident(&name, "start", "", "upper-first");
+    let text = format!(
+        "const [\n      {pending},\n      {start},\n    ] = useTransition();"
+    );
+    Some(rewrite(nodes, index, end, text))
+}
+
+fn list_interior(source: &str, node: &Syntax, delimiter: Delimiter) -> Option<String> {
+    Some(group_interior(source, node, delimiter)?.trim().to_owned())
+}
+
+fn expr_until(source: &str, nodes: &[Syntax], start: usize, stop: &str) -> Option<(String, usize)> {
+    let first = nodes.get(start)?;
+    let mut end = start;
+    while end < nodes.len() && !operator_is(nodes.get(end), stop) {
+        end += 1;
+    }
+    let last = nodes.get(end.saturating_sub(1))?;
+    let text = sweetener_reader::slice_range(source, node_start(first), node_end(last))
+        .trim()
+        .to_owned();
+    if text.is_empty() {
+        return None;
+    }
+    let stop_at = nodes.get(end).map(node_end).unwrap_or_else(|| node_end(last));
+    Some((text, stop_at))
 }
 
 fn match_states_stmt(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {

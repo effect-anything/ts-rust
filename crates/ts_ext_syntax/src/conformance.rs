@@ -23,13 +23,19 @@ impl CasePaths {
     }
 
     #[must_use]
+    pub fn output_extension(&self) -> &'static str {
+        let name = std::fs::read_to_string(self.root.join("entry.name")).unwrap_or_default();
+        crate::session::virtual_extension(name.trim())
+    }
+
+    #[must_use]
     pub fn theirs(&self) -> PathBuf {
-        self.root.join("theirs.ts")
+        self.root.join(format!("theirs{}", self.output_extension()))
     }
 
     #[must_use]
     pub fn ours(&self) -> PathBuf {
-        self.root.join("ours.ts")
+        self.root.join(format!("ours{}", self.output_extension()))
     }
 
     #[must_use]

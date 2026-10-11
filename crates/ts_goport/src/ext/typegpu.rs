@@ -1,4 +1,9 @@
-//! `"use gpu"` rewrite after content mapping and before check.
+//! GPU function wrapper after content mapping and before check.
+//!
+//! Operator rewriting lives in [`super::overload`]. This file decides
+//! where a `"use gpu"` function or a shell callback needs that rewrite,
+//! then adds metadata, the numeric AST, and externals. Another library
+//! that only needs `__tsover_*` does not go through this file.
 //!
 //! The directive is legal TypeScript, so it cannot be a content-mapper
 //! extension. Sweetener has already expanded `.sts` by the time a file
@@ -25,12 +30,7 @@ use crate::spanmap::{self, Feature, Kind, Segment};
 
 pub const MAPPER_NAME: &str = "typegpu";
 const MAPPER: &str = MAPPER_NAME;
-const PRELUDE: &str = "\
-declare function __tsover_add(a: number, b: number): number;\n\
-declare function __tsover_sub(a: number, b: number): number;\n\
-declare function __tsover_mul(a: number, b: number): number;\n\
-declare function __tsover_div(a: number, b: number): number;\n\
-declare function __tsover_mod(a: number, b: number): number;\n";
+const PRELUDE: &str = super::overload::PRELUDE;
 const NESTING: &str = "Nesting 'use gpu' functions is not allowed";
 
 /// Virtual text, span-map tuples, and original-file diagnostics for a
@@ -38,7 +38,7 @@ const NESTING: &str = "Nesting 'use gpu' functions is not allowed";
 /// this after Sweetener expansion, or alone for an ordinary file.
 #[must_use]
 pub fn rewrite_text(filename: &str, code: &str) -> Option<Rewrite> {
-    if !code.contains("use gpu") {
+    if !super::overload::enabled(code) {
         return None;
     }
     let file_name = if filename.starts_with('/') {
@@ -93,7 +93,7 @@ pub fn rewrite_after_parse(
     opts: &SourceFileParseOptions,
     file: ParsedSourceFile,
 ) -> ParsedSourceFile {
-    if rewriting() || !file.text.contains("use gpu") {
+    if rewriting() || !super::overload::enabled(&file.text) {
         return file;
     }
     let current = file.text.to_string();
@@ -361,7 +361,12 @@ fn walk_wraps(node: Node, work: &mut Build, edits: &mut Vec<WrapEdit>) {
     // the original source.
     if is_shell_implementation(node, work) {
         let arg = unwrap_parens(node.arguments().get(0));
-        if is_function_like_declaration(arg) && !function_marked(arg) && !already_wrapped(arg)
+        // The shell and the callback are one resource. A function that
+        // already carries `__TYPEGPU_META__` is not wrapped again.
+        if is_function_like_declaration(arg)
+            && !function_marked(arg)
+            && !already_wrapped(arg)
+            && !function_has_meta(arg, work)
             && let Some(edit) = edit_for_function(arg, work, false)
         {
             edits.push(edit);
@@ -973,6 +978,10 @@ impl Build {
         }
     }
 
+    fn probe() -> Self {
+        Self::new("", std::collections::BTreeSet::new(), false)
+    }
+
     fn id(&self, text: &str) -> Node {
         self.factory.new_identifier(text)
     }
@@ -1200,7 +1209,11 @@ fn rebuild_node(node: Node, work: &mut Build) -> Option<Node> {
     }
     if is_shell_implementation(node, work) {
         let arg = unwrap_parens(node.arguments().get(0));
-        if is_function_like_declaration(arg) && !function_marked(arg) && !already_wrapped(arg) {
+        if is_function_like_declaration(arg)
+            && !function_marked(arg)
+            && !already_wrapped(arg)
+            && !function_has_meta(arg, work)
+        {
             let wrapped = wrap_function(arg, work, false);
             let call = rebuild_call_shell(node, wrapped, work);
             return Some(call);
@@ -1285,6 +1298,9 @@ fn is_named_export(node: Node) -> bool {
 }
 
 fn already_wrapped(node: Node) -> bool {
+    if function_has_meta(node, &Build::probe()) {
+        return true;
+    }
     let mut cursor = node;
     for _ in 0..6 {
         cursor = cursor.parent();
@@ -1299,6 +1315,26 @@ fn already_wrapped(node: Node) -> bool {
         }
     }
     false
+}
+
+/// The function text already contains the metadata call. Wrapping it again
+/// would put `__TYPEGPU_META__` on both the shell and the callback.
+fn function_has_meta(node: Node, work: &Build) -> bool {
+    if node.is_nil() {
+        return false;
+    }
+    if slice_node_raw(node).contains("__TYPEGPU_META__") {
+        return true;
+    }
+    let Some(start) = byte_at(work.code.as_str(), node.pos()) else {
+        return false;
+    };
+    let Some(end) = byte_at(work.code.as_str(), node.end()) else {
+        return false;
+    };
+    work.code
+        .get(start..end)
+        .is_some_and(|slice| slice.contains("__TYPEGPU_META__"))
 }
 
 fn slice_node_raw(node: Node) -> String {
@@ -3258,6 +3294,16 @@ impl Walk {
         if node.is_nil() {
             return;
         }
+        if node.kind() == SyntaxKind::StringLiteral && is_use_tsover(node) {
+            let root = get_source_file_of_node(node);
+            root.for_each_child(|child| {
+                if child != root {
+                    self.visit_gpu(child);
+                }
+                false
+            });
+            return;
+        }
         if node.kind() == SyntaxKind::StringLiteral && is_use_gpu(node) {
             if let Some(body) = gpu_body(node) {
                 if self.depth > 0 {
@@ -3327,19 +3373,7 @@ impl Walk {
 }
 
 fn overload(kind: SyntaxKind) -> Option<(&'static str, bool)> {
-    Some(match kind {
-        SyntaxKind::PlusToken => ("__tsover_add", false),
-        SyntaxKind::MinusToken => ("__tsover_sub", false),
-        SyntaxKind::AsteriskToken => ("__tsover_mul", false),
-        SyntaxKind::SlashToken => ("__tsover_div", false),
-        SyntaxKind::PercentToken => ("__tsover_mod", false),
-        SyntaxKind::PlusEqualsToken => ("__tsover_add", true),
-        SyntaxKind::MinusEqualsToken => ("__tsover_sub", true),
-        SyntaxKind::AsteriskEqualsToken => ("__tsover_mul", true),
-        SyntaxKind::SlashEqualsToken => ("__tsover_div", true),
-        SyntaxKind::PercentEqualsToken => ("__tsover_mod", true),
-        _ => return None,
-    })
+    super::overload::name(kind)
 }
 
 fn apply_edits(original: &str, edits: &[Edit]) -> (String, Vec<Segment>) {
@@ -3532,12 +3566,18 @@ mod dump_case {
 }
 
 fn is_use_gpu(node: Node) -> bool {
-    {
-        let directive = format!("{} {}", "use", "gpu");
-        let quoted = format!("\"{}\"", directive);
-        let single = format!("'{}'", directive);
-        node.text() == directive || node.text() == quoted || node.text() == single
-    }
+    is_named_directive(node, "gpu")
+}
+
+fn is_use_tsover(node: Node) -> bool {
+    is_named_directive(node, "tsover")
+}
+
+fn is_named_directive(node: Node, name: &str) -> bool {
+    let directive = format!("use {name}");
+    let quoted = format!("\"{directive}\"");
+    let single = format!("'{directive}'");
+    node.text() == directive || node.text() == quoted || node.text() == single
 }
 
 fn gpu_body(literal: Node) -> Option<Node> {

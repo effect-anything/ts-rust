@@ -1,0 +1,6 @@
+upstream expand did not produce TypeScript.
+The diagnostic is the reference. Do not treat this case as an expansion pass.
+
+/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/adt/malformed/input.sts:3:38 TS4001: No rule for macro data accepted this input: field type after colon.
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/adt/malformed/input.sts:3:1 In this use of data
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/adt/malformed/declarative.sts:7:25 The closest rule was still expecting syntax here

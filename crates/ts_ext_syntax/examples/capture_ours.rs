@@ -104,7 +104,7 @@ fn capture(dir: &Path, theirs: &Path) -> Result<Same, String> {
             &dir.to_string_lossy(),
             &code,
         );
-        fs::write(dir.join("ours.ts"), &built.code).map_err(|err| err.to_string())?;
+        fs::write(snapshot_path(dir, "ours"), &built.code).map_err(|err| err.to_string())?;
         return compare_payload(&built.code, theirs);
     } else {
         expand(ExpandRequest {
@@ -113,7 +113,7 @@ fn capture(dir: &Path, theirs: &Path) -> Result<Same, String> {
             phase: Phase::Check,
         })
     };
-    fs::write(dir.join("ours.ts"), &expansion.code).map_err(|err| err.to_string())?;
+    fs::write(snapshot_path(dir, "ours"), &expansion.code).map_err(|err| err.to_string())?;
     let reference = fs::read_to_string(theirs).map_err(|err| err.to_string())?;
     let left = normalize_theirs(&reference);
     let right = normalize_ours(&expansion.code);
@@ -198,14 +198,34 @@ fn payload(text: &str) -> String {
             out.push_str(&format!("{needle}={count}\n"));
         }
     }
+    // `tgpu.fn([])` is one shell. A line that is only `})` before the
+    // callback wrapper is the same wrap, not a second `__TYPEGPU_META__`.
     for line in text.lines() {
-        let line = line.trim();
+        let line = normalize_shell_wrap(line.trim());
         if line.starts_with("name:") || line.starts_with("body:") || line.starts_with("externals:") || line.contains("() =>") {
             out.push_str(line);
             out.push('\n');
         }
     }
     out
+}
+
+/// Drop a shell close that shares a line with the callback wrapper.
+/// `})(/*#__PURE__*/` and a joined `const name = ...(})(/*#__PURE__*/` are
+/// one metadata wrap. A function that already has `__TYPEGPU_META__` still
+/// shows two wrappers if it was wrapped again.
+fn normalize_shell_wrap(line: &str) -> &str {
+    let Some(at) = line.rfind("(/*#__PURE__*/") else {
+        return line;
+    };
+    let prefix = &line[..at];
+    let split_close = prefix == "})" || prefix.ends_with("})");
+    let joined = prefix.contains("__TYPEGPU_AUTONAME__") && prefix.contains("});");
+    if split_close || joined {
+        &line[at..]
+    } else {
+        line
+    }
 }
 
 fn canonical(text: &str) -> String {
@@ -215,7 +235,7 @@ fn canonical(text: &str) -> String {
 }
 
 fn input_file(dir: &Path) -> Option<PathBuf> {
-    for name in ["input.ts", "input.sts", "input.stsx", "input.sjs", "input.sjsx"] {
+    for name in ["input.ts", "input.sts", "input.stsx"] {
         let path = dir.join(name);
         if path.is_file() {
             return Some(path);
@@ -254,6 +274,20 @@ fn normalize_theirs(text: &str) -> String {
     }
     out.push_str(rest);
     collapse(&out)
+}
+
+fn snapshot_path(dir: &Path, stem: &str) -> std::path::PathBuf {
+    let name = fs::read_to_string(dir.join("entry.name")).unwrap_or_default();
+    let ext = ts_ext_syntax::session::virtual_extension(name.trim());
+    let path = dir.join(format!("{stem}{ext}"));
+    if path.is_file() {
+        return path;
+    }
+    let legacy = dir.join(format!("{stem}.ts"));
+    if legacy.is_file() {
+        return legacy;
+    }
+    path
 }
 
 fn normalize_ours(text: &str) -> String {

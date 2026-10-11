@@ -1,5 +1,3 @@
-
-
 type Box<A> = { readonly value: A };
 const box = {
   of: <A>(value: A): Box<A> => ({ value }),
@@ -7,6 +5,6 @@ const box = {
     next(source.value),
 };
 
-export const result = box.flatMap(box.of(2), (left) => box.flatMap(box.of(3), (right) => box.of(left + right)
-    )
-    );
+export const result = box.flatMap(box.of(2), (left) =>
+  box.flatMap(box.of(3), (right) => box.of(left + right)),
+);

@@ -13,6 +13,12 @@ path = "src/bin/ext_syntax.rs"
 [lib]
 crate-type = ["rlib"]
 
+[features]
+default = []
+# One scan of the form probes per Printer, instead of `str::contains` on every
+# node. Off by default: a build without this feature keeps the old path.
+sweetener_fast_gates = []
+
 [dependencies]
 ts_goport = { path = "../ts_goport" }
 

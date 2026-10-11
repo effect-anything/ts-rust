@@ -1,0 +1,18 @@
+{
+  "exports": {
+    "described": [
+      "click 3,4",
+      "click offscreen",
+      "escape",
+      "key a",
+      "scroll 1/2"
+    ],
+    "named": [
+      "click",
+      "click",
+      "key",
+      "key",
+      "scroll"
+    ]
+  }
+}

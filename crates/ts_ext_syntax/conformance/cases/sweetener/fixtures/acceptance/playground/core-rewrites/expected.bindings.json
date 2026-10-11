@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "introduced": [
+    { "spelling": "exact", "space": "value", "kind": "recursive" },
+    { "spelling": "value", "space": "value", "kind": "lexical" }
+  ],
+  "relationship": "The rewritten function remains visible to following items and its parameter binds the preserved body; typeof introduces no bindings."
+}

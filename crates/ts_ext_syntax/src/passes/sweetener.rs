@@ -1,4 +1,4 @@
-//! Macro expansion for `.sts` / `.stsx` / `.sjs` / `.sjsx`.
+//! Macro expansion for `.sts` / `.stsx`.
 //!
 //! Output is ordinary TypeScript. This pass does not look for `"use gpu"`.
 //! A directive in the expanded text is rewritten later, on that text, by
@@ -9,7 +9,7 @@ use crate::{ExpandRequest, Expansion};
 
 /// Sweetener source extensions. Matched on the final extension only, so
 /// `foo.sts.ts` is ordinary TypeScript.
-const EXTENSIONS: &[&str] = &[".sts", ".stsx", ".sjs", ".sjsx"];
+const EXTENSIONS: &[&str] = &[".sts", ".stsx"];
 
 /// True when the filename's final extension is a Sweetener source extension.
 /// A query string (`file.sts?x=1`) is stripped before the check.
