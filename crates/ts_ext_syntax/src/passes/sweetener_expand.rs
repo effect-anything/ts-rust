@@ -714,7 +714,14 @@ impl<'a> Printer<'a> {
                     if name == "record" {
                         replacement
                     } else {
-                        self.expand_core(&rule.template, &matched.captures)
+                        // `expand_core` renders the template again, so the
+                        // plan applied above is gone. Apply it to the text
+                        // that is actually printed.
+                        let rendered = self.expand_core(&rule.template, &matched.captures);
+                        match &plan {
+                            Some(plan) => apply_plan(&rendered, plan),
+                            None => rendered,
+                        }
                     }
                 } else {
                     self.expand_replacement(&replacement)
@@ -4503,6 +4510,13 @@ fn take_token_tree(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(Str
     // (`map((value) => value + 1)`) is one step; the comma after it belongs
     // to the repetition's separator, not to this hole.
     let start = node_start(node);
+    // A brace group is a whole body. `kinded Functor<F> { ... }` stops at
+    // the closing brace and does not swallow the next item
+    // (`Functor FunctorArray for Array`).
+    if is_closed_group(node, Delimiter::Brace) {
+        let end = node_end(node);
+        return Some((source[start..end].to_owned(), end, index + 1));
+    }
     let mut end_index = index + 1;
     while end_index < nodes.len() {
         if operator_is(nodes.get(end_index), ",") || is_expr_stop(&nodes[end_index]) {
