@@ -574,8 +574,11 @@ fn expand_data_decl_hygiene(
         } else {
             format!("{{ tag: \"{variant}\", {} }}", object_fields.join(", "))
         };
+        // `=> { tag: ... }` parses as a block with a label, not an object.
+        // The parentheses keep it an object literal, as the macro template
+        // wrote it.
         out.push_str(&format!(
-            " const {variant} = <{type_param},>({}): {name}<{type_param}> => {object};",
+            " const {variant} = <{type_param},>({}): {name}<{type_param}> => ({object});",
             params.join(", ")
         ));
     }
