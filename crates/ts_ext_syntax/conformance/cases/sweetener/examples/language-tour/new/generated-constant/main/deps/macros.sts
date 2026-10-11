@@ -1,5 +1,0 @@
-export syntax constant:item {
-  rule { constant $name:binding = $value:expr; }
-  bind $name in following as lexical value;
-  => { const $name = $value; }
-}

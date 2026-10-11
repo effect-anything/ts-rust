@@ -1,3 +1,0 @@
-export syntax arrayOf:expr {
-  rule { arrayOf($($value:expr),+) } => { [$($value),*] }
-}

@@ -1,6 +1,5 @@
 import tgpu, { d } from 'typegpu';
-const fn =
-/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
+const fn = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
   'use gpu';
 
   const a = ext.comptime().x;
@@ -19,15 +18,15 @@ const fn =
 }) && $.f)({});
 const ext = {
   comptime:
-(/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgpu.comptime(() => {
+/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(tgpu.comptime(() => {
     return d.vec4f();
-  }), "comptime")),
+  }), "comptime"),
   runtime:
 /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
-  'use gpu';
+    'use gpu';
 
-  return d.vec4f();
-}, {
+    return d.vec4f();
+  }, {
   v: 2,
   name: "runtime",
   ast: {

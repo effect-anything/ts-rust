@@ -1,25 +1,17 @@
 
 
-export type DoorState = "Closed { lock -> Locked, open -> Opened }\n  Opened { close -> Closed }\n  Locked { unlock -> Closed }"
+export type DoorState = "Closed"|"Opened"|"Locked"
 
     export type DoorEvent =
-      "Closed { lock -> Locked, open -> Opened }\n  Opened { close -> Closed }\n  Locked { unlock -> Closed }"
+      "lock"|"open"|"close"|"unlock"
 
     export interface DoorTable {
-        Closed { lock -> Locked, open -> Opened }
-  Opened { close -> Closed }
-  Locked { unlock -> Closed }.name: { Closed { lock -> Locked, open -> Opened }
-  Opened { close -> Closed }
-  Locked { unlock -> Closed }.moves.event: "Closed { lock -> Locked, open -> Opened }\n  Opened { close -> Closed }\n  Locked { unlock -> Closed }" };
+        Closed: { lock: "Locked", open: "Opened" };Opened: { close: "Closed" };Locked: { unlock: "Closed" };
       }
 
     // The table is also the runtime transition map, so the two cannot drift.
     export const DoorMoves = {
-        Closed { lock -> Locked, open -> Opened }
-  Opened { close -> Closed }
-  Locked { unlock -> Closed }.name: { Closed { lock -> Locked, open -> Opened }
-  Opened { close -> Closed }
-  Locked { unlock -> Closed }.moves.event: "Closed { lock -> Locked, open -> Opened }\n  Opened { close -> Closed }\n  Locked { unlock -> Closed }" },
+        Closed: { lock: "Locked", open: "Opened" },Opened: { close: "Closed" },Locked: { unlock: "Closed" },
       } as const
 
     // `event` is keyed on the state, so an event that state does not accept

@@ -1,1 +1,5 @@
-/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/examples/language-tour/new/generated-constant/main/deps/macros.sts
+export syntax constant:item {
+  rule { constant $name:binding = $value:expr; }
+  bind $name in following as lexical value;
+  => { const $name = $value; }
+}

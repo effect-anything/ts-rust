@@ -37,6 +37,7 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
         classes: loaded.classes,
         runtime_imports: loaded.runtime_imports,
         hygiene: HashMap::new(),
+        type_params: user_type_params(&read.children),
         occurrence_names: HashMap::new(),
         imports_emitted: false,
         form_signals: Vec::new(),
@@ -74,6 +75,8 @@ struct Printer<'a> {
     runtime_imports: Vec<RuntimeImport>,
     /// Macro-introduced spellings already assigned a printed name in this file.
     hygiene: HashMap<String, String>,
+    /// Type parameters the user wrote, such as `Option<A>`.
+    type_params: std::collections::HashSet<String>,
     /// Printed name for each introduced binder in the template being rendered,
     /// in source order. A second `const actual` is a new binding.
     occurrence_names: HashMap<String, Vec<String>>,
@@ -212,7 +215,8 @@ impl<'a> Printer<'a> {
             if matches!(&nodes[cursor], Syntax::Token { .. }) && cursor != index {
                 let prev_is_op = cursor > index && matches!(&nodes[cursor - 1], Syntax::Operator { raw, .. } if raw != ".");
                 let prev_is_dot = cursor > index && matches!(&nodes[cursor - 1], Syntax::Operator { raw, .. } if raw == ".");
-                if !prev_is_op && !prev_is_dot && !token_is(Some(&nodes[cursor]), "as") {
+                let infix_word = macro_head(&nodes[cursor]).is_some_and(|name| self.infix_precedence(name).is_some());
+                if !prev_is_op && !prev_is_dot && !token_is(Some(&nodes[cursor]), "as") && !infix_word {
                     break;
                 }
             }
@@ -260,6 +264,25 @@ impl<'a> Printer<'a> {
             .flat_map(|macro_| macro_.rules.clone())
             .collect();
         for rule in &rules {
+            // `User implements Equal<User> { ... }` is an item. The two-hole
+            // expression binder would stop at the type and leave the body.
+            if rule.pattern.iter().any(|pat| matches!(pat, Pat::Group { .. } | Pat::Rep { .. } | Pat::Hole { kind: HoleKind::Class(_), .. })) {
+                if let Some(matched) = match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes) {
+                    self.diagnose_unknown(&rule.template, node_span(&nodes[op_at]));
+                    let was_core = self.printing_core;
+                    if template_is_core(&rule.template) {
+                        self.printing_core = true;
+                    }
+                    let replacement = instantiate(self.source, &rule.template, &matched.captures, &self.classes);
+                    let expanded = self.expand_replacement(&replacement);
+                    self.printing_core = was_core;
+                    let start = node_span(&nodes[index]).start;
+                    self.copy_until(start as usize);
+                    self.emit(start, u32_at(matched.end), &expanded, SegmentKind::Atom);
+                    self.last_original = matched.end;
+                    return matched.next;
+                }
+            }
             let mut captures = HashMap::new();
             if infix_rule_binds(&rule.pattern, &name, left, right.trim(), &mut captures) {
                 self.diagnose_unknown(&rule.template, node_span(&nodes[op_at]));
@@ -296,7 +319,13 @@ impl<'a> Printer<'a> {
             // keep going; the diagnostic below names the macro
         }
         for rule in &rules {
+            if std::env::var("NL").is_ok() && name == "record" {
+                eprintln!("TRY record pats={:?}", rule.pattern.iter().map(|p| match p { Pat::Lit(s) => s.clone(), Pat::Hole { name, .. } => format!("hole {name}"), Pat::Rep { sep, inner, .. } => format!("rep sep={sep:?} inner={}", inner.len()), Pat::Group { inner, .. } => format!("group {:?}", inner.iter().map(|q| match q { Pat::Lit(s) => s.clone(), Pat::Rep { sep, .. } => format!("rep {sep:?}"), Pat::Hole { name, .. } => format!("hole {name}"), _ => "g".into() }).collect::<Vec<_>>()) }).collect::<Vec<_>>());
+            }
             if let Some(matched) = match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes) {
+                if std::env::var("NL").is_ok() && name == "record" {
+                    eprintln!("RECORD hit");
+                }
                 self.diagnose_unknown(&rule.template, head_span);
                 let was_core = self.printing_core;
                 if template_is_core(&rule.template) {
@@ -382,6 +411,7 @@ impl<'a> Printer<'a> {
             classes: self.classes.clone(),
             runtime_imports: Vec::new(),
             hygiene: HashMap::new(),
+            type_params: self.type_params.clone(),
             occurrence_names: HashMap::new(),
             imports_emitted: true,
             form_signals: self.form_signals.clone(),
@@ -413,6 +443,7 @@ impl<'a> Printer<'a> {
             classes: self.classes.clone(),
             runtime_imports: Vec::new(),
             hygiene: self.hygiene.clone(),
+            type_params: self.type_params.clone(),
             occurrence_names: HashMap::new(),
             imports_emitted: true,
             form_signals: self.form_signals.clone(),
@@ -479,6 +510,14 @@ impl<'a> Printer<'a> {
         // spelling when nothing in the user file has it.
         let mut plan: Vec<(String, String)> = Vec::new();
         let mut used = self.user_names.clone();
+        // `class Option<A>` binds `A`. A macro that introduces `A` prints
+        // `A_1`. Other user type arguments, such as `F<A>`, are not binders
+        // and must not rename `F`.
+        for name in &self.type_params {
+            if introduced.iter().any(|introduced| introduced == name) {
+                used.insert(name.clone());
+            }
+        }
 
         let mut seen = HashMap::<String, usize>::new();
         for name in introduced {
@@ -1134,12 +1173,32 @@ fn rules_in_source(source: &str, body: &Syntax) -> Vec<Rule> {
         let Some(template_group) = next_group(children, &mut index, Delimiter::Brace) else {
             continue;
         };
+        if std::env::var("NL").is_ok() {
+            if let Syntax::Group { children, .. } = pattern_group {
+                let spell: Vec<_> = children.iter().map(|n| match n { Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.clone(), Syntax::Group { delimiter, children, .. } => format!("group{delimiter:?}/{}", children.len()), _ => "?".into() }).collect();
+                if spell.iter().any(|s| s == "record") {
+                    eprintln!("RULE kids {spell:?}");
+                }
+            }
+        }
         let pattern = pattern_of(pattern_group);
+        if std::env::var("NL").is_ok() {
+            if let Syntax::Group { children, .. } = pattern_group {
+                if children.iter().any(|n| matches!(n, Syntax::Token { raw, .. } if raw == "record")) {
+                    eprintln!("AFTER pattern {:?}", pattern.iter().map(|p| match p { Pat::Group { inner, .. } => format!("group {}", inner.len()), Pat::Lit(s) => s.clone(), Pat::Hole { name, .. } => format!("hole {name}"), Pat::Rep { sep, .. } => format!("rep {sep:?}") }).collect::<Vec<_>>());
+                }
+            }
+        }
         let template = if source.is_empty() {
             template_of(template_group)
         } else {
             template_from_source(source, template_group)
         };
+        // `fallback rule { $declaration:tt } => { coreItem $declaration }`
+        // reprints every function. The fixture expander owns that shadow.
+        if template_is_core_item(&template) {
+            continue;
+        }
         if !pattern.is_empty() {
             let introduced = introduced_of(source, std::slice::from_ref(template_group));
             rules.push(Rule {
@@ -1186,6 +1245,9 @@ fn pats_from(nodes: &[Syntax]) -> Vec<Pat> {
                 pats.push(Pat::Lit(raw.clone()));
             }
             Syntax::Group { delimiter, children, .. } => {
+                if std::env::var("NL").is_ok() && *delimiter == Delimiter::Paren {
+                    eprintln!("PAREN kids {:?} -> pats next", children.iter().map(|n| match n { Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.clone(), Syntax::Group { .. } => "g".into(), _ => "?".into() }).collect::<Vec<_>>());
+                }
                 pats.push(Pat::Group {
                     delimiter: *delimiter,
                     inner: pats_from(children),
@@ -1200,7 +1262,13 @@ fn pats_from(nodes: &[Syntax]) -> Vec<Pat> {
 }
 
 fn is_rep_open(nodes: &[Syntax], index: usize) -> bool {
-    dollar_at(nodes, index) && group_is(nodes.get(index + 1), Delimiter::Paren)
+    let open = dollar_at(nodes, index) && group_is(nodes.get(index + 1), Delimiter::Paren);
+    if open && std::env::var("NL").is_ok() {
+        if let Some(Syntax::Group { children, .. }) = nodes.get(index + 1) {
+            eprintln!("REP open kids={:?} after={:?}", children.iter().map(|n| match n { Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.clone(), Syntax::Group { .. } => "group".into(), _ => "?".into() }).collect::<Vec<_>>(), nodes.get(index + 2).and_then(|n| match n { Syntax::Operator { raw, .. } | Syntax::Token { raw, .. } => Some(raw.clone()), _ => None }));
+        }
+    }
+    open
 }
 
 fn is_hole(nodes: &[Syntax], index: usize) -> bool {
@@ -1245,9 +1313,10 @@ fn read_rep(nodes: &[Syntax], index: usize) -> (Pat, usize) {
         };
         cursor += 1;
         Some(raw)
-    } else if operator_is(nodes.get(cursor), ",")
+    } else if (operator_is(nodes.get(cursor), ",")
         || operator_is(nodes.get(cursor), ";")
-        || operator_is(nodes.get(cursor), "|")
+        || operator_is(nodes.get(cursor), "|"))
+        && matches!(nodes.get(cursor + 1), Some(Syntax::Operator { raw, .. }) if raw == "+" || raw == "*")
     {
         let raw = match &nodes[cursor] {
             Syntax::Operator { raw, .. } => raw.clone(),
@@ -1844,7 +1913,7 @@ struct Match {
     captures: HashMap<String, Capture>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum Capture {
     Text(String),
     /// A syntax-class match. `text` is the whole form; `fields` are its
@@ -2012,6 +2081,9 @@ fn match_pats(
                     }
                 }
                 if *kind == RepKind::OneOrMore && many.is_empty() {
+                    if std::env::var("NL").is_ok() {
+                        eprintln!("REP+ fail sep={sep:?} at {:?}", nodes.get(*cursor).map(|n| match n { Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.clone(), _ => "g".into() }));
+                    }
                     return None;
                 }
                 // A repetition's captures are stored under each inner name.
@@ -2026,7 +2098,9 @@ fn match_pats(
                     }
                 }
                 // `$($body:stmt)*` with no separator is the whole interior,
-                // including the newlines between the braces.
+                // including the newlines between the braces. A syntax-class
+                // repetition keeps the records; the blob would hide `name`
+                // and `moves`.
                 if sep.is_none() {
                     if let Some(name) = many.iter().find_map(|one| one.first().map(|(name, _)| name.clone())) {
                         let class_rows = many.iter().all(|one| matches!(one.first(), Some((_, Capture::Record { .. }))));
@@ -2049,6 +2123,19 @@ fn match_pats(
                     if captures.contains_key(&name) {
                         continue;
                     }
+                    // Each row is one class match. Key it by the field the
+                    // repetition named (`state`, `moves`) so `$state.name`
+                    // walks that record instead of the first field text.
+                    let rows = rows
+                        .into_iter()
+                        .map(|one| {
+                            if one.len() == 1 && one[0].0 != name {
+                                vec![(name.clone(), one[0].1.clone())]
+                            } else {
+                                one
+                            }
+                        })
+                        .collect();
                     captures.insert(name, Capture::Many(rows));
                 }
                 if let Some(node) = cursor.checked_sub(1).and_then(|at| nodes.get(at)) {
@@ -2077,6 +2164,9 @@ fn take_class(
         let mut child = index;
         let mut raw = HashMap::new();
         let Some(end) = match_pats(source, nodes, &mut child, &rule.pattern, &mut raw, classes) else {
+            if std::env::var("NL").is_ok() && class_.name == "RecordField" {
+                eprintln!("CLASS miss {} at {:?} cursor {index}", class_.name, nodes.get(index).map(|n| sweetener_reader::slice(source, n)));
+            }
             continue;
         };
         let text = sweetener_reader::slice_range(source, start, end).to_owned();
@@ -2091,6 +2181,12 @@ fn take_class(
                     other => vec![vec![(field.name.clone(), other)]],
                 };
                 fields.insert(field.name.clone(), Capture::Many(rows));
+            } else if let Capture::Many(rows) = value {
+                // `ident` and `binding` are one name. A hole that swallowed
+                // the rest of the form is not the field.
+                if let Some(one) = rows.into_iter().next().and_then(|row| row.into_iter().next()) {
+                    fields.insert(field.name.clone(), one.1);
+                }
             } else {
                 fields.insert(field.name.clone(), value);
             }
@@ -2170,6 +2266,12 @@ fn take_type(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, u
         }
         if matches!(node, Syntax::Operator { raw, .. } if matches!(raw.as_str(), ";" | "," | "=" | ")" | "]" | "}" | ">")) {
             break;
+        }
+        // `Empty | Cons` is one type. `|` is not a field separator; `,` is.
+        if operator_is(Some(node), "|") {
+            end = node_end(node);
+            index += 1;
+            continue;
         }
         // `string[]` and `readonly string` are part of the type. A following
         // `>` closes `optional<...>`, so it is not consumed here.
@@ -2457,17 +2559,83 @@ fn apply_plan_nodes(
                 }
                 dotted = false;
             }
+            Syntax::Group { span, children, .. } if span.end as usize <= *cursor => {}
             Syntax::Group { children, .. } => {
+                let method_params = index > 0 && operator_is(nodes.get(index - 1), ">") && matches!(nodes.get(index), Some(Syntax::Group { delimiter: Delimiter::Paren, .. }));
+                if method_params {
+                    if let Syntax::Group { span, children, .. } = &nodes[index] {
+                        // `map<A, B>(value: F<A>)` — count `A` before the
+                        // parameter types, or `F<A>` keeps the user's `A`.
+                        if let Some(angle) = nodes[..index].iter().rposition(|node| operator_is(Some(node), "<")).filter(|angle| {
+                            nodes[*angle..index].iter().position(|node| operator_is(Some(node), ">")).is_some_and(|close| angle + close + 1 == index)
+                        }) {
+                            if let Some(params) = type_param_names(nodes, angle) {
+                                for name in params {
+                                    // One count for the declaration. A second
+                                    // count here makes the return type look
+                                    // up an occurrence the plan never made.
+                                    if seen.get(&name).copied().unwrap_or(0) == 0 {
+                                        seen.insert(name, 1);
+                                    }
+                                }
+                            }
+                        }
+                        push_until(source, out, cursor, span.start as usize);
+                        let mut local = span.start as usize;
+                        apply_arrow_params(source, children, plan, seen, out, &mut local);
+                        if local < span.end as usize {
+                            out.push_str(&source[local..span.end as usize]);
+                        }
+                        *cursor = span.end as usize;
+                        // `: F<B>` is the return type, still in this signature.
+                        let mut rest = index + 1;
+                        if operator_is(nodes.get(rest), ":") {
+                            rest += 1;
+                            let mut end = rest;
+                            while end < nodes.len() && !operator_is(nodes.get(end), ";") && !operator_is(nodes.get(end), "{") && !matches!(nodes.get(end), Some(Syntax::Group { delimiter: Delimiter::Brace, .. })) {
+                                end += 1;
+                                if end > rest + 8 {
+                                    break;
+                                }
+                            }
+                            apply_plan_nodes(source, &nodes[rest..end], plan, seen, false, out, cursor);
+                            if end > rest {
+                                let close = node_end(&nodes[end - 1]);
+                                if *cursor < close {
+                                    out.push_str(&source[*cursor..close]);
+                                    *cursor = close;
+                                }
+                            }
+                            index = end;
+                            continue;
+                        }
+                        index += 1;
+                        continue;
+                    }
+                }
                 if let Some(_params) = arrow_params(nodes, index) {
                     if let Syntax::Group { span, children, .. } = &nodes[index] {
                         // `map<A, B>(a: A)` — the type parameters are binders
-                        // of this arrow. Count them before the parameter list
-                        // or `a` takes `A`'s suffix. Do not rewrite here; the
-                        // prefix is still copied by the caller.
-                        if let Some(params) = nodes[..index].iter().position(|node| operator_is(Some(node), "<")).and_then(|angle| type_param_names(nodes, angle)) {
-                            for name in params {
-                                let n = seen.get(&name).copied().unwrap_or(0);
-                                seen.insert(name, n + 1);
+                        // of this method. Count them before the parameter list
+                        // or `a` takes `A`'s suffix. The prefix is still copied;
+                        // rewrite the `<...>` here so `A` becomes `A_1`.
+                        if let Some(angle) = nodes[..index].iter().rposition(|node| operator_is(Some(node), "<")) {
+                            if let Some(close) = nodes[angle..index].iter().position(|node| operator_is(Some(node), ">")) {
+                                let close_at = angle + close;
+                                // Only the type-parameter list that ends at
+                                // this parameter list. `F<A>` earlier in the
+                                // signature is a use, not this binder.
+                                if close_at + 1 == index && type_param_names(nodes, angle).is_some() {
+                                    push_until(source, out, cursor, node_start(&nodes[angle]));
+                                    out.push('<');
+                                    let mut local = node_end(&nodes[angle]);
+                                    apply_plan_nodes(source, &nodes[angle + 1..close_at], plan, seen, false, out, &mut local);
+                                    if local < node_start(&nodes[close_at]) {
+                                        out.push_str(&source[local..node_start(&nodes[close_at])]);
+                                    }
+                                    out.push('>');
+                                    *cursor = node_end(&nodes[close_at]);
+                                }
                             }
                         }
                         push_until(source, out, cursor, span.start as usize);
@@ -2555,6 +2723,9 @@ fn apply_arrow_params(
                 }
             }
         }
+        if let Syntax::Group { children: nested, .. } = &children[index] {
+            apply_arrow_params(source, nested, plan, seen, out, cursor);
+        }
         index += 1;
     }
 }
@@ -2603,6 +2774,8 @@ fn operator_is(node: Option<&Syntax>, expected: &str) -> bool {
 fn operator_spelling(node: &Syntax) -> Option<&str> {
     match node {
         Syntax::Operator { raw, .. } => Some(raw.as_str()),
+        // `implements` is a word, not a punctuation operator.
+        Syntax::Token { raw, .. } if is_ident_text(raw) => Some(raw.as_str()),
         _ => None,
     }
 }
@@ -2693,6 +2866,41 @@ fn user_spellings(nodes: &[Syntax]) -> std::collections::HashSet<String> {
     names
 }
 
+/// `class Option<A>` and `function id<T>` bind those parameters. A use such
+/// as `F<A>` does not bind `F`.
+fn user_type_params(nodes: &[Syntax]) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    collect_user_type_params(nodes, &mut names);
+    names
+}
+
+fn collect_user_type_params(nodes: &[Syntax], names: &mut std::collections::HashSet<String>) {
+    let mut index = 0;
+    while index < nodes.len() {
+        if operator_is(nodes.get(index), "<") {
+            let head = index.checked_sub(1).and_then(|at| nodes.get(at));
+            let binds = match head {
+                Some(Syntax::Token { raw, .. }) if is_binder_keyword(nodes, index.saturating_sub(2)) || matches!(raw.as_str(), "class" | "interface" | "type" | "function") => true,
+                Some(Syntax::Token { raw, .. }) if index >= 2 && is_binder_keyword(nodes, index - 2) => true,
+                _ => index > 0 && is_binder_keyword(nodes, index - 1),
+            };
+            // `class Option<A>`: `<` follows the class name, and the class
+            // keyword is two tokens back. `function id<T>` is the same.
+            let declares = index >= 2 && is_binder_keyword(nodes, index - 2);
+            if declares {
+                if let Some(params) = type_param_names(nodes, index) {
+                    names.extend(params);
+                }
+            }
+            let _ = binds;
+        }
+        if let Syntax::Group { children, .. } = &nodes[index] {
+            collect_user_type_params(children, names);
+        }
+        index += 1;
+    }
+}
+
 fn collect_user_binders(nodes: &[Syntax], names: &mut std::collections::HashSet<String>) {
     let mut index = 0;
     while index < nodes.len() {
@@ -2701,6 +2909,9 @@ fn collect_user_binders(nodes: &[Syntax], names: &mut std::collections::HashSet<
                 names.insert(name);
             }
         }
+        // `declare class Option<A>` binds `A` only when a macro also
+        // introduces `A`. Recording every type argument would rename `F`
+        // because the user wrote `F<A>`.
         if let Syntax::Group { children, .. } = &nodes[index] {
             collect_user_binders(children, names);
         }
@@ -2743,7 +2954,32 @@ fn is_binder_at(nodes: &[Syntax], index: usize) -> bool {
     if index > 1 && operator_is(nodes.get(index - 1), "*") && is_binder_keyword(nodes, index - 2) {
         return true;
     }
+    // `map<A, B>(value, transform)` — the names in that paren list are binders.
+    if method_param_name(nodes, index) {
+        return true;
+    }
     false
+}
+
+fn method_param_name(nodes: &[Syntax], index: usize) -> bool {
+    let Some(open) = nodes[..index].iter().rposition(|node| matches!(node, Syntax::Group { delimiter: Delimiter::Paren, .. })) else {
+        return false;
+    };
+    if open == 0 || !operator_is(nodes.get(open - 1), ">") {
+        return false;
+    }
+    let Syntax::Group { children, .. } = &nodes[open] else {
+        return false;
+    };
+    let Some(Syntax::Token { span, .. }) = nodes.get(index) else {
+        return false;
+    };
+    children.iter().any(|child| match child {
+        Syntax::Token { span: child_span, raw } => child_span.start == span.start && is_ident_text(raw) && !is_type_name(raw),
+        _ => false,
+    }) && !children.iter().enumerate().any(|(at, child)| {
+        node_start(child) == span.start as usize && at > 0 && operator_is(children.get(at - 1), ":")
+    })
 }
 
 fn syntax_imports(nodes: &[Syntax]) -> Vec<SyntaxImport> {
@@ -2856,6 +3092,9 @@ fn instantiate(
     classes: &[SyntaxClass],
 ) -> String {
     let _ = source;
+    if std::env::var("NL").is_ok() {
+        eprintln!("CAPS {:?}", captures.iter().map(|(k, v)| format!("{k}={}", match v { Capture::Text(t) => t.clone(), Capture::Many(rows) => format!("many{}", rows.len()), Capture::Record { text, .. } => format!("rec{text}") })).collect::<Vec<_>>());
+    }
     let mut out = String::new();
     render(&mut out, template, captures, classes);
     normalize_replacement(&out)
@@ -2883,6 +3122,13 @@ fn unknown_directives(template: &[Tpl]) -> Vec<(String, usize)> {
         }
     }
     found
+}
+
+fn template_is_core_item(template: &[Tpl]) -> bool {
+    template.iter().any(|part| match part {
+        Tpl::Text(text) => text.contains("coreItem"),
+        _ => false,
+    })
 }
 
 fn template_is_core(template: &[Tpl]) -> bool {
@@ -2946,7 +3192,10 @@ fn collect_introduced_source(source: &str, nodes: &[Syntax], names: &mut Vec<Str
             names.extend(params);
         }
         if let Syntax::Group { delimiter: Delimiter::Paren, children, .. } = &nodes[index] {
-            if paren_is_arrow_params(nodes, index) {
+            // Arrow parameters and `map<A, B>(value, transform)`. The second
+            // expansion must not reprint `value` once the first bound it.
+            let after_type_params = index > 0 && operator_is(nodes.get(index - 1), ">");
+            if paren_is_arrow_params(nodes, index) || after_type_params {
                 names.extend(param_names(children));
             }
         }
@@ -3144,6 +3393,16 @@ fn render(
             Tpl::Var(name) => {
                 if let Some(text) = capture_text(captures, name) {
                     out.push_str(text.trim());
+                } else if let Some((root, rest)) = name.split_once('.') {
+                    // `$protocol.register` is a text capture plus a member.
+                    // A field path such as `$method.parameters.name` is not.
+                    if matches!(captures.get(root), Some(Capture::Text(_))) {
+                        if let Some(text) = capture_text(captures, root) {
+                            out.push_str(text.trim());
+                            out.push('.');
+                            out.push_str(rest);
+                        }
+                    }
                 }
             }
             Tpl::Quote(name) => {
@@ -3173,32 +3432,105 @@ fn render(
             Tpl::Define(_) => {}
             Tpl::Unknown { .. } => {}
             Tpl::Rep { inner, sep } => {
-                let rows = rep_rows(inner, captures);
-                for (index, row) in rows.iter().enumerate() {
-                    if index > 0 {
-                        if let Some(sep) = sep {
-                            out.push_str(sep);
-                            if *sep == "," {
-                                out.push(' ');
-                            }
-                        }
-                    }
-                    let mut scoped = captures.clone();
-                    let mut texts = Vec::new();
-                    for (name, value) in row {
-                        if matches!(value, Capture::Text(_)) {
-                            texts.push((name.clone(), value.clone()));
-                        } else {
-                            scoped.insert(name.clone(), value.clone());
-                        }
-                    }
-                    // Field text wins over a class record stored on the same path.
-                    for (name, value) in texts {
-                        scoped.insert(name, value);
-                    }
-                    render(out, inner, &scoped, classes);
+                render_rep(out, inner, sep.as_deref(), captures, classes);
+            }
+        }
+    }
+}
+
+/// `$($state.name: { $($state.moves.event: #text($state.moves.target)),* };)*`
+/// walks one sequence per repetition. The sequence is the longest path
+/// this repetition itself names. Nested repetitions are rendered with
+/// that one record in scope, so `moves` is this state's moves.
+fn render_rep(
+    out: &mut String,
+    inner: &[Tpl],
+    sep: Option<&str>,
+    captures: &HashMap<String, Capture>,
+    classes: &[SyntaxClass],
+) {
+    let mut own = Vec::new();
+    for part in inner {
+        match part {
+            Tpl::Var(name) | Tpl::Quote(name) | Tpl::Count(name) | Tpl::Join { name, .. } => {
+                if !own.contains(name) {
+                    own.push(name.clone());
                 }
             }
+            _ => {}
+        }
+    }
+    // `$($state.name: { $($state.moves.event),* })` has no variable of its
+    // own on the outer row only when this is the inner row. If this row
+    // names nothing, the nested repetition's path is the sequence.
+    if own.is_empty() {
+        collect_vars(inner, &mut own);
+    }
+    let mut path = own.iter().max_by_key(|name| name.len()).map(|name| name.as_str()).unwrap_or("");
+    let mut rows = Vec::new();
+    while !path.is_empty() {
+        if let Some(found) = capture_sequence(captures, path) {
+            if !found.is_empty() {
+                rows = found;
+                break;
+            }
+        }
+        path = path.rsplit_once('.').map(|(parent, _)| parent).unwrap_or("");
+    }
+    if rows.is_empty() {
+        rows = rep_rows(inner, captures);
+    }
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            if let Some(sep) = sep {
+                out.push_str(sep);
+                if sep == "," {
+                    out.push(' ');
+                }
+            }
+        }
+        let mut scoped = HashMap::new();
+        for (key, value) in captures {
+            // Keep bindings that are not this sequence. A field named `name`
+            // is stored on its dotted path; the root `name` stays the protocol.
+            if key == path || key == path.split('.').next().unwrap_or(path) {
+                continue;
+            }
+            if path.starts_with(&format!("{key}.")) {
+                continue;
+            }
+            scoped.insert(key.clone(), value.clone());
+        }
+        for (name, value) in scope_rep_row(path, row) {
+            scoped.insert(name, value);
+        }
+        scope_record_fields(&mut scoped);
+        render(out, inner, &scoped, classes);
+    }
+}
+
+fn scope_record_fields(scoped: &mut HashMap<String, Capture>) {
+    let records: Vec<(String, Capture)> = scoped
+        .iter()
+        .filter(|(_, value)| matches!(value, Capture::Record { .. }))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    for (key, value) in records {
+        let Capture::Record { fields, .. } = value else {
+            continue;
+        };
+        for (field, child) in fields {
+            let dotted = format!("{key}.{field}");
+            // Do not overwrite a binding already called `name`. The protocol
+            // name and a method's `name` field are different captures.
+            if matches!(child, Capture::Text(_)) && !scoped.contains_key(&field) && !key.ends_with(&format!(".{field}")) && key != field {
+                // A field whose leaf is already a root binding (`name`) stays
+                // on the dotted path. Inserting it as `name` hides the protocol.
+                if field != "name" {
+                    scoped.insert(field.clone(), child.clone());
+                }
+            }
+            scoped.insert(dotted, child);
         }
     }
 }
@@ -3272,7 +3604,30 @@ fn substitute_nodes(
             }
         }
         if dollar_at(nodes, index) {
-            if let Some(Syntax::Token { span, raw, .. }) = nodes.get(index + 1) {
+            if let Some((path, end_at, next)) = read_var_path(nodes, index) {
+                // `$protocol.register` is a capture followed by a member.
+                // The member is not part of the path.
+                let value = capture_text(captures, &path).or_else(|| {
+                    path.split('.').next().and_then(|root| capture_text(captures, root))
+                });
+                let (path, end_at, next) = if capture_text(captures, &path).is_none() {
+                    let root = path.split('.').next().unwrap_or(path.as_str()).to_owned();
+                    let end_at = node_start(&nodes[index]) + 1 + root.len();
+                    (root, end_at, index + 2)
+                } else {
+                    (path, end_at, next)
+                };
+                let _ = path;
+                if let Some(value) = value {
+                    push_until(source, out, cursor, node_start(&nodes[index]));
+                    let start = out.len();
+                    out.push_str(value.trim());
+                    protected.push((start, out.len()));
+                    *cursor = end_at;
+                    index = next;
+                    continue;
+                }
+            } else if let Some(Syntax::Token { span, raw, .. }) = nodes.get(index + 1) {
                 if let Some(value) = capture_text(captures, raw) {
                     push_until(source, out, cursor, node_start(&nodes[index]));
                     let start = out.len();
@@ -3347,8 +3702,9 @@ fn substitute_template_literal(raw: &str, captures: &HashMap<String, Capture>) -
                 }
             }
         }
-        out.push(bytes[index] as char);
-        index += 1;
+        let ch = raw[index..].chars().next().unwrap_or('\u{FFFD}');
+        out.push(ch);
+        index += ch.len_utf8();
     }
     out
 }
@@ -3464,6 +3820,34 @@ fn string_literal(text: &str) -> String {
 }
 
 fn capture_text<'a>(captures: &'a HashMap<String, Capture>, name: &str) -> Option<&'a str> {
+    // `$name` is the root binding. A scoped field also called `name`
+    // belongs to `$method.name`, not to the protocol.
+    if !name.contains('.') {
+        if let Some(Capture::Text(text)) = captures.get(name) {
+            if !text.trim().is_empty() {
+                return Some(text.as_str());
+            }
+        }
+    }
+    // A repetition scopes `state.name` as text on that path. That wins
+    // over the parent record. A different field that also ends in `name`
+    // (`method.name`) must not fill `method.parameters.name`.
+    if name.contains('.') {
+        if let Some(Capture::Text(text)) = captures.get(name) {
+            if !text.trim().is_empty() {
+                return Some(text.as_str());
+            }
+        }
+        if let Some((parent, leaf)) = name.rsplit_once('.') {
+            if matches!(captures.get(parent), Some(Capture::Record { .. })) {
+                if let Some(Capture::Text(text)) = captures.get(leaf) {
+                    if !text.trim().is_empty() {
+                        return Some(text.as_str());
+                    }
+                }
+            }
+        }
+    }
     let value = capture_at(captures, name)?;
     if name.contains('.') {
         if let Capture::Text(text) = value {
@@ -3525,17 +3909,10 @@ fn capture_at<'a>(captures: &'a HashMap<String, Capture>, path: &str) -> Option<
                 }
                 return Some(value);
             }
-            Capture::Many(rows) => {
-                // `$state.moves.event` while `moves` is still the sequence:
-                // the field lives on each element. Callers that repeat on
-                // `moves` scope one element first.
-                let _ = field;
-                return rows.first().and_then(|row| {
-                    row.iter().find_map(|(_, element)| match element {
-                        Capture::Record { fields, .. } => capture_field(fields, field),
-                        _ => None,
-                    })
-                });
+            Capture::Many(_) => {
+                // A field of a sequence is itself a sequence. `capture_at`
+                // cannot return an owned projection; `capture_sequence` does.
+                return None;
             }
             Capture::Text(_) => return None,
         };
@@ -3545,6 +3922,68 @@ fn capture_at<'a>(captures: &'a HashMap<String, Capture>, path: &str) -> Option<
 
 fn capture_field<'a>(fields: &'a HashMap<String, Capture>, name: &str) -> Option<&'a Capture> {
     fields.get(name)
+}
+
+/// `$state.moves` while `state` is a sequence of records. Each row contributes
+/// that field, so a nested repetition sees every move, not the first state's.
+fn capture_sequence(captures: &HashMap<String, Capture>, path: &str) -> Option<Vec<Vec<(String, Capture)>>> {
+    if let Some(Capture::Many(rows)) = captures.get(path) {
+        return Some(rows.clone());
+    }
+    let (root, rest) = path.split_once('.')?;
+    let mut value = captures.get(root)?.clone();
+    let mut walked = root.to_owned();
+    for field in rest.split('.') {
+        walked.push('.');
+        walked.push_str(field);
+        // A dotted path walks the record already in hand. A stored sequence
+        // on this path is only the answer when that record has no such field.
+        if let Capture::Record { fields, .. } = &value {
+            if let Some(child) = fields.get(field) {
+                value = child.clone();
+                continue;
+            }
+        }
+        if let Some(Capture::Many(rows)) = captures.get(&walked) {
+            value = Capture::Many(rows.clone());
+            continue;
+        }
+        value = match value {
+            Capture::Record { fields, .. } => fields.get(field)?.clone(),
+            Capture::Many(rows) => {
+                let projected: Vec<Vec<(String, Capture)>> = rows
+                    .iter()
+                    .filter_map(|row| {
+                        let record = row.iter().find_map(|(_, element)| match element {
+                            Capture::Record { .. } => Some(element.clone()),
+                            _ => None,
+                        });
+                        let element = row.iter().find_map(|(_, element)| match element {
+                            Capture::Record { fields, .. } => fields.get(field).cloned(),
+                            other if row.len() == 1 => Some(other.clone()),
+                            _ => None,
+                        })?;
+                        let mut one = vec![(field.to_owned(), element)];
+                        // The field text is what this path names. The record
+                        // stays so a nested field (`moves`) is still reachable.
+                        if let Some(record) = record {
+                            one.push(("".to_owned(), record));
+                        }
+                        Some(one)
+                    })
+                    .collect();
+                if projected.is_empty() {
+                    return None;
+                }
+                Capture::Many(projected)
+            }
+            Capture::Text(_) => return None,
+        };
+    }
+    match value {
+        Capture::Many(rows) => Some(rows),
+        other => Some(vec![vec![(path.rsplit('.').next().unwrap_or(path).to_owned(), other)]]),
+    }
 }
 
 fn capture_count(captures: &HashMap<String, Capture>, name: &str) -> usize {
@@ -3650,20 +4089,44 @@ fn rep_rows(inner: &[Tpl], captures: &HashMap<String, Capture>) -> Vec<Vec<(Stri
     // A nested field (`$state.moves.event`) repeats on the sequence it
     // walks through, not on the leaf. The longest path that is a sequence
     // is that repetition.
-    let mut best: Option<(&str, &Vec<Vec<(String, Capture)>>, usize)> = None;
-    for name in &names {
+    let mut best: Option<(String, Vec<Vec<(String, Capture)>>, usize)> = None;
+    // Names this repetition writes itself. A nested `$($moves),*` is a
+    // different repetition; using its path here prints moves where the
+    // outer row should print states.
+    let mut own = Vec::new();
+    for part in inner {
+        match part {
+            Tpl::Var(name) | Tpl::Quote(name) | Tpl::Count(name) | Tpl::Join { name, .. } => {
+                if !own.contains(name) {
+                    own.push(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let walked = if own.is_empty() { &names } else { &own };
+    for name in walked {
         let mut path = name.as_str();
         while !path.is_empty() {
-            if let Some(Capture::Many(rows)) = capture_at(captures, path) {
-                let covers = names.iter().filter(|name| name.starts_with(path) || path.starts_with(name.as_str())).count();
-                let better = best.is_none_or(|(have_path, _have, have_covers)| {
+            if let Some(rows) = capture_sequence(captures, path) {
+                // A scoped row still has the outer `state` sequence in the
+                // cloned map. Walk a sequence only when this scope stored
+                // it, or when nothing has been scoped yet.
+                let scoped_here = captures.contains_key(path) && matches!(captures.get(path), Some(Capture::Many(_)));
+                let unscoped = !captures.keys().any(|key| key.contains('.'));
+                if !scoped_here && !unscoped {
+                    path = path.rsplit_once('.').map(|(parent, _)| parent).unwrap_or("");
+                    continue;
+                }
+                let covers = walked.iter().filter(|name| name.starts_with(path) || path.starts_with(name.as_str())).count();
+                let better = best.as_ref().is_none_or(|(have_path, _have, have_covers)| {
                     // The longest sequence the template names is the one
                     // this repetition walks. `$state.moves.event` repeats
                     // moves, not states, even when both cover the names.
-                    path.len() > have_path.len() || (path.len() == have_path.len() && covers > have_covers)
+                    path.len() > have_path.len() || (path.len() == have_path.len() && covers > *have_covers)
                 });
                 if better {
-                    best = Some((path, rows, covers));
+                    best = Some((path.to_owned(), rows, covers));
                 }
                 break;
             }
@@ -3671,6 +4134,7 @@ fn rep_rows(inner: &[Tpl], captures: &HashMap<String, Capture>) -> Vec<Vec<(Stri
         }
     }
     if let Some((path, rows, _)) = best {
+        let path = path.as_str();
         let scoped: Vec<Vec<(String, Capture)>> = rows
             .iter()
             .map(|row| scope_rep_row(path, row))
@@ -3735,14 +4199,33 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
     let leaf = path.rsplit('.').next().unwrap_or(path);
     let element = row
         .iter()
-        .find(|(key, value)| (key == leaf || key == path) && !matches!(value, Capture::Text(_)))
+        .find(|(key, value)| (key == leaf || key == path) && matches!(value, Capture::Record { .. }))
+        .or_else(|| {
+            // `state.name` is text, but the same row still holds the state
+            // record. Keep that record so a nested `$state.moves` can walk it.
+            row.iter().find(|(_, value)| matches!(value, Capture::Record { .. }))
+        })
+        .or_else(|| row.iter().find(|(key, value)| (key == leaf || key == path) && !matches!(value, Capture::Text(_))))
         .or_else(|| row.iter().find(|(key, _)| key == leaf || key == path))
         .or_else(|| row.first())
         .map(|(_, value)| value.clone());
     if let Some(element) = element {
         // A row keyed by a field (`event`) still holds the class record.
         // Store that record on the sequence path (`state.moves`) and the
-        // field text on the field path.
+        // field text on the field path. A text row (`name: "Closed"`)
+        // stays under the leaf so `$state.name` does not look up the
+        // machine binding also called `name`.
+        if let Capture::Text(text) = &element {
+            // `method.name` is text, but `name` is also the protocol binding.
+            // Keep the field on the path the template wrote.
+            if path.contains('.') {
+                scoped.push((path.to_owned(), Capture::Text(text.clone())));
+            } else {
+                scoped.push((leaf.to_owned(), Capture::Text(text.clone())));
+                scoped.push((path.to_owned(), Capture::Text(text.clone())));
+            }
+            return scoped;
+        }
         let record_path = if matches!(element, Capture::Record { .. }) && path.ends_with(&format!(".{leaf}")) {
             path.trim_end_matches(&format!(".{leaf}")).to_owned()
         } else {
@@ -3751,8 +4234,14 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
         scoped.push((record_path.clone(), element.clone()));
         if let Capture::Record { fields, .. } = &element {
             for (field, value) in fields {
-                if matches!(value, Capture::Record { .. }) {
-                    continue;
+                // `name: text("Closed")` must stay visible as text. The
+                // record on `state` is the form; `$state.name` is the field.
+                // Do not also store it as the bare leaf when that leaf is
+                // already the outer binding (`protocol $name`).
+                if let Capture::Text(text) = value {
+                    if field != "name" || path == field {
+                        scoped.push((field.clone(), Capture::Text(text.clone())));
+                    }
                 }
                 let mut child = record_path.clone();
                 child.push('.');

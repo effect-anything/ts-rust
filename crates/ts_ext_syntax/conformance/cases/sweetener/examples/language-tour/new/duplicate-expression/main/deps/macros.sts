@@ -1,3 +1,0 @@
-export syntax duplicate:expr {
-  rule { duplicate($value:expr) } => { [$value, $value] }
-}

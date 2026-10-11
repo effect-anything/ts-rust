@@ -1,1 +1,13 @@
-/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/examples/language-tour/new/generated-pair-class/main/deps/macros.sts
+export syntax pair:item {
+  rule { pair $name:binding<$leftType:type, $rightType:type>; }
+  bind $name in following as recursive type;
+  bind $name in following as recursive value;
+  => {
+    class $name {
+      constructor(
+        readonly left: $leftType,
+        readonly right: $rightType,
+      ) {}
+    }
+  }
+}

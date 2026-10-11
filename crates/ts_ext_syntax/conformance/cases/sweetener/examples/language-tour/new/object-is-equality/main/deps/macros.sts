@@ -1,8 +1,0 @@
-export operator (==):expr shadows core {
-  fixity infix;
-  associativity none;
-  precedence 30;
-  rule { $left:expr == $right:expr } => {
-    globalThis.Object.is($left, $right)
-  }
-}

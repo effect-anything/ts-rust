@@ -1,8 +1,0 @@
-{
-  "exports": {
-    "rendered": [
-      "<ul><li>ready</li><li>0: Alpha</li><li>1: Beta</li></ul>",
-      "<ul><li>loading</li><li>nothing here</li></ul>"
-    ]
-  }
-}

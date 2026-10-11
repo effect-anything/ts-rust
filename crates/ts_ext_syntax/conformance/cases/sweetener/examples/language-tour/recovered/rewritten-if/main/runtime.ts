@@ -1,1 +1,0 @@
-/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/examples/language-tour/recovered/rewritten-if/main/deps/runtime.ts

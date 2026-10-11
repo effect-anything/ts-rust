@@ -1,5 +1,0 @@
-export syntax guard:stmt {
-  rule { guard ($condition:expr) else $body:stmt } => {
-    if (!($condition)) $body
-  }
-}

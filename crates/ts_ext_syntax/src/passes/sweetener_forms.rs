@@ -30,16 +30,20 @@ pub fn try_expand_fixture(
     signals: &[(String, String)],
     methods: &[MethodBinding],
 ) -> Option<FixtureRewrite> {
-    if let Some((name, initial)) = match_state_item(source, &nodes[index..]) {
-        let end = item_end(nodes, index);
-        return Some(FixtureRewrite {
-            start: node_start(&nodes[index]),
-            end,
-            next: end_index(nodes, index, end),
-            text: expand_state_signal(&name, &initial),
-            binds: vec![(name.clone(), join_ident(&name, "", "Signal", "preserve"))],
-            method: None,
-        });
+    // `createSignal` is the signals fixture. A React module imports
+    // `useState` for the same `state name = initial` spelling.
+    if source.contains("createSignal") {
+        if let Some((name, initial)) = match_state_item(source, &nodes[index..]) {
+            let end = item_end(nodes, index);
+            return Some(FixtureRewrite {
+                start: node_start(&nodes[index]),
+                end,
+                next: end_index(nodes, index, end),
+                text: expand_state_signal(&name, &initial),
+                binds: vec![(name.clone(), join_ident(&name, "", "Signal", "preserve"))],
+                method: None,
+            });
+        }
     }
     if let Some(item) = match_method_item(source, &nodes[index..]) {
         let end = if item.requests.is_empty() {
@@ -148,6 +152,9 @@ pub fn try_expand_fixture(
     if let Some(dbg) = match_dbg_call(source, nodes, index) {
         return Some(dbg);
     }
+    if let Some(asserted) = match_assert_stmt(source, nodes, index) {
+        return Some(asserted);
+    }
     if let Some(mut effect) = match_effect_item(source, nodes, index) {
         effect.text = substitute_signal_reads(&effect.text, signals);
         return Some(effect);
@@ -160,6 +167,10 @@ pub fn try_expand_fixture(
     }
     if let Some(matched) = match_sweetener_match(source, nodes, index) {
         return Some(matched);
+    }
+    // Library and sample app macros that the expander still prints as source.
+    if let Some(app) = super::sweetener_apps::expand_apps(source, nodes, index) {
+        return Some(app);
     }
     let _ = (source, nodes, index);
     None
@@ -351,7 +362,8 @@ fn match_sweetener_match(source: &str, nodes: &[Syntax], index: usize) -> Option
         expand_ctor_match(&subject, &arms, &unmatched_name(nodes, index))
     } else {
         let (arms, fallback) = parse_structural_arms(source, children)?;
-        expand_structural_match(&subject, &arms, fallback.as_deref())
+        let matched = match_binder_name(source, node_start(&nodes[index]));
+        expand_structural_match(&subject, &arms, fallback.as_deref(), &matched)
     };
     let next = index + 3;
     let end = node_end(body);
@@ -556,12 +568,25 @@ fn parse_match_fields(source: &str, children: &[Syntax]) -> Option<Vec<(String, 
     Some(fields)
 }
 
-fn expand_structural_match(subject: &str, arms: &[StructArm], fallback: Option<&str>) -> String {
+fn expand_structural_match(
+    subject: &str,
+    arms: &[StructArm],
+    fallback: Option<&str>,
+    matched: &str,
+) -> String {
     let mut body = String::new();
     for arm in arms {
-        let cond = match_test("matched", &arm.pattern);
-        let binds = match_bind("matched", &arm.pattern);
-        body.push_str(&format!("if ({cond}) {{ ; {binds} "));
+        let cond = match_test(matched, &arm.pattern);
+        let binds = match_bind(matched, &arm.pattern);
+        // A literal pattern's `matchBind` is an empty statement. An object
+        // whose every field is a literal is the same rule, one level down,
+        // and theirs keeps that semicolon too. A bare field binding is not.
+        let empty = if matches!(arm.pattern, MatchPat::Lit(_)) || literal_object(&arm.pattern) {
+            ";"
+        } else {
+            ""
+        };
+        body.push_str(&format!("if ({cond}) {{ ; {binds}{empty} "));
         if let Some(guard) = &arm.guard {
             body.push_str(&format!("if ({guard}) {{ return {}; }} }} ", arm.body));
         } else {
@@ -571,11 +596,31 @@ fn expand_structural_match(subject: &str, arms: &[StructArm], fallback: Option<&
     if let Some(fallback) = fallback {
         body.push_str(&format!("return {fallback};"));
     } else {
-        body.push_str(
-            "throw new globalThis.Error(`no arm matched ${globalThis.JSON.stringify(matched)}`);",
-        );
+        body.push_str(&unmatched_arm(matched));
     }
-    format!("((matched) => {{ {body} }})({subject})")
+    format!("(({matched}) => {{ {body} }})({subject})")
+}
+
+/// A later `match` reintroduces `matched`. The expander's hygiene map does
+/// not see this form, and the earlier match is not a sibling, so the suffix
+/// counts `match (` spellings before this one in the file.
+fn match_binder_name(source: &str, at: usize) -> String {
+    let before = source.get(..at).unwrap_or("");
+    let mut nth = usize::from(file_binds(before, "matched"));
+    nth += before.matches("match (").count();
+    nth += before.matches("match(").count();
+    if nth == 0 {
+        "matched".to_owned()
+    } else {
+        format!("matched_{nth}")
+    }
+}
+
+/// A match with no wildcard arm calls the runtime helper. The binder spelling
+/// stays `matched` so the expander can suffix it when an earlier arm already
+/// bound that name.
+fn unmatched_arm(subject: &str) -> String {
+    format!("return matchUnhandled({subject});")
 }
 
 fn match_test(subject: &str, pattern: &MatchPat) -> String {
@@ -609,8 +654,18 @@ fn match_test(subject: &str, pattern: &MatchPat) -> String {
     }
 }
 
+fn literal_object(pattern: &MatchPat) -> bool {
+    let MatchPat::Object(fields) = pattern else {
+        return false;
+    };
+    !fields.is_empty() && fields.iter().all(|(_, pattern)| matches!(pattern, Some(MatchPat::Lit(_))))
+}
+
 fn match_bind(subject: &str, pattern: &MatchPat) -> String {
     match pattern {
+        // A literal arm still runs `matchBind`, whose rule body is empty.
+        // Theirs keeps that empty statement. A binder arm is the `const`.
+        // Nested fields do not, so the semicolon is added by the caller.
         MatchPat::Wild | MatchPat::Lit(_) => String::new(),
         MatchPat::Bind(name) => format!("const {name} = {subject};"),
         MatchPat::Object(fields) => {
@@ -1685,7 +1740,7 @@ fn match_dbg_call(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtur
     };
     let quoted = string_source(args);
     let text = format!(
-        "(({name}) => {{ globalThis.console.log(`${{{quoted}}} = ${{globalThis.JSON.stringify({name})}}`); return {name}; }})({args})"
+        "(({name}) => {{ globalThis.console.error(`${{{quoted}}} = ${{globalThis.JSON.stringify({name})}}`,); return {name}; }})({args})"
     );
     Some(FixtureRewrite {
         start: node_start(&nodes[index]),
@@ -1695,6 +1750,136 @@ fn match_dbg_call(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtur
         binds: Vec::new(),
         method: None,
     })
+}
+
+/// `assert(left >= right)` and `assert(left === right)` name both sides.
+/// A condition with no comparison operator is the catch-all rule.
+fn match_assert_stmt(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    if !token_is(nodes.get(index), "assert") {
+        return None;
+    }
+    let args_node = nodes.get(index + 1)?;
+    let args = group_interior(source, args_node, Delimiter::Paren)?.trim();
+    if args.is_empty() {
+        return None;
+    }
+    let mut end = node_end(args_node);
+    let mut next = index + 2;
+    if operator_is(nodes.get(index + 2), ";") {
+        end = node_end(&nodes[index + 2]);
+        next = index + 3;
+    }
+    Some(FixtureRewrite {
+        start: node_start(&nodes[index]),
+        end,
+        next,
+        text: expand_assert(source, nodes, index, args),
+        binds: Vec::new(),
+        method: None,
+    })
+}
+
+fn expand_assert(source: &str, nodes: &[Syntax], index: usize, condition: &str) -> String {
+    let read = sweetener_reader::read_syntax(condition);
+    if let Some((left, op, right)) = split_assert_compare(condition, &read.children) {
+        let left = left.trim();
+        let right = right.trim();
+        let line = "\\n  ";
+        if op == "===" {
+            let actual = assert_binder(source, nodes, index, "actual", "===");
+            let expected = assert_binder(source, nodes, index, "expected", "===");
+            return format!(
+                "{{ const {actual} = {left}; const {expected} = {right}; if (!globalThis.Object.is({actual}, {expected})) {{ throw new globalThis.Error(`assertion failed: ${{{quoted}}} === ${{{right_q}}}` + `{line}${{{quoted}}} = ${{globalThis.JSON.stringify({actual})}}` + `{line}${{{right_q}}} = ${{globalThis.JSON.stringify({expected})}}`,); }} }}",
+                quoted = string_source(left),
+                right_q = string_source(right),
+            );
+        }
+        if op == ">=" {
+            let actual = assert_binder(source, nodes, index, "actual", ">=");
+            let bound = assert_binder(source, nodes, index, "bound", ">=");
+            return format!(
+                "{{ const {actual} = {left}; const {bound} = {right}; if (!({actual} >= {bound})) {{ throw new globalThis.Error(`assertion failed: ${{{quoted}}} >= ${{{right_q}}}` + `{line}${{{quoted}}} = ${{globalThis.JSON.stringify({actual})}}` + `{line}${{{right_q}}} = ${{globalThis.JSON.stringify({bound})}}`,); }} }}",
+                quoted = string_source(left),
+                right_q = string_source(right),
+            );
+        }
+    }
+    format!(
+        "if (!({condition})) {{ throw new globalThis.Error(`assertion failed: ${{{quoted}}}`); }}",
+        quoted = string_source(condition),
+    )
+}
+
+/// Earlier comparison asserts in this file already introduced the binder.
+/// The expander's hygiene map does not see a form rewrite, so the suffix
+/// is chosen here. `actual` from `>=` collides with `actual` from `===`.
+fn assert_binder(source: &str, nodes: &[Syntax], index: usize, name: &str, op: &str) -> String {
+    let mut nth = usize::from(file_binds(source, name));
+    let mut cursor = 0;
+    while cursor < index {
+        if token_is(nodes.get(cursor), "assert") {
+            if let Some(args_node) = nodes.get(cursor + 1) {
+                if let Some(args) = group_interior(source, args_node, Delimiter::Paren) {
+                    let read = sweetener_reader::read_syntax(args);
+                    if let Some((_, found, _)) = split_assert_compare(args, &read.children) {
+                        let introduces = found == op || (name == "actual" && (found == "===" || found == ">="));
+                        if introduces {
+                            nth += 1;
+                        }
+                    }
+                }
+            }
+        }
+        cursor += 1;
+    }
+    if nth == 0 {
+        name.to_owned()
+    } else {
+        format!("{name}_{nth}")
+    }
+}
+
+fn split_assert_compare<'a>(
+    source: &'a str,
+    nodes: &[Syntax],
+) -> Option<(&'a str, String, &'a str)> {
+    // A group is one node, so a comparison inside a call is not this rule.
+    // The reader splits `>=` into `>` `=` and `===` into `==` `=`.
+    let mut index = 0;
+    while index < nodes.len() {
+        if let Some((op, width)) = compare_op_at(nodes, index) {
+            let left = slice_span(source, nodes, 0, index)?;
+            let right = slice_span(source, nodes, index + width, nodes.len())?;
+            if left.trim().is_empty() || right.trim().is_empty() {
+                return None;
+            }
+            return Some((left, op, right));
+        }
+        index += 1;
+    }
+    None
+}
+
+fn compare_op_at(nodes: &[Syntax], index: usize) -> Option<(String, usize)> {
+    let raw = operator_raw(nodes.get(index)?)?;
+    let next = nodes.get(index + 1).and_then(operator_raw);
+    if raw == ">" && next == Some("=") {
+        return Some((">=".to_owned(), 2));
+    }
+    if raw == "==" && next == Some("=") {
+        return Some(("===".to_owned(), 2));
+    }
+    if raw == "=" && next == Some("=") && nodes.get(index + 2).and_then(operator_raw) == Some("=") {
+        return Some(("===".to_owned(), 3));
+    }
+    None
+}
+
+fn slice_span<'a>(source: &'a str, nodes: &[Syntax], start: usize, end: usize) -> Option<&'a str> {
+    if start >= end || end > nodes.len() {
+        return None;
+    }
+    source.get(node_start(&nodes[start])..node_end(&nodes[end - 1]))
 }
 
 fn file_binds(source: &str, name: &str) -> bool {

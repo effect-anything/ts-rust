@@ -1,1 +1,8 @@
-/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/examples/language-tour/new/power-operator/main/deps/macros.sts
+export operator (**):expr shadows core {
+  fixity infix;
+  associativity right;
+  precedence 70;
+  rule { $base:expr ** $exponent:expr } => {
+    globalThis.Math.pow($base, $exponent)
+  }
+}

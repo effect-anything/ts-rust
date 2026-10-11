@@ -1,7 +1,0 @@
-{
-  "exports": {
-    "threadFirst": [3, 4],
-    "threadLast": [3, 4, 5],
-    "result": [3, 4]
-  }
-}

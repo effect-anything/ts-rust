@@ -17,33 +17,13 @@ export const posts = pgTable("posts", {
   });
 
 export const feed = (db: NodePgDatabase, minAge: number) =>
-query(db) {
-  select { author: users.name, title: posts.title }
-  from users
-  join posts on posts.authorId == users.id
-  where users.age >= minAge and posts.published == true
-  order by users.name, posts.id desc
-  limit 20
-};
+db.select({ author: users.name, title: posts.title }).from(users).innerJoin(posts, eq(posts.authorId, users.id)).where(and(gte(users.age, minAge), eq(posts.published, true))).orderBy(asc(users.name), desc(posts.id)).limit(20);
 
 export const everyone = (db: NodePgDatabase) =>
-query(db) {
-  select { id: users.id, name: users.name }
-  from users
-};
+db.select({ id: users.id, name: users.name }).from(users);
 
 export const quiet = (db: NodePgDatabase, name: string) =>
-query(db) {
-  select { name: users.name, title: posts.title }
-  from users
-  left join posts on posts.authorId == users.id and posts.id > 0
-  where users.name != name and users.age < 65 and users.age <= 64
-  order by users.age desc
-};
+db.select({ name: users.name, title: posts.title }).from(users).leftJoin(posts, and(eq(posts.authorId, users.id), gt(posts.id, 0))).where(and(ne(users.name, name), lt(users.age, 65), lte(users.age, 64))).orderBy(desc(users.age));
 
 export const either = (db: NodePgDatabase, name: string) =>
-query(db) {
-  select { name: users.name }
-  from users
-  where users.name == name or users.age > 65 and (users.id < 10 or users.id > 100)
-};
+db.select({ name: users.name }).from(users).where(or(eq(users.name, name), and(gt(users.age, 65), or(lt(users.id, 10), gt(users.id, 100)))));

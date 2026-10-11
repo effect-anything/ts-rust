@@ -4,9 +4,9 @@ export function exact(
       value: number
     ): number {
       if (arguments.length !== globalThis.Number(1)) {
-        throw (new globalThis.Error(
+        throw new globalThis.Error(
           "exact" + " requires " + globalThis.Number(1) + " argument(s)",
-        ));
+        );
       }
       return value;
     }

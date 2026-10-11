@@ -1,5 +1,0 @@
-export syntax wrap:expr {
-  rule { wrap($value:expr, $left:expr, $right:expr) } => {
-    `${$left}${$value}${$right}`
-  }
-}

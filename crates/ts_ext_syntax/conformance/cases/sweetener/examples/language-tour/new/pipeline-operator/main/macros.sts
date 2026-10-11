@@ -1,1 +1,6 @@
-/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/examples/language-tour/new/pipeline-operator/main/deps/macros.sts
+export operator (|>):expr {
+  fixity infix;
+  associativity left;
+  precedence 40;
+  rule { $value:expr |> $callee:ident } => { $callee($value) }
+}

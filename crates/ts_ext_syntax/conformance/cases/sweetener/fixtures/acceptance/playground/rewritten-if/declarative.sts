@@ -1,1 +1,19 @@
-/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/rewritten-if/deps/declarative.sts
+import { IF } from "./runtime.js";
+
+export syntax if:stmt shadows core {
+  rule {
+    if ($predicate:expr) {
+      return $trueValue:expr;
+    } else {
+      return $falseValue:expr;
+    }
+  }
+  expect "return statement in else block"
+  => {
+    return IF(
+      $predicate,
+      () => $trueValue,
+      () => $falseValue,
+    )();
+  }
+}

@@ -1,18 +1,18 @@
 
 
 export function add(
-      (left: number, right: number).first: (left: number, right: number).firstType
-    ): ((left: number, right: number).second: (left: number, right: number).secondType) => number;
+      left: number
+    ): (right: number) => number;
     export function add(
-      (left: number, right: number).first: (left: number, right: number).firstType,
-      (left: number, right: number).second: (left: number, right: number).secondType
+      left: number,
+      right: number
     ): number;
     export function add(
-      (left: number, right: number).first: (left: number, right: number).firstType,
-      (left: number, right: number).second?: (left: number, right: number).secondType,
-    ): number | (((left: number, right: number).second: (left: number, right: number).secondType) => number) {
-      if ((left: number, right: number).second === undefined) {
-        return ((left: number, right: number).second: (left: number, right: number).secondType): number => { return left + right; };
+      left: number,
+      right?: number,
+    ): number | ((right: number) => number) {
+      if (right === undefined) {
+        return (right: number): number => { return left + right; };
       }
       return left + right;
     }

@@ -1,0 +1,12 @@
+import { each } from "./macros.sts" for syntax;
+import { Fragment, h } from "./jsx-runtime.js";
+
+void h;
+void Fragment;
+
+export const mapped = (
+  <ul>
+    {each ([1, 2] as item)}
+      <li>{item}</li>
+  </ul>
+);

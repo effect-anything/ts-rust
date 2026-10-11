@@ -1,5 +1,0 @@
-export syntax logWhen:stmt {
-  rule { logWhen($condition:expr, $value:expr); } => {
-    if ($condition) { globalThis.console.log($value); }
-  }
-}

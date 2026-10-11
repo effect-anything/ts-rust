@@ -1,3 +1,0 @@
-export syntax optional:type {
-  rule { optional<$value:type> } => { $value | undefined }
-}

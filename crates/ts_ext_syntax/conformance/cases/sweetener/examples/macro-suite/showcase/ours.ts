@@ -16,10 +16,10 @@ const fallbackResult = missingCardResult ?? "backup arrived";
 const pipelineResult = shout("quiet words");
 const surroundedResult = `${"🎩 "}${"tiny hat"}${" 🐸"}`;
 const dramaticResult = `${"behold"}!!!`;
-const confettiResult = `ð ${"ship it"} ð`;
+const confettiResult = `🎉 ${"ship it"} 🎉`;
 const titleResult = shout("Sweetener macro carnival");
 const subtitleResult = optionalSubtitle ?? "One source module, many frameworks";
-const heroResult = `ð ${dramaticResult} ð`;
+const heroResult = `🎉 ${dramaticResult} 🎉`;
 
 function runAudit(): string[] {
   const audit: string[] = [];

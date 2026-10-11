@@ -9,4 +9,4 @@ const list: Cons | undefined = new Cons(
   1,
   new Cons(3, new Empty()),
 );
-export const result = last()(list);
+export const result = last(list);

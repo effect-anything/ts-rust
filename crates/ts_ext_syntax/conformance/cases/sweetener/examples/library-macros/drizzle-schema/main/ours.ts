@@ -10,28 +10,16 @@ import {
 } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
-          id.name: id.kind.builder  { id.kind.arguments } #else { () }
-             {} #else { .notNull() }
-             { .primaryKey() }
-              #else {  { .unique() }
-                #else {  { .defaultNow() }
-                  #else { .default(id.modifiers.value) } } }
-        })
-
-    export type User = typeof users.$;
-    export type NewUser = typeof users.$
+id: serial().notNull().primaryKey(), email: varchar({ length: 255 }).notNull().unique(), name: text().notNull(), bio: text(), createdAt: timestamp().notNull().defaultNow()
+})
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
 
 export const posts = pgTable("posts", {
-          id.name: id.kind.builder  { id.kind.arguments } #else { () }
-             {} #else { .notNull() }
-             { .primaryKey() }
-              #else {  { .unique() }
-                #else {  { .defaultNow() }
-                  #else { .default(id.modifiers.value) } } }
-        })
-
-    export type Post = typeof posts.$;
-    export type NewPost = typeof posts.$
+id: serial().notNull().primaryKey(), authorId: integer().notNull(), title: text().notNull(), published: boolean().notNull().default(false)
+})
+export type Post = typeof posts.$inferSelect;
+export type NewPost = typeof posts.$inferInsert;
 
 // Both types are ordinary Drizzle inference, so they track the columns.
 export const draft: NewPost = { authorId: 1, title: "Hello" };

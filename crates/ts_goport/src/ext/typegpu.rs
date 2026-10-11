@@ -235,7 +235,13 @@ pub fn embed_metadata(filename: &str, code: &str) -> String {
         eprintln!("ALIASES {aliases:?}");
     }
     let mut edits = Vec::new();
-    collect_wraps(file.root, leaked, &aliases, &mut edits);
+    collect_wraps(
+        file.root,
+        leaked,
+        &aliases,
+        auto_name_for(filename),
+        &mut edits,
+    );
     if std::env::var("DBG").is_ok() {
         eprintln!("EDITS {}", edits.len());
         for edit in &edits {
@@ -328,9 +334,10 @@ fn collect_wraps(
     root: Node,
     code: &str,
     aliases: &std::collections::BTreeSet<String>,
+    auto_name: bool,
     edits: &mut Vec<WrapEdit>,
 ) {
-    let mut work = Build::new(code, aliases.clone());
+    let mut work = Build::new(code, aliases.clone(), auto_name);
     walk_wraps(root, &mut work, edits);
 }
 
@@ -382,7 +389,8 @@ fn walk_wraps(node: Node, work: &mut Build, edits: &mut Vec<WrapEdit>) {
     {
         return;
     }
-    if let Some((label, expression)) = labelled(node)
+    if work.auto_name
+        && let Some((label, expression)) = labelled(node)
         && contains_resource(expression, work)
         && !already_autonamed(expression)
         && let Some(edit) = edit_for_autoname(expression, &label, work)
@@ -452,19 +460,8 @@ fn edit_for_function(node: Node, work: &mut Build, marked: bool) -> Option<WrapE
                 let line = work.code[..start].rfind('\n').map(|at| at + 1).unwrap_or(0);
                 line
             };
-            let mut wrapper = wrapper.to_owned();
-            // An empty arrow is printed `() => {` on its own line. The
-            // binding name has to stay on that line: the payload comparison
-            // only keeps lines that contain `() =>`.
-            if node.kind() == SyntaxKind::ArrowFunction
-                && node.parameters().is_empty()
-                && parent.kind() == SyntaxKind::VariableDeclaration
-                && parent.initializer() == node
-                && parent.name().kind() == SyntaxKind::Identifier
-            {
-                let name = parent.name().text();
-                wrapper = format!("const {name} = {wrapper}");
-            }
+            // The declaration already owns `const name =`. Reprinting it
+            // inside the replacement wrote `const fn = const fn =`.
             let body = indent_continuations(&wrapper, column_at(work.code.as_str(), column));
             if parent.kind() == SyntaxKind::ExportAssignment {
                 format!(" {body}")
@@ -929,7 +926,11 @@ fn join_export_default(text: &str) -> String {
         // An autoname splice lands on the next line. Payload comparison
         // keeps a line only when it contains `() =>`, so the binding stays
         // with the wrapper.
-        let join = export_default || trimmed.ends_with('=') || trimmed.ends_with('(');
+        // A line that already ends in `const` is a finished keyword, not
+        // an unfinished binding. Joining it printed `const fn = const fn =`.
+        let join = export_default
+            || (trimmed.ends_with('=') && !trimmed.trim_end().ends_with("const"))
+            || trimmed.ends_with('(');
         if join {
             let indent = lines[index].chars().take_while(|c| *c == ' ').count();
             let head = if export_default { "export default" } else { trimmed.trim() };
@@ -955,10 +956,12 @@ struct Build {
     aliases: std::collections::BTreeSet<String>,
     changed: bool,
     depth: u32,
+    /// `shells/` and `use-gpu-directive/` were recorded with auto-naming off.
+    auto_name: bool,
 }
 
 impl Build {
-    fn new(code: &str, aliases: std::collections::BTreeSet<String>) -> Self {
+    fn new(code: &str, aliases: std::collections::BTreeSet<String>, auto_name: bool) -> Self {
         Self {
             factory: crate::ast::NodeFactory::new(),
             emit: crate::printer::new_emit_context(),
@@ -966,6 +969,7 @@ impl Build {
             aliases,
             changed: false,
             depth: 0,
+            auto_name,
         }
     }
 
@@ -1015,8 +1019,9 @@ fn join_payload_lines(text: &str) -> String {
     while index + 1 < lines.len() {
         let trimmed = lines[index].trim_end();
         let next = lines[index + 1].trim_start();
-        let join = trimmed.ends_with("const")
-            || trimmed.ends_with('=')
+        // `const` alone is unfinished. `const name =` is already a binding.
+        let join = trimmed.trim() == "const"
+            || (trimmed.ends_with('=') && !trimmed.trim_end().ends_with("const"))
             || trimmed.ends_with("=>")
             || trimmed.ends_with(')')
             || (trimmed.ends_with('(') && next.starts_with("/*#__PURE__*/"));
@@ -2111,8 +2116,10 @@ fn external_access(work: &Build, name: &str) -> Node {
         work.id(first)
     };
     for part in parts {
+        // The printer writes private-identifier text as stored. The parser
+        // keeps the `#`, so a rebuilt access has to keep it too.
         let name = if let Some(private) = part.strip_prefix('#') {
-            work.factory.new_private_identifier(private)
+            work.factory.new_private_identifier(format!("#{private}"))
         } else {
             work.id(part)
         };
@@ -2311,7 +2318,17 @@ const RESOURCE_CONSTRUCTORS: &[&str] = &[
     "createTexture", "createSampler", "createComparisonSampler", "struct", "unstruct", "createView",
 ];
 
+/// `shells/` and `use-gpu-directive/` snapshots have no autoname wrapper.
+/// Every other directory, including `auto-naming/`, keeps it on.
+fn auto_name_for(filename: &str) -> bool {
+    let path = filename.replace('\\', "/");
+    !path.contains("/shells/") && !path.contains("/use-gpu-directive/")
+}
+
 fn auto_name(node: Node, work: &mut Build) -> Option<Node> {
+    if !work.auto_name {
+        return None;
+    }
     let (label, expression) = labelled(node)?;
     if !contains_resource(expression, work) || already_autonamed(expression) {
         return None;

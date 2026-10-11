@@ -1,9 +1,9 @@
 
 
 interface Equal<T> {
-        equals(left: T, right: T): boolean.name(
-            equals(left: T, right: T): boolean.parameters.name: equals(left: T, right: T): boolean.parameters.valueType
-          ): equals(left: T, right: T): boolean.resultType;
+        equals(
+            left: T, right: T
+          ): boolean;
       }
 
     const Equal = (() => {
@@ -18,12 +18,12 @@ interface Equal<T> {
                 implementation as Equal<unknown>,
               );
             },
-            equals(left: T, right: T): boolean.name<T extends object>(
-                equals(left: T, right: T): boolean.parameters.name: equals(left: T, right: T): boolean.parameters.valueType
-              ): equals(left: T, right: T): boolean.resultType {
+            equals<T extends object>(
+                left: T, right: T
+              ): boolean {
                 const implementation = implementations.get(
                   globalThis.Object.getPrototypeOf([
-                      equals(left: T, right: T): boolean.parameters.name
+                      left, right
                     ][0]!)
                 ) as Equal<T> | undefined;
                 if (implementation === undefined) {
@@ -31,21 +31,21 @@ interface Equal<T> {
                     "Missing " + "Equal" + " implementation"
                   );
                 }
-                return implementation.equals(left: T, right: T): boolean.name(
-                  equals(left: T, right: T): boolean.parameters.name
+                return implementation.equals(
+                  left, right
                 );
               },
           };
-        })()
+        })();
 
 class User {
   constructor(readonly id: number) {}
 }
 
-User implements Equal<User> {
-  equals(left: User, right: User): boolean {
-    return left.id === right.id;
-  }
-}
+Equal(User, {
+          equals(
+              left: User, right: User
+            ): boolean { return left.id === right.id; }
+        });
 
 export const result = Equal.equals(new User(1), new User(1));

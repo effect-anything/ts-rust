@@ -98,7 +98,12 @@ fn capture(dir: &Path, theirs: &Path) -> Result<Same, String> {
     let expansion = if dir.to_string_lossy().contains("/typegpu/") {
         // Build is the pass that embeds `__TYPEGPU_META__`, the tinyest AST,
         // and externals. Check rewrites operators and stops there.
-        let built = ts_ext_syntax::TransformSession::build().transform(&filename, &code);
+        // The session keys auto-naming off the fixture path. `shells/` and
+        // `use-gpu-directive/` were recorded without the wrapper.
+        let built = ts_ext_syntax::TransformSession::build().transform(
+            &dir.to_string_lossy(),
+            &code,
+        );
         fs::write(dir.join("ours.ts"), &built.code).map_err(|err| err.to_string())?;
         return compare_payload(&built.code, theirs);
     } else {
@@ -132,8 +137,22 @@ fn capture(dir: &Path, theirs: &Path) -> Result<Same, String> {
 /// part of the comparison.
 fn compare_payload(ours: &str, theirs: &Path) -> Result<Same, String> {
     let reference = fs::read_to_string(theirs).map_err(|err| err.to_string())?;
+    // `externals/` snapshots are the externals object, not the module.
+    // Other directories keep the whole-file payload.
+    let externals_only = theirs
+        .parent()
+        .and_then(|dir| dir.parent())
+        .is_some_and(|dir| dir.ends_with("externals"))
+        && reference.trim_start().starts_with('{')
+        && reference.contains(": () =>")
+        && !reference.contains("function")
+        && !reference.contains("__TYPEGPU_META__");
     let left = payload(&reference);
-    let right = payload(ours);
+    let right = if externals_only {
+        payload(externals_object(ours))
+    } else {
+        payload(ours)
+    };
     if left == right {
         let _ = fs::remove_file(theirs.parent().unwrap().join("diff.txt"));
         return Ok(Same::Shape);
@@ -144,6 +163,31 @@ fn compare_payload(ours: &str, theirs: &Path) -> Result<Same, String> {
     )
     .map_err(|err| err.to_string())?;
     Ok(Same::Differ)
+}
+
+/// The `externals:` object in a full module. The snapshot is that object alone.
+fn externals_object(text: &str) -> &str {
+    let Some(at) = text.find("externals:") else {
+        return text;
+    };
+    let Some(open) = text[at..].find('{') else {
+        return text;
+    };
+    let start = at + open;
+    let mut depth = 0i32;
+    for (index, ch) in text[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &text[start..start + index + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    text
 }
 
 fn payload(text: &str) -> String {

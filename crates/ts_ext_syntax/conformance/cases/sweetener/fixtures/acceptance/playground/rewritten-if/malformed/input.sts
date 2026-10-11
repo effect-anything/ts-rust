@@ -1,0 +1,9 @@
+import { if } from "./declarative.sts" for syntax shadows core;
+
+function choose(predicate: boolean): number {
+  if (predicate) {
+    return 3;
+  } else {
+    2;
+  }
+}

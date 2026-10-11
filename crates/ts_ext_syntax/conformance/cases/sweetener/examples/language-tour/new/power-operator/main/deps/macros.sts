@@ -1,8 +1,0 @@
-export operator (**):expr shadows core {
-  fixity infix;
-  associativity right;
-  precedence 70;
-  rule { $base:expr ** $exponent:expr } => {
-    globalThis.Math.pow($base, $exponent)
-  }
-}

@@ -1,0 +1,3 @@
+import { data } from "./declarative.sts" for syntax;
+
+data Option<T> = None() | Some(value:);

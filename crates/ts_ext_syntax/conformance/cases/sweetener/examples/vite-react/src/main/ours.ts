@@ -11,46 +11,46 @@ function counterReducer(value: number, amount: number): number {
 }
 
 export function HookCarnival() {
-  const [count, setCount] = useState<number>(0)
-  const [step, setStep] = useState<number>(1)
-  const [page = 1;
-    query = "";, setPage = 1;
-    query = "";] = useState(1)
+  const [count, setCount] = useState<number>(0);
+  const [step, setStep] = useState<number>(1);
+  const [page, setPage] = useState(1);
+const [query, setQuery] = useState("");
+
   const [detailsOpen, setDetailsOpen] = useState(false);
     const toggleDetailsOpen = useCallback(
       () => {
         setDetailsOpen((current) => !current);
       },
       [],
-    )
-  const [reducedCount, dispatchCount] = useReducer(counterReducer, 0)
-  const stepInput = useRef<HTMLInputElement | null>(null)
-  const prefix = useContext(PrefixContext)
-  const doubled: number = useMemo(() => count * 2, [count])
-  const deferredCount = useDeferredValue(count)
+    );
+  const [reducedCount, dispatchCount] = useReducer(counterReducer, 0);
+  const stepInput = useRef<HTMLInputElement | null>(null);
+  const prefix = useContext(PrefixContext);
+  const doubled: number = useMemo(() => count * 2, [count]);
+  const deferredCount = useDeferredValue(count);
   const latestStep = useRef(step);
     useEffect(() => {
         latestStep.current = step;
-      }, [step])
-  const stepInputId = useId()
+      }, [step]);
+  const stepInputId = useId();
   const [
       navigationPending,
       startNavigation,
-    ] = useTransition()
-  const increment = useCallback(() => { setCount((value) => value + step); }, [step])
+    ] = useTransition();
+  const increment = useCallback(() => { setCount((value) => value + step); }, [step]);
   const incrementWithLatest = useCallback(() => {
     setCount((value_1) => value_1 + latestStep.current);
-  }, [])
+  }, []);
   const incrementLater = useCallback(async () => {
     await Promise.resolve();
     setCount((value_2) => value_2 + step);
-  }, [step])
+  }, [step]);
   useEffect(() => {
     document.title = `${prefix}: ${count}`;
     return () => {
       document.title = "Sweetener React hooks";
     };
-  }, [count, prefix])
+  }, [count, prefix]);
   return (
     <main>
       <h1>{prefix} React hook macros</h1>
@@ -97,14 +97,14 @@ export function HookCarnival() {
 }
 
 export function SecondaryCounter() {
-  const [count, setCount] = useState(10)
+  const [count, setCount] = useState(10);
   const [detailsOpen, setDetailsOpen] = useState(true);
     const toggleDetailsOpen_1 = useCallback(
       () => {
         setDetailsOpen((current_1) => !current_1);
       },
       [],
-    )
+    );
   return (
     <section>
       <button type="button" onClick={() => setCount((value) => value + 1)}>

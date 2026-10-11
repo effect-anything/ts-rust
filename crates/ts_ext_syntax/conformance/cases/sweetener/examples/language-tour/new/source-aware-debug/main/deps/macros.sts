@@ -1,5 +1,0 @@
-export syntax debug:expr {
-  rule { debug($value:expr) } => {
-    ((result) => ({ expression: #text($value), result }))($value)
-  }
-}

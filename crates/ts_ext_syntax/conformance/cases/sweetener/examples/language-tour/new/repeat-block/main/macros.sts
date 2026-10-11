@@ -1,1 +1,5 @@
-/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/examples/language-tour/new/repeat-block/main/deps/macros.sts
+export syntax repeat:stmt {
+  rule { repeat($count:expr) $body:stmt } => {
+    for (let index = 0; index < $count; index += 1) $body
+  }
+}

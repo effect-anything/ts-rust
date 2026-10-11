@@ -1,14 +1,20 @@
 
 
-route UserPost = users/:userId/posts/:postId;
+export interface UserPost {
+         readonly userId: string;  readonly postId: string; 
+      }
+
+    export const UserPostPattern =
+      "/" + ["users",  ":" + "userId", "posts",  ":" + "postId"].join("/")
+
+    export const buildUserPost = (parameters: UserPost): string =>
+      "/" + ["users",  parameters["userId"] , "posts",  parameters["postId"] ].join("/")
 export interface Health {
-         { readonly health.name: string; }
+        
       }
 
     export const HealthPattern =
-      "/" + [ { ":" + "health" }
-          #else { "health" }].join("/")
+      "/" + ["health"].join("/")
 
-    export const buildHealth = (parameters: Health): string =>
-      "/" + [ { parameters["health"] }
-          #else { "health" }].join("/")
+    export const buildHealth = (parameters_1: Health): string =>
+      "/" + ["health"].join("/")

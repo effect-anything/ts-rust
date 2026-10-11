@@ -1,1 +1,7 @@
-/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/examples/language-tour/new/source-aware-check/main/deps/macros.sts
+export syntax check:stmt {
+  rule { check($condition:expr); } => {
+    if (!($condition)) {
+      throw new globalThis.Error("check failed: " + #text($condition));
+    }
+  }
+}

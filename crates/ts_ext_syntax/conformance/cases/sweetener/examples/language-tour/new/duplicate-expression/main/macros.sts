@@ -1,1 +1,3 @@
-/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/examples/language-tour/new/duplicate-expression/main/deps/macros.sts
+export syntax duplicate:expr {
+  rule { duplicate($value:expr) } => { [$value, $value] }
+}

@@ -1,5 +1,0 @@
-{
-  "schemaVersion": 1,
-  "introduced": [],
-  "relationship": "The operator suite preserves operands and introduces no runtime bindings."
-}

@@ -1,3 +1,0 @@
-export syntax list:type {
-  rule { list<$element:type> } => { ReadonlyArray<$element> }
-}

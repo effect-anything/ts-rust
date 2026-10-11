@@ -1,7 +1,0 @@
-
-
-const vector = <T>(...values: T[]): readonly T[] => values;
-const sum = (values: readonly number[]): number =>
-  values.reduce((total, value) => total + value, 0);
-
-export const result = #[1, 2, 3] |> sum == 6;

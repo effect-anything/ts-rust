@@ -1,1 +1,15 @@
-/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/examples/language-tour/new/higher-kinded/main/deps/macros.sts
+export syntax kinded:item {
+  rule { kinded $name:binding<$param:binding> $body:tt }
+  => {
+    #syntax {
+      syntax $name:item {
+        rule { $name $target:binding for $container:ident; }
+        bind $target in following as recursive type;
+        => {
+          #core(type $param<Inner> = $container<Inner>)
+          #core(export interface $target $body)
+        }
+      }
+    }
+  }
+}

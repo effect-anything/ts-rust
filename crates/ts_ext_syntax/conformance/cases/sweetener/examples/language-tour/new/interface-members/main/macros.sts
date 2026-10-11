@@ -1,1 +1,12 @@
-/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/examples/language-tour/new/interface-members/main/deps/macros.sts
+export syntax timestamps:typeMember {
+  rule { timestamps } => {
+    readonly createdAt: string;
+    readonly updatedAt: string;
+  }
+}
+
+export syntax overloaded:typeMember {
+  rule { overloaded $name:ident over $($kind:type),* } => {
+    $($name(value: $kind): $kind;)*
+  }
+}

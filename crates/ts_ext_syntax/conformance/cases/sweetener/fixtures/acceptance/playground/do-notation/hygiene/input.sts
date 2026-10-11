@@ -1,0 +1,20 @@
+import { doSteps } from "./declarative.sts" for syntax;
+
+type Box<A> = { readonly value: A };
+const box = {
+  of: <A>(value: A): Box<A> => ({ value }),
+  flatMap: <A, B>(source: Box<A>, next: (value: A) => Box<B>): Box<B> =>
+    next(source.value),
+};
+
+const left = "outer left";
+const source = "outer source";
+
+export const hygieneResult = {
+  outer: [left, source],
+  nested: doSteps(box) {
+    left <- box.of(4);
+    source <- box.of(6);
+    return left + source;
+  },
+};

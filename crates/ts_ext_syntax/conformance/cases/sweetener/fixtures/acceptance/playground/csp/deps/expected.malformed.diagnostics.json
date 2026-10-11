@@ -1,8 +1,0 @@
-[
-  {
-    "code": "SWR4001",
-    "stage": "expansion",
-    "severity": "error",
-    "messageArguments": ["<-", "channel expression"]
-  }
-]

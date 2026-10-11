@@ -1,31 +1,5 @@
 
 
-type Option<T> =
-      {
-        readonly tag: "None()";
-        None().fields.name: None().fields.valueType;
-      }|{
-        readonly tag: "Some(value: T)";
-        Some(value: T).fields.name: Some(value: T).fields.valueType;
-      };
+type Option<T> = { readonly tag: "None"; } | { readonly tag: "Some"; value: T; }; const None = <T,>(): Option<T> => { tag: "None" }; const Some = <T,>(value: T): Option<T> => { tag: "Some", value };
 
-    const None().name = <T>(
-      None().fields.name: None().fields.valueType
-    ): Option<T> => ({
-      tag: "None()"
-       {
-        , None().fields.name
-      }
-    });const Some(value: T).name = <T>(
-      Some(value: T).fields.name: Some(value: T).fields.valueType
-    ): Option<T> => ({
-      tag: "Some(value: T)"
-       {
-        , Some(value: T).fields.name
-      }
-    });
-
-export const result = match (Some(3)) {
-  Some(value) => value + 1;
-  None() => 0;
-};
+export const result = ({ value: Some(3), run() { if (this.value.tag === "Some") { const { value } = this.value; return value + 1; } if (this.value.tag === "None") { return 0; } const unmatched: never = this.value; throw new globalThis.Error("No match for " + globalThis.JSON.stringify(unmatched),); }, }).run();

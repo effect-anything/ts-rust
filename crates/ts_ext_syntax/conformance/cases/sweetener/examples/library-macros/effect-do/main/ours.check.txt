@@ -1,3 +1,0 @@
-original(8,1)(15,35): error TS2347: Untyped function calls may not accept type arguments.
-original(14,11)(30,87): error TS2488: Type 'Effect<string, NotFound, Database>' must have a '[Symbol.iterator]()' method that returns an iterator.
-original(15,11)(31,24): error TS2488: Type 'Effect<readonly string[], DbError, Database>' must have a '[Symbol.iterator]()' method that returns an iterator.
