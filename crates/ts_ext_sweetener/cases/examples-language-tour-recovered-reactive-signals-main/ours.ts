@@ -11,7 +11,9 @@ export const seen: string[] = [];
 createEffect(() => { seen.push(`${labelSignal.get()}:${countSignal.get()}`); });
 
 countSignal.set(5);
-countSignal.set(countSignal.get() + 2);
+countSignal.set(
+            countSignal.get() + 2
+          );
 labelSignal.set("done");
 
 export const observed: readonly string[] = [...seen];

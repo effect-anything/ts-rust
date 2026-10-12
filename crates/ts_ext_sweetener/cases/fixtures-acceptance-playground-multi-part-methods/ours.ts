@@ -7,5 +7,5 @@ export const result = ((
               minimum: number, maximum: number
             ): boolean => { return value > minimum && value < maximum; })(
             3,
-            1
+            1, 5
           );

@@ -92,7 +92,6 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
         form_methods: Vec::new(),
         last_form_next: 0,
         failed: false,
-        form_gates: super::sweetener_forms::fast_gates::of(source),
     };
     printer.diagnostics.extend(loaded.diagnostics);
     printer.print_nodes(&read.children);
@@ -153,9 +152,6 @@ struct Printer<'a> {
     channel_renames: HashMap<String, String>,
     /// A macro rule rejected this file. The printed text is discarded.
     failed: bool,
-    /// One scan of this printer's source. Nested printers scan their own
-    /// fragment, not the outer file.
-    form_gates: super::sweetener_forms::fast_gates::FormGates,
 }
 
 impl<'a> Printer<'a> {
@@ -929,7 +925,6 @@ impl<'a> Printer<'a> {
             last_form_next: 0,
             channel_renames: HashMap::new(),
             failed: false,
-            form_gates: super::sweetener_forms::fast_gates::of(&owned),
         };
         nested.print_nodes(&read.children);
         nested.copy_until(owned.len());
@@ -1108,7 +1103,6 @@ impl<'a> Printer<'a> {
             last_form_next: 0,
             channel_renames: self.channel_renames.clone(),
             failed: false,
-            form_gates: super::sweetener_forms::fast_gates::of(&owned),
         };
         nested.print_nodes(&read.children);
         nested.copy_until(owned.len());
@@ -1350,7 +1344,6 @@ impl<'a> Printer<'a> {
         if !self.form_candidate(nodes, index) {
             return false;
         }
-        let _gates = super::sweetener_forms::fast_gates::enter(self.form_gates);
         let Some(rewritten) = super::sweetener_forms::try_expand_fixture(
             self.source,
             nodes,
@@ -2171,6 +2164,21 @@ struct ClassField {
 struct ClassRule {
     pattern: Vec<Pat>,
     expect: Option<String>,
+    /// `refine $field spelling equals "left"` and the other class guards.
+    /// A rule whose guard fails is not a match, so a later rule can take it.
+    refines: Vec<Refine>,
+}
+
+#[derive(Clone, Debug)]
+enum Refine {
+    /// `refine $name spelling equals "left"`.
+    SpellingEquals { field: String, spelling: String },
+    /// `refine $binders spelling starts-with-lowercase`.
+    StartsLower { field: String },
+    /// `refine $arguments delimiter parenthesis`.
+    Delimiter { field: String, delimiter: Delimiter },
+    /// `refine $terms length equal 1`.
+    LengthEqual { field: String, length: usize },
 }
 
 fn collect_classes(source: &str, nodes: &[Syntax]) -> Vec<SyntaxClass> {
@@ -2221,9 +2229,11 @@ fn class_of(source: &str, name: &str, body: &Syntax) -> SyntaxClass {
             if let Some(group) = next_group(children, &mut index, Delimiter::Brace) {
                 let pattern = pattern_of(group);
                 if !pattern.is_empty() {
+                    let at = group_index(children, group);
                     rules.push(ClassRule {
                         pattern,
-                        expect: expect_after(source, children, group_index(children, group)),
+                        expect: expect_after(source, children, at),
+                        refines: refines_after(source, children, at),
                     });
                 }
             }
@@ -2538,6 +2548,157 @@ fn group_index(nodes: &[Syntax], group: &Syntax) -> usize {
         .iter()
         .position(|node| std::ptr::eq(node, group))
         .unwrap_or(0)
+}
+
+/// `refine` clauses between a class rule's pattern and the next `rule`.
+fn refines_after(source: &str, nodes: &[Syntax], group_at: usize) -> Vec<Refine> {
+    let mut out = Vec::new();
+    let mut index = group_at + 1;
+    while index < nodes.len() {
+        if token_at(nodes, index, "rule") || token_at(nodes, index, "expect") {
+            break;
+        }
+        if token_at(nodes, index, "refine") {
+            if let Some(refine) = refine_at(source, nodes, index) {
+                out.push(refine);
+            }
+        }
+        index += 1;
+    }
+    out
+}
+
+/// One `refine $field <check>;` starting at the `refine` token.
+fn refine_at(source: &str, nodes: &[Syntax], index: usize) -> Option<Refine> {
+    // `refine $field ...`. The `$` is its own token and has no `:kind`.
+    let field = hole_name_at(nodes, index + 1)?;
+    let mut cursor = index + 3;
+    if token_at(nodes, cursor, "spelling") && token_at(nodes, cursor + 1, "equals") {
+        let spelling = quoted_after(source, nodes, cursor + 2)?;
+        return Some(Refine::SpellingEquals { field, spelling });
+    }
+    if token_at(nodes, cursor, "spelling") && token_at(nodes, cursor + 1, "starts-with-lowercase") {
+        return Some(Refine::StartsLower { field });
+    }
+    if token_at(nodes, cursor, "delimiter") && token_at(nodes, cursor + 1, "parenthesis") {
+        return Some(Refine::Delimiter {
+            field,
+            delimiter: Delimiter::Paren,
+        });
+    }
+    if token_at(nodes, cursor, "length")
+        && token_at(nodes, cursor + 1, "equal")
+        && nodes.get(cursor + 2).is_some_and(|node| match node {
+            Syntax::Token { raw, .. } => raw.chars().all(|ch| ch.is_ascii_digit()),
+            _ => false,
+        })
+    {
+        let length = match nodes.get(cursor + 2) {
+            Some(Syntax::Token { raw, .. }) => raw.parse().unwrap_or(0),
+            _ => 0,
+        };
+        return Some(Refine::LengthEqual { field, length });
+    }
+    None
+}
+
+/// `$field` naming a capture. A refine has no `:kind`, so this is not `is_hole`.
+fn hole_name_at(nodes: &[Syntax], index: usize) -> Option<String> {
+    if !dollar_at(nodes, index) {
+        return None;
+    }
+    match nodes.get(index + 1) {
+        Some(Syntax::Token { raw, .. }) => Some(raw.clone()),
+        _ => None,
+    }
+}
+
+fn quoted_after(source: &str, nodes: &[Syntax], index: usize) -> Option<String> {
+    match nodes.get(index) {
+        Some(Syntax::String { raw, .. }) => Some(unquote(raw)),
+        Some(node) => {
+            let text = sweetener_reader::slice(source, node);
+            let text = text.trim().trim_matches(|ch| ch == '"' || ch == '\'');
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_owned())
+            }
+        }
+        None => None,
+    }
+}
+
+/// A class rule's `refine` clauses, against the captures that rule just took.
+fn refine_accepts(refines: &[Refine], captures: &HashMap<String, Capture>) -> bool {
+    refines.iter().all(|refine| refine_one(refine, captures))
+}
+
+fn refine_one(refine: &Refine, captures: &HashMap<String, Capture>) -> bool {
+    match refine {
+        Refine::SpellingEquals { field, spelling } => refine_spellings(captures, field)
+            .iter()
+            .any(|have| have == spelling),
+        Refine::StartsLower { field } => {
+            let names = refine_spellings(captures, field);
+            !names.is_empty() && names.iter().all(|name| starts_lower(name))
+        }
+        Refine::Delimiter { field, delimiter } => capture_opens(captures, field)
+            .iter()
+            .any(|have| have == delimiter),
+        Refine::LengthEqual { field, length } => capture_len(captures, field) == *length,
+    }
+}
+
+fn starts_lower(name: &str) -> bool {
+    name.chars().next().is_some_and(|ch| ch.is_lowercase())
+}
+
+fn refine_spellings(captures: &HashMap<String, Capture>, field: &str) -> Vec<String> {
+    let Some(value) = captures.get(field) else {
+        return Vec::new();
+    };
+    match value {
+        Capture::Text(text) => vec![text.trim().to_owned()],
+        Capture::Record { text, .. } => vec![text.trim().to_owned()],
+        Capture::Many(rows) => rows
+            .iter()
+            .filter_map(|row| {
+                row.iter().find_map(|(name, value)| {
+                    (name == field).then(|| match value {
+                        Capture::Text(text) | Capture::Record { text, .. } => {
+                            text.trim().to_owned()
+                        }
+                        Capture::Many(_) => String::new(),
+                    })
+                })
+            })
+            .filter(|text| !text.is_empty())
+            .collect(),
+    }
+}
+
+fn capture_len(captures: &HashMap<String, Capture>, field: &str) -> usize {
+    match captures.get(field) {
+        Some(Capture::Many(rows)) => rows.len(),
+        Some(Capture::Text(text)) if !text.trim().is_empty() => 1,
+        Some(Capture::Record { .. }) => 1,
+        _ => 0,
+    }
+}
+
+fn capture_opens(captures: &HashMap<String, Capture>, field: &str) -> Vec<Delimiter> {
+    let Some(Capture::Text(text)) = captures.get(field) else {
+        return Vec::new();
+    };
+    let trimmed = text.trim();
+    let open = match trimmed.chars().next() {
+        Some('(') => Delimiter::Paren,
+        Some('{') => Delimiter::Brace,
+        Some('[') => Delimiter::Bracket,
+        _ => return Vec::new(),
+    };
+    vec![open]
 }
 
 /// `expect` anywhere between the pattern group and `=>`.
@@ -4743,14 +4904,22 @@ fn match_pats_in(
             Pat::Rep { inner, sep, kind } => {
                 let mut many = Vec::new();
                 let saved_start = *cursor;
+                // A nested `$($parameter ...),*` reuses the head's hole names.
+                // Matching into the outer map overwrites `parameter`, so the
+                // last segment is the only one left. Each iteration matches
+                // on a copy and only its own holes are kept.
                 loop {
                     let saved = *cursor;
-                    let mut one = HashMap::new();
+                    let mut one = captures.clone();
+                    let before: Vec<String> = one.keys().cloned().collect();
                     if match_pats_in(source, nodes, cursor, inner, &mut one, classes, true)
                         .is_none()
                     {
                         *cursor = saved;
                         break;
+                    }
+                    for key in before {
+                        one.remove(&key);
                     }
                     let mut one: Vec<(String, Capture)> = one.into_iter().collect();
                     // A separator that was written inside the repetition
@@ -4909,6 +5078,11 @@ fn take_class(
         let Some(end) = match_pats(source, nodes, &mut child, pattern, &mut raw, classes) else {
             continue;
         };
+        // `refine $left spelling equals "left"` rejects a match the pattern
+        // took, so the next rule of this class can take the same tokens.
+        if !refine_accepts(&rule.refines, &raw) {
+            continue;
+        }
         let text = sweetener_reader::slice_range(source, start, end).to_owned();
         let mut fields = HashMap::new();
         for field in &class_.fields {
@@ -5913,17 +6087,21 @@ fn is_closed_group(node: &Syntax, delimiter: Delimiter) -> bool {
 }
 
 /// `<-` and `->` are one macro name, but the reader stores each character.
-/// A literal matches that run when the characters are adjacent.
+/// `===` and `!==` are the same: the reader keeps `==` then `=`. A literal
+/// matches that run when the characters are adjacent.
 fn lit_width(nodes: &[Syntax], index: usize, expected: &str) -> Option<usize> {
-    if expected.chars().count() < 2 || !expected.chars().all(|ch| "<>-".contains(ch)) {
+    if expected.chars().count() < 2 || !expected.chars().all(|ch| "!=<>&|?+-*/%^~".contains(ch)) {
         return None;
     }
     let mut cursor = index;
     let mut got = String::new();
     let mut width = 0usize;
     while got.len() < expected.len() {
-        let raw = operator_spelling(nodes.get(cursor)?)?;
-        if !raw.chars().all(|ch| "<>-".contains(ch)) {
+        let raw = match nodes.get(cursor) {
+            Some(Syntax::Operator { raw, .. }) => raw.as_str(),
+            _ => return None,
+        };
+        if !raw.chars().all(|ch| "!=<>&|?+-*/%^~".contains(ch)) {
             return None;
         }
         if width > 0 {

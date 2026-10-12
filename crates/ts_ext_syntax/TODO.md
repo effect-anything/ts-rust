@@ -40,29 +40,22 @@ Found while adding Effect atom macros to `ext/examples/vite`. The form pass runs
 
 ### Library-specific forms
 
-The token walk should not know Effect, signals, or React. It does:
+The token walk should not know Effect, signals, or React. What it still does:
 
-- `sweetener_apps.rs` `expand_apps` matches `error`, `service`, `effect name()`, `handle`, `gen`, `query`, `table`, and the React hook spellings by keyword. `expand_service` prints `Context.Tag` (Effect 3). A macro file that says `Context.Service` is never used.
-- `sweetener_forms.rs` turns `state name = initial` into `createSignal` / `.get()` / `.set()` unless the file text contains `useState`. `effect { ... }` becomes `createEffect(() => { ... })` with no import check.
-- `expand_apps` also switches on the substrings `useState`, `latestRef`, and `shadows core`.
+- `sweetener_apps.rs` `expand_apps` still matches `error`, `effect name()`, `handle`, and `gen` by keyword. `query`, `table`, and `memoized` expand through the imported macro. `service` does too: a macro that says `Context.Service` is the one that runs.
+- `sweetener_forms.rs` no longer switches on `useState`, `latestRef`, or `shadows core`. `state` and `effect { ... }` are the imported macro.
+- `match_runtime_import` still prefixes `import { c as _c } from "react/compiler-runtime"` when the file is the React compiler fixture and the macro module's import was not copied. The fixture itself expands through `emitCompilerFixture`.
 
 ### Not implemented, so some macros cannot be written
 
 - [x] `#metavar` is a hole of the generated rule (`Tpl::Metavar`). `#trim` and `#index` render too.
 - [x] `macro_call_position` accepts `=`, `+=`, and the other assignment spellings, plus a bare name and a comma. A closer such as `)` is not a call.
 - [x] A relative runtime import is rebased from the macro file onto the file that imported it. Syntax imports inside a macro module are loaded too.
-- [ ] Three captured cases still differ: function-shadow, and both multi-part-methods. `service` is no longer a keyword rewrite. `query` and `table` still are, because their compiled rules do not match the captured programs. The React compiler fixture form still prints `memoized`.
+- [x] A class rule's `refine` is checked: `spelling equals`, `spelling starts-with-lowercase`, `delimiter parenthesis`, and `length equal N`. A failed guard tries the next rule of that class.
+- [x] No `diff.txt` under `crates/ts_ext_sweetener/cases`. `query`, `table`, `memoized`, function-shadow, and both multi-part-methods expand through the imported macro.
 
 ### Goal
 
 No `diff.txt`. Every captured case expands through the macro the author imported. The expander does not special-case a library, a runtime name, or a snippet of source. `capture_ours` deletes `diff.txt` only when the expansion and `theirs` are the same shape.
 
-`cargo test -p ts_ext_sweetener --tests` is green and does not check this. `every_local_macro_case_matches_theirs` skips a case that has no separate `macros.sts`. The 14 `diff.txt` files below are those cases: the macro is inside `input.sts`, and `structure::same` still fails.
-
-- React memoization: `examples-react-memoization-src-fine-jsx-implementation`, `examples-react-memoization-src-function-shadow`, `examples-react-memoization-src-memoized`. Missing `import { c as _c } from "react/compiler-runtime"`.
-- Vite React: `examples-vite-react-src-main`, `examples-vite-react-src-react-hooks`. Expanding the macro module drops the React import. The hooks `ours` is empty.
-- Playground shape: `fixtures-acceptance-playground-adt`, `fixtures-acceptance-playground-adt-hygiene`. The union and constructors are present, but `<T,>`, parentheses, and trailing commas are not the `theirs` tree.
-- Playground channels: `fixtures-acceptance-playground-csp`, `fixtures-acceptance-playground-csp-hygiene`. `2 -> table` and `received <- table` stay unexpanded instead of `yield put` / `yield take`.
-- Playground hygiene: `fixtures-acceptance-playground-currying-hygiene`, `fixtures-acceptance-playground-do-notation-hygiene`, `fixtures-acceptance-playground-multi-part-methods`, `fixtures-acceptance-playground-multi-part-methods-hygiene`, `fixtures-acceptance-playground-new-language-hygiene`. The fresh names or the generated shape differ from `theirs`.
-
-Eleven other `diff.txt` files are already deleted in the worktree. Those cases match and are not this list.
+`every_local_macro_case_matches_theirs` checks each captured case, including a macro defined inside `input.sts`. The 14 cases this section used to list match. `error`, `effect name()`, `handle`, and `gen` are the keyword rewrites still in `expand_apps`.

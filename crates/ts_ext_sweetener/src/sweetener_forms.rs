@@ -19,63 +19,6 @@ pub fn expand_state_signal(name: &str, initial: &str) -> String {
     format!("const {signal} = createSignal({initial});")
 }
 
-/// Whole-file probes the form pass asks on every node. The printer on
-/// the stack answers the known needles. Anything else scans the source.
-#[inline]
-pub(crate) fn source_has(source: &str, needle: &str) -> bool {
-    if let Some(hit) = fast_gates::has(needle) {
-        return hit;
-    }
-    source.contains(needle)
-}
-
-pub(crate) mod fast_gates {
-    use std::cell::Cell;
-
-    #[derive(Clone, Copy)]
-    pub struct FormGates {
-        use_state: bool,
-        shadows_core: bool,
-        latest_ref: bool,
-    }
-
-    thread_local! {
-        static CURRENT: Cell<Option<FormGates>> = const { Cell::new(None) };
-    }
-
-    #[must_use]
-    pub fn of(source: &str) -> FormGates {
-        FormGates {
-            use_state: source.contains("useState"),
-            shadows_core: source.contains("shadows core"),
-            latest_ref: source.contains("latestRef"),
-        }
-    }
-
-    pub struct Guard(Option<FormGates>);
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            CURRENT.with(|slot| slot.set(self.0));
-        }
-    }
-
-    pub fn enter(gates: FormGates) -> Guard {
-        Guard(CURRENT.with(|slot| slot.replace(Some(gates))))
-    }
-
-    pub fn has(needle: &str) -> Option<bool> {
-        CURRENT.with(|slot| {
-            slot.get().map(|gates| match needle {
-                "useState" => gates.use_state,
-                "shadows core" => gates.shadows_core,
-                "latestRef" => gates.latest_ref,
-                _ => false,
-            })
-        })
-    }
-}
-
 /// One fixture form at `index`, if this sibling list is one of the cases this
 /// file owns. `None` means the expander's own rules should run.
 pub fn try_expand_fixture(
@@ -85,9 +28,6 @@ pub fn try_expand_fixture(
     signals: &[(String, String)],
     methods: &[MethodBinding],
 ) -> Option<FixtureRewrite> {
-    // `state`, curried `function`, and the `useState` / `latestRef` /
-    // `shadows core` gates were library spellings. The imported macro
-    // owns those forms.
     if let Some(item) = match_method_item(source, &nodes[index..]) {
         let end = if item.requests.is_empty() {
             method_item_end(nodes, index)
