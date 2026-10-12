@@ -5,7 +5,7 @@ published set `@effect-x/tsc` (see "@effect-x/tsc releases" below).
 
 - `typescript`: Go's JS launcher (`bin/tsc`, `lib/tsc.js`, `lib/getExePath.js`) and JS API (`dist`).
 - `@typescript/typescript-linux-x64`: `lib/tsc` (a noembed build) and the lib files next to it.
-- `wasm` (`ts-rust-wasm`): the WebAssembly build for Node, Deno, Bun and browsers. See
+- `wasm` (`@effect-x/tsc-wasm` in this tree; the package name is still `ts-rust-wasm`): the WebAssembly build for Node, Deno, Bun and browsers. See
   [wasm/README.md](wasm/README.md).
 
 The port adds one file to Go's layout: `install.js`, the postinstall (`lib/install.js`). On POSIX it

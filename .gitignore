@@ -8,3 +8,7 @@ __pycache__/
 vendor/
 
 .DS_STORE
+
+# Editor settings and napi native addons (built by `napi build`, not source).
+.zed/
+*.node

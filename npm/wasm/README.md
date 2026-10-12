@@ -1,8 +1,8 @@
-# ts-rust-wasm
+# @effect-x/tsc WebAssembly
 
-The ts-rust TypeScript compiler (`crates/ts_goport`, a Rust port of typescript-go) as one
+The `@effect-x/tsc` compiler (`crates/ts_goport`, a Rust port of typescript-go) as one
 WebAssembly module. It type-checks and emits like the native `tsgo`, in Node, Deno, Bun and
-browsers. Nothing here publishes.
+browsers. Nothing here publishes. The local package name is still `ts-rust-wasm`.
 
 ## Build
 

@@ -352,18 +352,20 @@ jobs:
           echo '{"name":"smoke","private":true}' > package.json
           # The other platform's package is not on npm yet: --offline skips that optional dependency.
           npm install --offline --no-audit --no-fund "$dist/effect-x-tsc-${{ matrix.platform }}-$VERSION.tgz" "$dist/effect-x-tsc-$VERSION.tgz"
-          npx tsc --version
+          # The package bin, not a bare `npx tsc` (that can resolve the typescript package).
+          tsc="npx --no-install --package @effect-x/tsc tsc"
+          $tsc --version
           echo 'export const x: number = 1;' > ok.ts
-          npx tsc --noEmit --strict ok.ts
+          $tsc --noEmit --strict ok.ts
           echo 'const x: number = "a";' > bad.ts
           set +e
-          npx tsc --noEmit bad.ts > check.txt
+          $tsc --noEmit bad.ts > check.txt
           rc=$?
           set -e
           cat check.txt
           [[ $rc == 2 ]] && grep -q "error TS2322" check.txt
           # Emit.
-          npx tsc --outDir out --declaration ok.ts
+          $tsc --outDir out --declaration ok.ts
           cat out/ok.js out/ok.d.ts
           grep -q "export const x = 1;" out/ok.js
       - name: Archive check
