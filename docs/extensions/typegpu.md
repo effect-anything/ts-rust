@@ -183,12 +183,12 @@ captured case:
 
 ```sh
 node scripts/ext-bench/upstream-typegpu.mjs <dir>          # the pinned plugin
-cargo run -q --example transform_probe -- <dir>            # this port
+cargo run -q -p ts_ext_typegpu --example transform_probe -- <dir>
 ```
 
 They read the same one-`*.ts`-per-behaviour directory.
 `scripts/ext-bench/typegpu-probes/` is that directory; add a snippet there
-when a behaviour needs checking. `--cases <conformance/cases/typegpu>` runs the
+when a behaviour needs checking. `--cases crates/ts_ext_typegpu/conformance/cases/typegpu` runs the
 plugin over the captured cases instead, and `--no-autonaming` turns
 upstream's `autoNamingEnabled` off.
 
@@ -218,7 +218,7 @@ The tinyest AST is what the runtime's WGSL printer reads, so its node kinds
 are part of the plugin's contract. `NodeTypeCatalog`
 (`tinyest/src/nodes.ts`) has 24 kinds and this port emits all of them.
 The kinds the pinned plugin prints are captured as
-`conformance/cases/typegpu/tinyest/` (`sources: "probe"`: the input is the
+`crates/ts_ext_typegpu/cases/tinyest-*` (`sources: "probe"`: the input is the
 snippet in `scripts/ext-bench/typegpu-probes/ast-*.ts`, and `theirs.ts` is a
 live run of the pin's `babelTransform`, not one of its test files).
 A numeric literal is recorded as its value, not the author's spelling
@@ -234,7 +234,7 @@ prefix update all end in an unprintable body (`body: [0, []]`, no externals).
 The snippets stay in `typegpu-probes/` (`ast-var.ts`, `ast-template.ts`,
 `ast-spread.ts`, `ast-do-while.ts`, `ast-update.ts`).
 
-`conformance/cases/typegpu` compares with `ts_ext_syntax::structure::same`:
+`crates/ts_ext_typegpu` is the plugin session. `cases/` there is flat, one directory per `cases.jsonl` id, and compares with `structure::same`:
 the syntax tree, so whitespace, a trailing comma, a redundant pair of
 parentheses, a comment and a numeric literal form are shape, while a node
 kind, a name, an operator or a statement order is not.

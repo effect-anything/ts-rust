@@ -941,12 +941,14 @@ impl Session {
         if keep_outputs {
             let outputs = output_files.get_or_insert_with(FxHashMap::default);
             for (file_name, text) in writes {
+                let text = crate::ext::precheck::emit_javascript(&file_name, &text);
                 outputs.insert(file_name, text);
             }
         } else {
             let fs = self.snapshot_host.fs();
             let mut failures = Vec::new();
             for (file_name, text) in writes {
+                let text = crate::ext::precheck::emit_javascript(&file_name, &text);
                 if let Err(err) = fs.write_file(&file_name, &text) {
                     let output_file = file_name.strip_suffix(".map").unwrap_or(&file_name);
                     let diagnostic = new_compiler_diagnostic(

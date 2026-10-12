@@ -1,8 +1,0 @@
-{
-  "typegpu": "fc85681e",
-  "sweetener": "2e78489",
-  "sweetenerRef": "origin/main",
-  "typegpuRef": "origin/main",
-  "capturedAt": "2026-10-10",
-  "note": "Sweetener case copies pinned origin/main blobs instead of symlink because vendor/sweetener is not that pin (working tree is fix/session-project-expansion). TypeGPU vendor is the pin, so its input is a symlink. Sweetener corpus beyond playground/operators is also pin 2e78489 blobs (fixtures 17, examples 58, samples/external default-project 1), expanded by a detached worktree compiler, not vendor/sweetener/packages/compiler/dist."
-}

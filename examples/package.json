@@ -1,0 +1,12 @@
+{
+  "name": "ts-rust-examples",
+  "private": true,
+  "description": "Runnable extension examples. Not published.",
+  "scripts": {
+    "build": "node build-all.mjs"
+  },
+  "devDependencies": {
+    "ext-syntax": "file:../crates/ts_ext_syntax",
+    "typescript": "file:../npm/typescript"
+  }
+}

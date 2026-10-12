@@ -20,9 +20,44 @@ pub fn apply(opts: &SourceFileParseOptions, file: ParsedSourceFile) -> ParsedSou
 }
 
 /// Runtime wrappers for emitted JavaScript. Check does not call this.
+///
+/// The caller is the loading thread, after the emit workers have returned.
+/// Parsing here is the same as the parse cache: one thread, then
+/// `publish_parsed_files`.
 #[must_use]
 pub fn emit_javascript(filename: &str, code: &str) -> String {
     crate::ext::typegpu::embed_metadata_js(filename, code)
+}
+
+/// Rewrites JavaScript the emit workers already wrote. Source maps and
+/// declaration files are left alone. A missing file was captured in memory
+/// by the API and is rewritten there instead.
+pub fn rewrite_emitted_javascript(results: &[crate::emitter::program_emit::EmitResult]) {
+    let fs = crate::frontend::vfs::osvfs_fs();
+    for result in results {
+        for path in &result.emitted_files {
+            if !is_javascript_output(path) {
+                continue;
+            }
+            let (text, ok) = fs.read_file(path);
+            if !ok {
+                continue;
+            }
+            let next = emit_javascript(path, &text);
+            if next != text {
+                let _ = fs.write_file(path, &next);
+            }
+        }
+    }
+}
+
+fn is_javascript_output(path: &str) -> bool {
+    let path = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    if path.ends_with(".map") || path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
+    {
+        return false;
+    }
+    path.ends_with(".js") || path.ends_with(".jsx") || path.ends_with(".mjs") || path.ends_with(".cjs")
 }
 
 /// True when this compiler still emits JavaScript for the file.

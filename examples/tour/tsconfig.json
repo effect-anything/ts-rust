@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowArbitraryExtensions": true
+  },
+  "files": [
+    "src/main.ts",
+    "src/calc.ts",
+    "src/view.tsx",
+    "src/logic.sts",
+    "src/panel.stsx",
+    "../stubs/typegpu.d.ts",
+    "../stubs/jsx.d.ts"
+  ],
+  "contentMappers": [
+    { "package": "ext-syntax", "extensions": [".sts", ".stsx"] }
+  ]
+}

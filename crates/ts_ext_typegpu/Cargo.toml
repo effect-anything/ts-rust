@@ -1,0 +1,25 @@
+[package]
+name = "ts_ext_typegpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "TypeGPU plugin session over ts_goport::ext. Not linked into tsgo."
+
+[dependencies]
+ts_goport = { path = "../ts_goport" }
+
+[[example]]
+name = "capture_ours"
+path = "scripts/capture_ours.rs"
+
+[[example]]
+name = "diff_typegpu"
+path = "scripts/diff_typegpu.rs"
+
+[[example]]
+name = "transform_probe"
+path = "scripts/transform_probe.rs"
+
+[lints]
+workspace = true

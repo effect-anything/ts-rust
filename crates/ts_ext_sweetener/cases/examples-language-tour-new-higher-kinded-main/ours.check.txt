@@ -1,0 +1,6 @@
+input.sts(9,1): error TS1434: Unexpected keyword or identifier.
+input.sts(9,1): error TS1434: Unexpected keyword or identifier.
+input.sts(9,1): error TS1005: '(' expected.
+input.sts(9,34): error TS1109: Expression expected.
+input.sts(10,1): error TS1005: ')' expected.
+input.sts(10,1): error TS1005: ';' expected.

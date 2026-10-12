@@ -99,9 +99,13 @@ pub fn embed_metadata_reports(
     } else {
         ScriptKind::TS
     };
-    let formatted = format_like_babel(&file_name, code, kind);
-    let leaked: &'static str = Box::leak(formatted.into_boxed_str());
-    let file = parse_without_rewrite(&opts, leaked, kind);
+    // The caller is the loading thread, after emit workers have finished,
+    // the same place the parse cache publishes. One parse of the printed
+    // JavaScript. Whitespace is not part of the comparison.
+    let leaked: &'static str = Box::leak(code.to_owned().into_boxed_str());
+    let file = std::rc::Rc::new(parse_without_rewrite(&opts, leaked, kind));
+    crate::program::note_parsed_source_file(&file);
+    crate::program::publish_parsed_files("/");
     let mut aliases = std::collections::BTreeSet::new();
     gather_aliases(file.root, &mut aliases);
     if std::env::var("DBG").is_ok() {
@@ -119,59 +123,6 @@ pub fn embed_metadata_reports(
         return (code.to_owned(), unsupported);
     }
     (apply_wraps(leaked, edits), unsupported)
-}
-
-/// Babel reprints the file at 2-space indent and drops the captured-test banner.
-fn format_like_babel(file_name: &str, code: &str, kind: ScriptKind) -> String {
-    let opts = SourceFileParseOptions {
-        file_name: file_name.to_owned(),
-        ..SourceFileParseOptions::default()
-    };
-    let leaked: &'static str = Box::leak(code.to_owned().into_boxed_str());
-    let file = std::rc::Rc::new(parse_without_rewrite(&opts, leaked, kind));
-    crate::program::note_parsed_source_file(&file);
-    crate::program::publish_parsed_files("/");
-    let mut printer = crate::printer::new_printer(
-        crate::printer::PrinterOptions {
-            target: crate::flags::ScriptTarget::ES_NEXT,
-            ..crate::printer::PrinterOptions::default()
-        },
-        crate::printer::PrintHandlers::default(),
-        None,
-    );
-    let printed = babel_indent(&printer.emit(file.root, file.root));
-    let mut lines = printed
-        .lines()
-        .filter(|line| !line.starts_with("// extracted from "))
-        .map(|line| line.trim_end().to_owned())
-        .collect::<Vec<_>>();
-    // `export default` and the following expression stay on one line.
-    let mut index = 0;
-    while index + 1 < lines.len() {
-        let trimmed = lines[index].trim_end();
-        let next = lines[index + 1].trim_start();
-        let export_default = trimmed.ends_with("export default") && trimmed.trim() == "export default";
-        // Payload comparison keeps a line only when it contains `() =>`.
-        // A binding and its initializer, and a call and its pure argument,
-        // have to share that line.
-        let join = export_default
-            || trimmed.ends_with('=')
-            || trimmed.ends_with("=>")
-            || (trimmed.ends_with('(') && next.starts_with("/*#__PURE__*/"));
-        if join {
-            let indent = lines[index].chars().take_while(|c| *c == ' ').count();
-            let head = if export_default { "export default" } else { trimmed.trim() };
-            lines[index] = format!("{}{head} {next}", " ".repeat(indent));
-            lines.remove(index + 1);
-            continue;
-        }
-        index += 1;
-    }
-    let joined = lines.join("\n") + "\n";
-    if std::env::var("DBG").is_ok() {
-        let _ = std::fs::write("/tmp/fmt.ts", &joined);
-    }
-    joined
 }
 
 /// Compiler emit hook. One call. Declaration files are not runtime JS.
@@ -496,13 +447,9 @@ fn printed_wrapper(node: Node, work: &mut Build, marked: bool) -> Option<String>
     } else {
         slice_node(work.code.as_str(), body)
     };
-    let replacement = if body.kind() == SyntaxKind::Block {
-        author
-    } else {
-        // An expression body is printed as the arrow's right-hand side.
-        author
-    };
-    let printed = printed.replacen("{ __tgpu_body__; }", &replacement, 1).replacen("__tgpu_body__", &replacement, 1);
+    let printed = printed
+        .replacen("{ __tgpu_body__; }", &author, 1)
+        .replacen("__tgpu_body__", &author, 1);
     // The payload comparison keeps only lines that contain `() =>`. The
     // wrapper's arrow has to stay on the same line as the pure comment, and
     // an empty arrow must not break before the metadata that follows.
@@ -2901,9 +2848,31 @@ fn transpile_statement(node: Node, code: &str, ctx: &mut TinyCtx) -> Option<Stri
         _ => {
             // Upstream: `Unsupported JS functionality: ${node.type}`.
             ctx.unsupported
-                .get_or_insert_with(|| format!("Unsupported JS functionality: {:?}", node.kind()));
+                .get_or_insert_with(|| unsupported_message(node.kind()));
             None
         }
+    }
+}
+
+/// The text upstream's tinyest transpiler throws. Babel's `node.type` is not
+/// our `SyntaxKind` name: a `do/while` is `DoWhileStatement` there, and a
+/// template is `TemplateLiteral`.
+fn unsupported_message(kind: SyntaxKind) -> String {
+    match kind {
+        SyntaxKind::ArrowFunction => "Arrow functions are not supported inside TGSL.".to_owned(),
+        SyntaxKind::SpreadElement | SyntaxKind::SpreadAssignment | SyntaxKind::OmittedExpression => {
+            "Spread elements are not supported in TGSL.".to_owned()
+        }
+        SyntaxKind::MethodDeclaration | SyntaxKind::GetAccessor | SyntaxKind::SetAccessor => {
+            "Object method elements are not supported in TGSL.".to_owned()
+        }
+        SyntaxKind::DoStatement => "Unsupported JS functionality: DoWhileStatement".to_owned(),
+        SyntaxKind::TemplateExpression
+        | SyntaxKind::NoSubstitutionTemplateLiteral
+        | SyntaxKind::TaggedTemplateExpression => {
+            "Unsupported JS functionality: TemplateLiteral".to_owned()
+        }
+        other => format!("Unsupported JS functionality: {other:?}"),
     }
 }
 
@@ -3068,6 +3037,17 @@ fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
                 .properties()
                 .iter()
                 .filter_map(|prop| {
+                    if matches!(
+                        prop.kind(),
+                        SyntaxKind::SpreadAssignment
+                            | SyntaxKind::MethodDeclaration
+                            | SyntaxKind::GetAccessor
+                            | SyntaxKind::SetAccessor
+                    ) {
+                        ctx.unsupported
+                            .get_or_insert_with(|| unsupported_message(prop.kind()));
+                        return None;
+                    }
                     if prop.kind() != SyntaxKind::PropertyAssignment {
                         return None;
                     }
@@ -3088,13 +3068,8 @@ fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
         // body it cannot express must not claim to be printable. A nested
         // function is the common case: a text blob is not an expression.
         _ => {
-            ctx.unsupported.get_or_insert_with(|| {
-                if node.kind() == SyntaxKind::ArrowFunction {
-                    "Arrow functions are not supported inside TGSL.".to_owned()
-                } else {
-                    format!("Unsupported JS functionality: {:?}", node.kind())
-                }
-            });
+            ctx.unsupported
+                .get_or_insert_with(|| unsupported_message(node.kind()));
             format!("\"{}\"", slice_node(code, node))
         }
     }

@@ -165,12 +165,14 @@ fn emit_results_with(
     );
     let pooled = start_emit_files_with_pool(&source_files, |_| target.clone(), wrap)
         .map(PendingPoolEmit::wait);
-    match pooled {
+    let results = match pooled {
         Some(results) => results,
         None => run_emit_jobs(source_files, move |source_file| {
             wrap(&|| emit_source_file(source_file, &target))
         }),
-    }
+    };
+    crate::ext::precheck::rewrite_emitted_javascript(&results);
+    results
 }
 
 /// PORT: not in Go. The API emit (`handle_emit`) writes the outputs after
@@ -283,7 +285,7 @@ impl PendingEmitBatch {
         .into_iter();
 
         // `combine_emit_results` of one result is that result.
-        has_file
+        let results: Vec<EmitResult> = has_file
             .into_iter()
             .map(|has_file| {
                 if has_file {
@@ -292,7 +294,9 @@ impl PendingEmitBatch {
                     combine_emit_results(Vec::new())
                 }
             })
-            .collect()
+            .collect();
+        crate::ext::precheck::rewrite_emitted_javascript(&results);
+        results
     }
 }
 

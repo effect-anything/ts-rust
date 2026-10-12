@@ -43,6 +43,13 @@ fn transform_cli(path: Option<String>) -> ExitCode {
         }
     };
     let response = protocol::transform_file(&path, &content);
+    for diagnostic in &response.diagnostics {
+        let (line, col) = line_col(&content, diagnostic.start);
+        eprintln!(
+            "{path}({line},{col}): error {}",
+            report_message(diagnostic.code, &diagnostic.message_text)
+        );
+    }
     let virtual_path = format!("{path}.virtual{}", response.extension);
     let map_path = format!("{path}.mappings.json");
     if let Err(err) = fs::write(&virtual_path, &response.text) {
@@ -55,6 +62,31 @@ fn transform_cli(path: Option<String>) -> ExitCode {
     }
     eprintln!("wrote {virtual_path}");
     ExitCode::SUCCESS
+}
+
+/// `file.sts(line,col): error TSxxxx: message`. The message already
+/// carries `TS4001` or `SWR4001` when the expander wrote one.
+fn report_message(code: i32, message: &str) -> String {
+    if message.starts_with("TS") || message.starts_with("SWR") || code == 0 {
+        message.to_owned()
+    } else {
+        format!("TS{code}: {message}")
+    }
+}
+
+fn line_col(content: &str, start: i32) -> (usize, usize) {
+    let start = usize::try_from(start).unwrap_or(0).min(content.len());
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for ch in content[..start].chars() {
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 fn serve() -> ExitCode {

@@ -4,35 +4,30 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Sweetener and TypeGPU transforms. Not linked into tsgo."
+description = "Content mapper: Sweetener, then the TypeGPU session. Not linked into tsgo."
 
 [[bin]]
 name = "ext-syntax"
 path = "src/bin/ext_syntax.rs"
 
 [lib]
-crate-type = ["rlib"]
-
-[features]
-default = []
-# One scan of the form probes per Printer, instead of `str::contains` on every
-# node. Off by default: a build without this feature keeps the old path.
-sweetener_fast_gates = []
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+ts_ext_sweetener = { path = "../ts_ext_sweetener" }
+ts_ext_typegpu = { path = "../ts_ext_typegpu" }
 ts_goport = { path = "../ts_goport" }
+napi = { version = "3", default-features = false, features = ["napi4"] }
+napi-derive = "3"
 
-[[example]]
-name = "capture_ours"
-path = "examples/capture_ours.rs"
+[build-dependencies]
+napi-build = "2"
 
-[[example]]
-name = "check_cases"
-path = "examples/check_cases.rs"
+[lints.rust]
+# napi-derive emits unsafe. The rest of this crate does not use it.
+unsafe_code = "allow"
 
-[[example]]
-name = "diff_typegpu"
-path = "examples/diff_typegpu.rs"
-
-[lints]
-workspace = true
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+redundant_clone = "warn"

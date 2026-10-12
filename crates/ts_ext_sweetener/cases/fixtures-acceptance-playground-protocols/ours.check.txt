@@ -1,0 +1,2 @@
+input.sts(1,1): error TS18069: The content mapper 'ext-syntax' failed to transform this file.
+  The content mapper returned an invalid transform response.

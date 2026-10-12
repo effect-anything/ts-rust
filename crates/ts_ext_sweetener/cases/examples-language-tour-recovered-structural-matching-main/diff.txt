@@ -1,0 +1,35 @@
+--- theirs.ts
++++ ours.ts
+@@ -3,31 +3,8 @@
+ | { kind: "key"; key: string }
+ | { kind: "scroll"; delta: number };
+ export function describe(event: Event): string {
+-return ((matched) => { if ((typeof matched === "object" && matched !== null
+-&& ((matched)["kind"]) === "click"
+-&& (typeof (matched)["at"] === "object" && (matched)["at"] !== null
+-&& true
+-&& true))) {
+-;
+-const x = ((matched)["at"])["x"];
+-const y = ((matched)["at"])["y"];
+-return `click at ${String(x)},${String(y)}`;
+-} if ((typeof matched === "object" && matched !== null
+-&& ((matched)["kind"]) === "key"
+-&& true)) {
+-;
+-const key = (matched)["key"];
+-if (key === "Escape") { return "escape"; }
+-} if ((typeof matched === "object" && matched !== null
+-&& ((matched)["kind"]) === "key"
+-&& true)) {
+-;
+-const key = (matched)["key"];
+-return `key ${key}`;
++return ((matched) => { if (typeof matched === "object" && matched !== null && ((matched)["kind"]) === "click" && typeof (matched)["at"] === "object" && (matched)["at"] !== null && true && true) { ; const x = ((matched)["at"])["x"];const y = ((matched)["at"])["y"]; return `click at ${String(x)},${String(y)}`; } if (typeof matched === "object" && matched !== null && ((matched)["kind"]) === "key" && true) { ; const key = (matched)["key"]; if (key === "Escape") { return "escape"; } } if (typeof matched === "object" && matched !== null && ((matched)["kind"]) === "key" && true) { ; const key = (matched)["key"]; return `key ${key}`; } return "something else"; })(event) ?? "something else";
+ }
+-return "something else";
+-})(event) ?? "something else";
+-}
+ export const clicked: string = describe({
+ kind: "click",
+ at: { x: 3, y: 4 },

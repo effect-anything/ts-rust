@@ -4,8 +4,6 @@
 //! one `{fileName, content}` into the `transform` result: virtual text,
 //! virtual extension, span-map tuples, and original-file diagnostics.
 
-
-
 /// One `transform` response. `mappings` is spanmap JSON:
 /// `[virtualStart, virtualLength, originalStart, originalLength, kind]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,13 +22,16 @@ pub struct ProtocolDiagnostic {
     pub code: i32,
 }
 
-/// `TS4001` is the Sweetener macro-rule failure. Other messages stay `0`.
+/// The number in a `TS4001` or `SWR4001` message. Other messages stay `0`.
 fn diagnostic_code(message: &str) -> i32 {
-    if message.starts_with("TS4001") {
-        4001
-    } else {
-        0
-    }
+    let rest = message
+        .strip_prefix("TS")
+        .or_else(|| message.strip_prefix("SWR"));
+    let Some(rest) = rest else {
+        return 0;
+    };
+    let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    digits.parse().unwrap_or(0)
 }
 
 /// Run the transform the file asks for.

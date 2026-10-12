@@ -1,0 +1,5 @@
+{
+  "sweetener": "2e78489",
+  "sweetenerRef": "origin/main",
+  "note": "Case bytes are the pin 2e78489 capture. vendor/sweetener is not that pin unless the checkout is. sync-cases.py --refresh copies vendor bytes and will not match this pin otherwise."
+}

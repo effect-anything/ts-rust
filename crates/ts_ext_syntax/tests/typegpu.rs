@@ -1,3 +1,6 @@
+//! `"use gpu"` is not a Sweetener expansion. The operator rewrite is
+//! `ts_ext_typegpu`, after this pass.
+
 use ts_ext_syntax::{ExpandRequest, Phase, expand};
 
 fn check(code: &str) -> ts_ext_syntax::Expansion {

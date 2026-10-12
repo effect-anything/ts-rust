@@ -36,8 +36,7 @@ check must not see belong to that plugin's build phase, not to `precheck`.
 | path | role |
 | --- | --- |
 | `crates/ts_goport/src/ext/` | Internal rewrites. Not part of the port. |
-| `crates/ts_ext_syntax/` | External mapper and plugin session. |
-| `crates/ext_syntax_node/` | Node-API for the plugin session. |
+| `crates/ts_ext_syntax/` | External mapper, plugin session, and its Node-API. |
 
 Port files that call the hooks: the compiler host, the content-mapper
 result parser, the project parse cache, and the emit decision. Those calls
