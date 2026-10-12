@@ -8,17 +8,17 @@
 // postinstall npm/install.js (as lib/install.js), which rewrites bin/tsc on POSIX as a sh and JS
 // polyglot: sh runs the native tsc without Node, and Node runs Go's launcher (see there).
 //
-// PORT: not in Go. `--name tsc-rs` writes the port's own package set from the same input:
-// `tsc-rs` (bin `tsc-rs`, npm/getExePath.js as lib/getExePath.js, npm/tsc-rs-readme.md) and one
-// platform package `@tsc-rs/<os>-<arch>` per --exe. The default name `typescript` is Go's set.
-// tsc-rs has its own --package-version. The tsc keeps reporting the TypeScript version (--version):
-// the compiler matches `typesVersions` against it, so a tsc that reported 0.1.0 would pick the
-// typings that packages keep for TypeScript 5.6 and older. The main package records it as
+// PORT: not in Go. `--name @effect-x/tsc` writes the port's own package set from the same input:
+// `@effect-x/tsc` (bin `tsc`, npm/getExePath.js as lib/getExePath.js, npm/tsc-readme.md) and one
+// platform package `@effect-x/tsc-<os>-<arch>` per --exe. The default name `typescript` is Go's set.
+// The port's package has its own --package-version. The tsc keeps reporting the TypeScript version
+// (--version): the compiler matches `typesVersions` against it, so a tsc that reported 0.1.0 would
+// pick the typings that packages keep for TypeScript 5.6 and older. The main package records it as
 // `tscVersion`, for the postinstall check.
 //
 // usage: node npm/pack.mjs --layout <typescript|typescript-go> --go-dir <dir> --exe <tsc>...
 //          --libs <dir> --dist <dir> --version <v> --git-head <sha> --out <dir> [--native-bin]
-//          [--name <typescript|tsc-rs>] [--package-version <v>]
+//          [--name <typescript|@effect-x/tsc>] [--package-version <v>]
 //
 // --version is the version the tsc reports. --package-version is the npm version (default
 // --version).
@@ -57,9 +57,12 @@ for (const name of ["layout", "go-dir", "exe", "libs", "dist", "version", "git-h
 }
 const { layout, "go-dir": goDir, libs, dist, version, "git-head": gitHead, out, name } = args;
 if (layout !== "typescript" && layout !== "typescript-go") throw new Error(`unknown --layout ${layout}`);
-if (name !== "typescript" && name !== "tsc-rs") throw new Error(`unknown --name ${name}`);
+if (name !== "typescript" && name !== "@effect-x/tsc") throw new Error(`unknown --name ${name}`);
 const asTypescript = name === "typescript";
-const binName = asTypescript ? "tsc" : name;
+const binName = "tsc";
+const scope = asTypescript ? "" : name.slice(0, name.indexOf("/"));
+const unscoped = asTypescript ? name : name.slice(name.indexOf("/") + 1);
+const readmeStem = asTypescript ? "" : unscoped;
 const packageVersion = args["package-version"] ?? version;
 const atN = layout === "typescript";
 const root = atN ? path.dirname(goDir) : goDir;
@@ -76,13 +79,15 @@ const platforms = args.exe.map(value => {
         nodeOs,
         nodeArch,
         exe,
-        packageName: asTypescript ? `@typescript/typescript-${nodeOs}-${nodeArch}` : `@${name}/${nodeOs}-${nodeArch}`,
+        packageName: asTypescript
+            ? `@typescript/typescript-${nodeOs}-${nodeArch}`
+            : `${scope}/${unscoped}-${nodeOs}-${nodeArch}`,
     };
 });
 
 // Go: Herebyfile.mjs getPublishTag (publishAsTypescript). Go's nativePreviewReleaseVersion is
 // undefined at both layouts, so a version with no dev, beta or rc part is refused.
-// PORT: tsc-rs has no such rule; `npm publish --tag` picks its tag.
+// PORT: @effect-x/tsc has no such rule; `npm publish --tag` picks its tag.
 function publishTag() {
     const match = version.match(/-(dev|beta|rc)(?:[.-]|$)/);
     if (match?.[1]) return match[1] === "dev" ? "next" : match[1];
@@ -122,9 +127,9 @@ else {
     input.keywords = ["typescript", "tsc", "compiler", "rust"];
     // npm trusted publishing (the release workflow) needs repository.url to name the repo that
     // publishes. The platform packages copy it.
-    input.homepage = "https://github.com/pingdotgg/ts-rust";
-    input.bugs = { url: "https://github.com/pingdotgg/ts-rust/issues" };
-    input.repository = { type: "git", url: "git+https://github.com/pingdotgg/ts-rust.git" };
+    input.homepage = "https://github.com/effect-anything/tsc";
+    input.bugs = { url: "https://github.com/effect-anything/tsc/issues" };
+    input.repository = { type: "git", url: "git+https://github.com/effect-anything/tsc.git" };
 }
 delete input.scripts;
 delete input.devDependencies;
@@ -134,12 +139,12 @@ input.publishConfig = asTypescript ? { access: "public", tag: publishTag() } : {
 
 fs.rmSync(out, { recursive: true, force: true });
 
-// The main package (`typescript`, or `tsc-rs`).
-const mainDir = path.join(out, name);
+// The main package (`typescript`, or `@effect-x/tsc`). The dir name has no scope.
+const mainDir = path.join(out, unscoped);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(here);
 
-// PORT: tsc-rs ships the port's MIT LICENSE, and a NOTICE.txt with the licenses and notices of
+// PORT: @effect-x/tsc ships the port's MIT LICENSE, and a NOTICE.txt with the licenses and notices of
 // the code it ports or copies (the repo's NOTICE.md and licenses/). Go's set keeps TypeScript's.
 function portNotice() {
     const part = (title, file) => [`${"=".repeat(78)}\n${title}\n${"=".repeat(78)}\n`, fs.readFileSync(file, "utf8")];
@@ -193,7 +198,7 @@ if (asTypescript) {
     fs.copyFileSync(path.join(inputDir, "typescript-package-readme.md"), path.join(mainDir, "README.md"));
 }
 else {
-    fs.copyFileSync(path.join(here, `${name}-readme.md`), path.join(mainDir, "README.md"));
+    fs.copyFileSync(path.join(here, `${readmeStem}-readme.md`), path.join(mainDir, "README.md"));
     fs.copyFileSync(path.join(here, "getExePath.js"), path.join(mainDir, "lib", "getExePath.js"));
 }
 if (args["native-bin"]) {
@@ -206,7 +211,7 @@ writeLicense(mainDir);
 
 // The platform packages: the lib files and the native tsc in lib/.
 for (const { nodeOs, nodeArch, exe, packageName } of platforms) {
-    const platformDir = path.join(out, `${name}-${nodeOs}-${nodeArch}`);
+    const platformDir = path.join(out, `${unscoped}-${nodeOs}-${nodeArch}`);
     const platformPackage = {
         ...input,
         bin: undefined,

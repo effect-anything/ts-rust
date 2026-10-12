@@ -43,8 +43,8 @@ Also worth mentioning: I've never read a line of this code.
 Be warned, I have no idea if this will actually work.
 
 ```sh
-npm install -D tsc-rs
-npx tsc-rs -p tsconfig.json
+npm install -D @effect-x/tsc
+npx tsc -p tsconfig.json
 ```
 
 ## How did this go?
@@ -73,22 +73,22 @@ behavior and has the same command line (`tsc`), language server and API.
 ## Install
 
 ```sh
-npm install -D tsc-rs
-npx tsc-rs -p tsconfig.json
+npm install -D @effect-x/tsc
+npx tsc -p tsconfig.json
 ```
 
-`tsc-rs` takes the same options as `tsc`. The npm package is `tsc-rs` so that it does not clash
-with the `typescript` package. Each [release](https://github.com/pingdotgg/ts-rust/releases) also
+`@effect-x/tsc` takes the same options as `tsc`. The npm package is `@effect-x/tsc` so that it does not clash
+with the `typescript` package. Each [release](https://github.com/effect-anything/tsc/releases) also
 has a standalone archive per platform: the `tsc` binary with the lib files next to it.
 
 Platforms: Linux x64 and arm64 (static, any distribution), macOS arm64, and (from the first
 release after 0.2.0) macOS x64, Windows x64 and Windows arm64.
 
-To use it in VS Code, see the [npm package README](npm/tsc-rs-readme.md#vs-code).
+To use it in VS Code, see the [npm package README](npm/tsc-readme.md#vs-code).
 
 ## Effect diagnostics
 
-`tsc-rs` has the [Effect](https://effect.website) language service diagnostics built in (codes
+`@effect-x/tsc` has the [Effect](https://effect.website) language service diagnostics built in (codes
 377xxx), so an Effect project needs no second compiler. They come from the same check as the
 TypeScript diagnostics, and the language server shows them too. They run only when the tsconfig has
 the plugin, as with `@effect/language-service`:
@@ -389,7 +389,7 @@ Push a tag `v<version>` (for example `v0.1.0`). The
 [release workflow](.github/workflows/release.yml) builds, packs and tests the packages, publishes
 them to npm and creates a GitHub release. A stable version goes to the dist-tag `latest`, and a
 prerelease version (`v0.2.0-beta.1`) to `next` and a GitHub prerelease. See
-[npm/README.md](npm/README.md#tsc-rs-releases).
+[npm/README.md](npm/README.md#effect-xtsc-releases).
 
 ## License
 

@@ -1,6 +1,7 @@
-# Builds, packs and tests the tsc-rs release: the npm packages tsc-rs, @tsc-rs/linux-x64,
-# @tsc-rs/linux-arm64, @tsc-rs/darwin-arm64, @tsc-rs/darwin-x64, @tsc-rs/win32-x64 and
-# @tsc-rs/win32-arm64, and one standalone archive per platform (tsc and the lib files; a .zip with
+# Builds, packs and tests the @effect-x/tsc release: the npm packages @effect-x/tsc,
+# @effect-x/tsc-linux-x64, @effect-x/tsc-linux-arm64, @effect-x/tsc-darwin-arm64,
+# @effect-x/tsc-darwin-x64, @effect-x/tsc-win32-x64 and @effect-x/tsc-win32-arm64, and one
+# standalone archive per platform (tsc and the lib files; a .zip with
 # tsc.exe for Windows).
 #
 # A tag v<version> also publishes the npm packages and creates a GitHub release. A stable version
@@ -148,7 +149,7 @@ jobs:
       # As build-release.sh: the musl build compiles jemalloc with musl-gcc, links static with no PIE,
       # and has bin/tsgo.rs JEMALLOC_CONF built in, so the tsc does not exec itself at start. No
       # GOPORT_BUILD_VERSION: the tsc reports the TypeScript version, which typesVersions matching
-      # reads (npm/README.md, "tsc-rs releases"). Both builds below use this environment.
+      # reads (npm/README.md, "@effect-x/tsc releases"). Both builds below use this environment.
       - name: Build environment
         if: runner.os == 'Linux'
         run: |
@@ -270,7 +271,7 @@ jobs:
         run: |
           bins="$RUNNER_TEMP/bins"
           chmod +x "$bins"/tsc-*/tsc "$bins"/tsc-*/tsc.exe
-          scripts/goport/npm-pack.sh --name tsc-rs --package-version "$VERSION" \
+          scripts/goport/npm-pack.sh --name @effect-x/tsc --package-version "$VERSION" \
             --also "linux-arm64=$bins/tsc-linux-arm64/tsc" --also "darwin-arm64=$bins/tsc-darwin-arm64/tsc" \
             --also "darwin-x64=$bins/tsc-darwin-x64/tsc" \
             --also "win32-x64=$bins/tsc-win32-x64/tsc.exe" --also "win32-arm64=$bins/tsc-win32-arm64/tsc.exe" \
@@ -282,9 +283,9 @@ jobs:
           pkg="$RUNNER_TEMP/pkg" dist="$RUNNER_TEMP/dist"
           mkdir -p "$dist"
           for platform in linux-x64 linux-arm64 darwin-arm64 darwin-x64 win32-x64 win32-arm64; do
-            name="tsc-rs-$VERSION-$platform"
+            name="tsc-$VERSION-$platform"
             mkdir -p "$RUNNER_TEMP/archive/$name"
-            cp -r "$pkg/tsc-rs-$platform/lib/." "$pkg/tsc-rs-$platform/LICENSE" "$pkg/tsc-rs-$platform/NOTICE.txt" "$RUNNER_TEMP/archive/$name/"
+            cp -r "$pkg/tsc-$platform/lib/." "$pkg/tsc-$platform/LICENSE" "$pkg/tsc-$platform/NOTICE.txt" "$RUNNER_TEMP/archive/$name/"
             if [[ $platform == win32-* ]]; then
               (cd "$RUNNER_TEMP/archive" && python3 -m zipfile -c "$dist/$name.zip" "$name")
             else
@@ -350,32 +351,32 @@ jobs:
           mkdir proj && cd proj
           echo '{"name":"smoke","private":true}' > package.json
           # The other platform's package is not on npm yet: --offline skips that optional dependency.
-          npm install --offline --no-audit --no-fund "$dist/tsc-rs-${{ matrix.platform }}-$VERSION.tgz" "$dist/tsc-rs-$VERSION.tgz"
-          npx tsc-rs --version
+          npm install --offline --no-audit --no-fund "$dist/effect-x-tsc-${{ matrix.platform }}-$VERSION.tgz" "$dist/effect-x-tsc-$VERSION.tgz"
+          npx tsc --version
           echo 'export const x: number = 1;' > ok.ts
-          npx tsc-rs --noEmit --strict ok.ts
+          npx tsc --noEmit --strict ok.ts
           echo 'const x: number = "a";' > bad.ts
           set +e
-          npx tsc-rs --noEmit bad.ts > check.txt
+          npx tsc --noEmit bad.ts > check.txt
           rc=$?
           set -e
           cat check.txt
           [[ $rc == 2 ]] && grep -q "error TS2322" check.txt
           # Emit.
-          npx tsc-rs --outDir out --declaration ok.ts
+          npx tsc --outDir out --declaration ok.ts
           cat out/ok.js out/ok.d.ts
           grep -q "export const x = 1;" out/ok.js
       - name: Archive check
         if: runner.os != 'Windows'
         run: |
           dist="$RUNNER_TEMP/dist"
-          tar -xzf "$dist/tsc-rs-$VERSION-${{ matrix.platform }}.tar.gz" -C "$RUNNER_TEMP"
-          "$RUNNER_TEMP/tsc-rs-$VERSION-${{ matrix.platform }}/tsc" --version
+          tar -xzf "$dist/tsc-$VERSION-${{ matrix.platform }}.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/tsc-$VERSION-${{ matrix.platform }}/tsc" --version
       - name: Archive check (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $name = "tsc-rs-$env:VERSION-${{ matrix.platform }}"
+          $name = "tsc-$env:VERSION-${{ matrix.platform }}"
           Expand-Archive "$env:RUNNER_TEMP\dist\$name.zip" $env:RUNNER_TEMP
           & "$env:RUNNER_TEMP\$name\tsc.exe" --version
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -412,9 +413,10 @@ jobs:
           tag=latest
           [[ $VERSION != *-* ]] || tag=next
           echo "dist-tag $tag"
-          for pkg in @tsc-rs/linux-x64:tsc-rs-linux-x64 @tsc-rs/linux-arm64:tsc-rs-linux-arm64 \
-            @tsc-rs/darwin-arm64:tsc-rs-darwin-arm64 @tsc-rs/darwin-x64:tsc-rs-darwin-x64 \
-            @tsc-rs/win32-x64:tsc-rs-win32-x64 @tsc-rs/win32-arm64:tsc-rs-win32-arm64 tsc-rs:tsc-rs; do
+          for pkg in @effect-x/tsc-linux-x64:effect-x-tsc-linux-x64 @effect-x/tsc-linux-arm64:effect-x-tsc-linux-arm64 \
+            @effect-x/tsc-darwin-arm64:effect-x-tsc-darwin-arm64 @effect-x/tsc-darwin-x64:effect-x-tsc-darwin-x64 \
+            @effect-x/tsc-win32-x64:effect-x-tsc-win32-x64 @effect-x/tsc-win32-arm64:effect-x-tsc-win32-arm64 \
+            @effect-x/tsc:effect-x-tsc; do
             name=${pkg%%:*} file=./dist/${pkg#*:}-$VERSION.tgz
             [[ -f $file ]] || { echo "::error::missing package $file"; exit 1; }
             if npm view "$name@$VERSION" version > /dev/null 2>&1; then
@@ -427,8 +429,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          pre=() install="npm install -D tsc-rs"
-          [[ $VERSION != *-* ]] || pre=(--prerelease) install="npm install -D tsc-rs@next"
+          pre=() install="npm install -D @effect-x/tsc"
+          [[ $VERSION != *-* ]] || pre=(--prerelease) install="npm install -D @effect-x/tsc@next"
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" "${pre[@]}" \
-            --title "tsc-rs $VERSION" --generate-notes \
+            --title "@effect-x/tsc $VERSION" --generate-notes \
             --notes "Install with \`$install\`, or download the archive for your platform."

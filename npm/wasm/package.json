@@ -5,7 +5,7 @@
     "license": "MIT AND Apache-2.0",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/pingdotgg/ts-rust.git",
+        "url": "git+https://github.com/effect-anything/tsc.git",
         "directory": "npm/wasm"
     },
     "type": "module",

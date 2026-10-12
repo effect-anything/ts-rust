@@ -1,8 +1,8 @@
-// lib/getExePath.js of the tsc-rs package set (npm/pack.mjs --name tsc-rs). It replaces Go's
-// getExePath.js, which finds `@typescript/<name>-<platform>-<arch>`. The bin launcher (lib/tsc.js),
-// the JS API and the postinstall (lib/install.js) import it as `#getExePath`.
+// lib/getExePath.js of the @effect-x/tsc package set (npm/pack.mjs --name @effect-x/tsc). It
+// replaces Go's getExePath.js, which finds `@typescript/<name>-<platform>-<arch>`. The bin launcher
+// (lib/tsc.js), the JS API and the postinstall (lib/install.js) import it as `#getExePath`.
 //
-// The native tsc of package <name> is lib/tsc in its platform package `@<name>/<platform>-<arch>`.
+// The native tsc of package <scope>/<name> is lib/tsc in <scope>/<name>-<platform>-<arch>.
 import fs from "node:fs";
 import module from "node:module";
 import path from "node:path";
@@ -11,7 +11,10 @@ import { fileURLToPath } from "node:url";
 export default function getExePath() {
     const __dirname = path.dirname(fileURLToPath(import.meta.url));
     const { name } = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
-    const platformPackageName = `@${name}/${process.platform}-${process.arch}`;
+    const platformPackageName = `${name}-${process.platform}-${process.arch}`;
+    if (!platformPackageName.startsWith("@")) {
+        throw new Error(`Unable to resolve a platform package for ${name}.`);
+    }
     let exeDir;
     try {
         const packageJson = typeof import.meta.resolve === "function"
