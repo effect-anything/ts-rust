@@ -245,6 +245,18 @@ impl<'a> Printer<'a> {
                 index = self.last_form_next;
                 continue;
             }
+            // `data`, `match`, and `method` have compiled rules. The form
+            // pass prints a different program (no trailing comma, an arrow
+            // body instead of `return`).
+            if let Some(name) = nodes.get(index).and_then(macro_head) {
+                if name == "method"
+                    && macro_call_position(nodes, index)
+                    && self.compiled_rule_matches(nodes, index, name)
+                {
+                    index = self.expand_head(nodes, index, name);
+                    continue;
+                }
+            }
             if self.try_form(nodes, index) {
                 index = self.last_form_next;
                 continue;
@@ -262,7 +274,10 @@ impl<'a> Printer<'a> {
                     // `(service)` is a parameter. A bare name that no rule
                     // claims is ordinary TypeScript. A following group or
                     // token is a call the rules rejected.
-                    if macro_invocation(nodes, index) && self.rules_reject(nodes, index) {
+                    if !jsx_child_context(nodes, index)
+                        && macro_invocation(nodes, index)
+                        && self.rules_reject(nodes, index)
+                    {
                         index = self.last_form_next;
                         continue;
                     }
@@ -770,8 +785,15 @@ impl<'a> Printer<'a> {
                 // `#core(...)` hides its binders from the template tree.
                 // The rendered text is the binding that must not collide.
                 self.define_syntax(&rule.template, &matched.captures);
-                let introduced =
+                let mut introduced =
                     introduced_names(&rule.introduced, &replacement, &matched.captures);
+                // `#join($name, prefix: "toggle")` is the binding the author
+                // asked for. A later function may use the same spelling.
+                // `current` in the template is not a join, so it still becomes
+                // `current_1` the next time the template is stamped.
+                let mut joins = std::collections::HashSet::new();
+                join_spellings(&rule.template, &matched.captures, &mut joins);
+                introduced.retain(|name| !joins.contains(name));
                 let plan = self.hygiene_plan(&introduced);
                 if let Some(plan) = &plan {
                     let (shielded, originals) = shield_captures(&replacement, &protected);
@@ -1383,32 +1405,6 @@ impl<'a> Printer<'a> {
             } else {
                 self.expand_replacement(&rewritten.text)
             };
-        // `data Option` constructors are values. The captured file keeps an
-        // unused constructor with `void None;` after the last statement.
-        // A missing `void` is not shape.
-        if token_is(Some(&nodes[index]), "data") && self.depth == 0 {
-            if let Some(name) = first_const_name(&expanded) {
-                self.form_signals.push(("__void_decl".to_owned(), name));
-            }
-            // The captured union has no semicolon after an empty member,
-            // and the captured constructor is `<T>`, not `<T,>`. Those
-            // tokens survive canonical comparison.
-            if expanded.contains("readonly tag: \"None\"") {
-                expanded =
-                    expanded.replace("{ readonly tag: \"None\"; }", "{ readonly tag: \"None\" }");
-                expanded = expanded.replace("value: T; }", "value: T }");
-                expanded = expanded.replace("<T,>", "<T>");
-            }
-        }
-        // The hygiene match is an array element. Its empty arm is
-        // `if (tag === "None") return 0;` with no braces. The acceptance
-        // file keeps the braces. A missing brace is not shape.
-        if token_is(Some(&nodes[index]), "match") && self.source.contains("hygieneResult") {
-            expanded = expanded.replace(
-                "if (this.value.tag === \"None\") { return 0; }",
-                "if (this.value.tag === \"None\") return 0;",
-            );
-        }
         // Channel operators name `put` and `take`. The captured file still
         // declares `Effect`, `put`, and `take` when the input does not.
         // The hygiene input is that case. Do not invent them twice.
@@ -1840,6 +1836,9 @@ enum Tpl {
     /// the hole belongs to; it is not text to print.
     Metavar {
         hole: String,
+        /// `$parameter` this hole belongs to, so two parameters do not share
+        /// one capture.
+        key: String,
     },
     /// `#trim($path)` — that capture with surrounding whitespace removed.
     Trim {
@@ -3152,7 +3151,26 @@ fn read_metavar(children: &[Syntax]) -> Option<Tpl> {
     if hole.is_empty() {
         return None;
     }
-    Some(Tpl::Metavar { hole })
+    let mut key = String::new();
+    let mut index = 1;
+    if operator_is(children.get(index), ",") {
+        index += 1;
+    }
+    if let Some((path, _, _)) = read_var_path(children, index) {
+        key = path;
+    }
+    Some(Tpl::Metavar { hole, key })
+}
+
+fn metavar_hole(hole: &str, key: &str, captures: &HashMap<String, Capture>) -> String {
+    let Some(text) = capture_text(captures, key) else {
+        return hole.to_owned();
+    };
+    let text = text.trim();
+    if text.is_empty() || !is_ident_text(text) {
+        return hole.to_owned();
+    }
+    format!("{hole}_{text}")
 }
 
 /// `#trim($path)` and `#trim($path.field)`.
@@ -4724,12 +4742,11 @@ fn match_pats_in(
                 // A repetition's captures are stored under each inner name.
                 let mut grouped: HashMap<String, Vec<Vec<(String, Capture)>>> = HashMap::new();
                 for one in &many {
-                    for (name, value) in one {
-                        let key: String = name.clone();
-                        grouped
-                            .entry(key)
-                            .or_default()
-                            .push(vec![(name.clone(), value.clone())]);
+                    // Every hole in this iteration stays on the row. Walking
+                    // `$initial` must still see the `$value` captured beside it.
+                    let full = one.clone();
+                    for (name, _) in one {
+                        grouped.entry(name.clone()).or_default().push(full.clone());
                     }
                 }
                 // `$($body:stmt)*` with no separator is the whole interior,
@@ -5969,6 +5986,57 @@ fn local_syntax_end(nodes: &[Syntax], index: usize) -> Option<usize> {
 
 /// A following group or word is an attempted call. A name at the end of
 /// `(service)` is not, once no rule has claimed it.
+/// `deferred {name}` inside `<p>…</p>` is text, not the statement macro.
+fn join_spellings(
+    template: &[Tpl],
+    captures: &HashMap<String, Capture>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for part in template {
+        match part {
+            Tpl::Join {
+                name,
+                prefix,
+                suffix,
+                casing,
+            } => {
+                if let Some(text) = capture_text(captures, name) {
+                    out.insert(join_identifier(prefix, text.trim(), suffix, casing));
+                }
+            }
+            Tpl::Core(inner) | Tpl::Rep { inner, .. } | Tpl::Define(inner) => {
+                join_spellings(inner, captures, out);
+            }
+            Tpl::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                join_spellings(then_body, captures, out);
+                if let Some(else_body) = else_body {
+                    join_spellings(else_body, captures, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn jsx_child_context(nodes: &[Syntax], index: usize) -> bool {
+    let mut stack = 0i32;
+    let mut cursor = 0usize;
+    while cursor < index {
+        if operator_is(nodes.get(cursor), "<") && !operator_is(nodes.get(cursor + 1), "/") {
+            stack += 1;
+        } else if operator_is(nodes.get(cursor), "<") && operator_is(nodes.get(cursor + 1), "/") {
+            stack -= 1;
+            cursor += 1;
+        }
+        cursor += 1;
+    }
+    stack > 0
+}
+
 fn macro_invocation(nodes: &[Syntax], index: usize) -> bool {
     match nodes.get(index + 1) {
         Some(Syntax::Group { .. } | Syntax::Token { .. } | Syntax::String { .. }) => true,
@@ -6746,9 +6814,9 @@ fn render_keeping_holes(out: &mut String, template: &[Tpl], captures: &HashMap<S
                 render_keeping_holes(out, inner, captures);
                 out.push('}');
             }
-            Tpl::Metavar { hole } => {
+            Tpl::Metavar { hole, key } => {
                 out.push('$');
-                out.push_str(hole);
+                out.push_str(&metavar_hole(hole, key, captures));
             }
             Tpl::Trim { path } => {
                 if capture_at(captures, path).is_some() {
@@ -6885,8 +6953,11 @@ fn render(
             }
             Tpl::Define(_) => {}
             Tpl::Unknown { .. } => {}
-            Tpl::Metavar { hole } => {
-                if let Some(text) = capture_text(captures, hole) {
+            Tpl::Metavar { hole, key } => {
+                let name = metavar_hole(hole, key, captures);
+                if let Some(text) =
+                    capture_text(captures, &name).or_else(|| capture_text(captures, hole))
+                {
                     let start = out.len();
                     out.push_str(text.trim());
                     protected.push((start, out.len()));
@@ -7859,6 +7930,14 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
             } else {
                 scoped.push((leaf.to_owned(), Capture::Text(text.clone())));
                 scoped.push((path.to_owned(), Capture::Text(text.clone())));
+            }
+            for (key, value) in row {
+                if key == leaf || key == path {
+                    continue;
+                }
+                if let Capture::Text(text) = value {
+                    scoped.push((key.clone(), Capture::Text(text.clone())));
+                }
             }
             return scoped;
         }

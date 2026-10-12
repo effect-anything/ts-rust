@@ -20,9 +20,6 @@ pub fn expand_apps(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
     if let Some(item) = match_error_item(source, nodes, index) {
         return Some(item);
     }
-    if let Some(item) = match_service_item(source, nodes, index) {
-        return Some(item);
-    }
     if let Some(item) = match_effect_item(source, nodes, index) {
         return Some(item);
     }
@@ -32,6 +29,8 @@ pub fn expand_apps(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
     if let Some(item) = match_gen_expr(source, nodes, index) {
         return Some(item);
     }
+    // `query` and `table` still print from here. Their compiled rules do
+    // not match the captured programs.
     if let Some(item) = match_query_expr(source, nodes, index) {
         return Some(item);
     }

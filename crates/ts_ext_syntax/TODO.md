@@ -51,7 +51,7 @@ The token walk should not know Effect, signals, or React. It does:
 - [x] `#metavar` is a hole of the generated rule (`Tpl::Metavar`). `#trim` and `#index` render too.
 - [x] `macro_call_position` accepts `=`, `+=`, and the other assignment spellings, plus a bare name and a comma. A closer such as `)` is not a call.
 - [x] A relative runtime import is rebased from the macro file onto the file that imported it. Syntax imports inside a macro module are loaded too.
-- [ ] Seven captured cases still differ: memoized, function-shadow, vite-react main, both multi-part-methods, both adt. The form pass still owns service, query, table, and memoized where the compiled rule does not match.
+- [ ] Three captured cases still differ: function-shadow, and both multi-part-methods. `service` is no longer a keyword rewrite. `query` and `table` still are, because their compiled rules do not match the captured programs. The React compiler fixture form still prints `memoized`.
 
 ### Goal
 

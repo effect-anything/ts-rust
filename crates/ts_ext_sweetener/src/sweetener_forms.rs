@@ -460,7 +460,7 @@ fn match_data_item(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
         start: node_start(&nodes[index]),
         end: node_end(&nodes[cursor]),
         next: cursor + 1,
-        text: expand_data_decl_hygiene(&name, &type_param, &variants, &outer_consts(source)),
+        text: expand_data_decl_hygiene(&name, &type_param, &variants, &[]),
         binds: Vec::new(),
         method: None,
     })
@@ -587,12 +587,7 @@ fn match_sweetener_match(source: &str, nodes: &[Syntax], index: usize) -> Option
     let body = nodes.get(body_at)?;
     let children = group_children(Some(body), Delimiter::Brace)?;
     let text = if let Some(arms) = parse_ctor_arms(source, children) {
-        expand_ctor_match(
-            &subject,
-            &arms,
-            &unmatched_name(nodes, index),
-            &outer_consts(source),
-        )
+        expand_ctor_match(&subject, &arms, &unmatched_name(nodes, index), &[])
     } else {
         let (arms, fallback) = parse_structural_arms(source, children)?;
         // `1 => "one",` with no `_` arm is not a finished match. The

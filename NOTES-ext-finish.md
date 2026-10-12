@@ -1,39 +1,35 @@
 # ext-finish
 
-Stopped after the expander step. Diagnostics, the single `TransformSession` API, LSP map tests, and `ext/examples/vite` are not started.
+Stopped after the expander step, on purpose. P0 review items, TypeGPU corpus, mappings feature bits, diagnostic codes, `TransformSession`, LSP tests, and the Vite example were not started. Those go to other workers.
 
 ## Done
 
-Sweetener expansion now runs the imported macro for signals, channels, and several playground forms instead of a library keyword table.
+Commit `6d2e1de14` plus the follow-up on this branch.
 
-- `#metavar("hole", $name)` is a hole of the rule `#syntax` is defining. `#trim` prints the capture with surrounding space removed. `#index` is the current repetition row.
-- A generated name such as `count` matches `count`, `count = 5`, `count += 1`, and `[count, flag]`. A closer (`(service)`) is not a call, so a parameter that shares a macro name is left alone.
-- Relative runtime imports are rebased from the macro file onto the importing file. `for syntax` imports inside a macro module are loaded, so a template can call a macro it imported.
-- Macros defined in the file being expanded are compiled. `export syntax` / `export operator` in that file are not printed as TypeScript.
-- Template interpolations (`${label}`) expand when the name is a macro. That is how `effect { seen.push(`${label}`) }` becomes `labelSignal.get()`.
-- Channel `->` / `<-` use the infix macro. The old rewrite that replaced the user's `put` / `take` declarations is gone.
-- `doSteps` binders keep the author's spelling when an outer const has the same name (`left`, not `left_1`).
-- `every_local_macro_case_matches_theirs` checks every captured case, including a macro that lives in `input.sts` rather than `macros.sts`.
+- `#metavar` holes are suffixed with the binding they belong to (`argument_minimum`), so two parameters do not share one capture. Nested segment repetitions still stamp every segment with the first parameter, so multi-part methods still drop `upper(5)`.
+- JSX text such as `deferred {deferredCount}` is not a statement macro. A failed rule there no longer discards the file.
+- Names produced by `#join` are the author's binding. A second function may reuse `toggleDetailsOpen`. A template parameter such as `current` still becomes `current_1`.
+- Repetition rows keep every hole from the same iteration, so `states { page = 1; query = ""; }` prints both names.
+- `data` / constructor `match` no longer rewrite `<T,>` away, invent `void None`, or rename a constructor field that shadows an outer `const`. The empty `None` arm keeps its braces.
+- `service` is not a keyword rewrite anymore. The imported macro matches those cases.
+- `query` and `table` are still form-pass fallbacks. Removing them loses `examples-library-macros-drizzle-schema-main` (shape) and `examples-library-macros-drizzle-query-main` (`TS4001`).
+- The React compiler fixture form still prints `memoized`. The syntax class does not accept that JSX (it stops on `/`), so removing the form loses the case. `function` with `shadows core` still does not match `examples-react-memoization-src-function-shadow`.
 
-`cargo test -p ts_ext_sweetener --offline --lib --tests` passed.
+`cargo test -p ts_ext_sweetener --offline --lib --tests` passed with the three names below excluded.
 
-Deleted `diff.txt` for the cases that now match: CSP and CSP hygiene, React hooks, fine-jsx-implementation, currying hygiene, do-notation hygiene, new-language hygiene.
+Shape-matched and `diff.txt` removed since `6d2e1de14`: vite-react main, both playground adt cases, memoized. Earlier commit already removed CSP, React hooks, fine-jsx-implementation, currying hygiene, do-notation hygiene, and new-language hygiene.
 
-## Still open
+## Still open (listed on the shape test)
 
-These seven are named in the test and still differ. The suite does not fail on them.
-
-- `examples-react-memoization-src-memoized`
 - `examples-react-memoization-src-function-shadow`
-- `examples-vite-react-src-main` (`deferred` does not match)
-- `fixtures-acceptance-playground-adt` and `-hygiene`
-- `fixtures-acceptance-playground-multi-part-methods` and `-hygiene`
-
-The form pass still prints service, query, table, memoized, and the React compiler fixture when the compiled rule does not match. `useState` / `latestRef` / signal `state` are no longer keyword rewrites.
+- `fixtures-acceptance-playground-multi-part-methods`
+- `fixtures-acceptance-playground-multi-part-methods-hygiene`
 
 ## Not started
 
-- One diagnostic prefix (`error TS<code>:`). Reader and macro errors are still `SWR1002`, `SWR1003`, and `SWR4001`.
-- `TransformSession({ typegpu, sweetener })` with `check` / `transform` / `transformFile`. The old `check()` / `build()` constructors are still the API.
-- LSP source-map edge tests.
-- `ext/examples/vite` build, and the extra Effect / TypeGPU examples.
+- JS source map after `rewrite_emitted_javascript` / API `.map` rewrite (P0).
+- `.sts` emit versus `ext/docs/sweetener.md` (P0).
+- Global parse store in `embed_metadata_reports` (P0).
+- TypeGPU corpus as `#[test]` (P1).
+- `TransformSession` mappings feature bits (P1).
+- One diagnostic prefix, One API, LSP/content-mapper tests, Vite build and extra examples.

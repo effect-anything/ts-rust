@@ -54,10 +54,6 @@ fn every_local_macro_case_matches_theirs() {
     // including a macro defined inside `input.sts`.
     let open = [
         "examples-react-memoization-src-function-shadow",
-        "examples-react-memoization-src-memoized",
-        "examples-vite-react-src-main",
-        "fixtures-acceptance-playground-adt",
-        "fixtures-acceptance-playground-adt-hygiene",
         "fixtures-acceptance-playground-multi-part-methods",
         "fixtures-acceptance-playground-multi-part-methods-hygiene",
     ];
