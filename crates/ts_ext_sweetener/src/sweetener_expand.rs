@@ -561,9 +561,14 @@ impl<'a> Printer<'a> {
                         }
                 )
             }) {
-                if let Some(matched) =
-                    match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes)
-                {
+                if let Some(matched) = match_rule_with(
+                    self.source,
+                    nodes,
+                    index,
+                    &rule.pattern,
+                    &self.classes,
+                    &rule.refines,
+                ) {
                     self.diagnose_unknown(&rule.template, node_span(&nodes[op_at]));
                     let was_core = self.printing_core;
                     if template_is_core(&rule.template) {
@@ -660,6 +665,7 @@ impl<'a> Printer<'a> {
                 start_at,
                 &rule.pattern,
                 &self.classes,
+                &rule.refines,
             );
             let Some(matched) = matched else {
                 continue;
@@ -729,9 +735,14 @@ impl<'a> Printer<'a> {
             // keep going; the diagnostic below names the macro
         }
         for rule in &rules {
-            if let Some(matched) =
-                match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes)
-            {
+            if let Some(matched) = match_rule_with(
+                self.source,
+                nodes,
+                index,
+                &rule.pattern,
+                &self.classes,
+                &rule.refines,
+            ) {
                 // `literal ... as NaN` rewrites the macro's spelling. A user
                 // `const NaN` is a different binding; the fallback rule owns it.
                 if rule
@@ -1298,8 +1309,15 @@ impl<'a> Printer<'a> {
             .filter(|macro_| macro_.name == name)
             .any(|macro_| {
                 macro_.rules.iter().any(|rule| {
-                    match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes)
-                        .is_some()
+                    match_rule_with(
+                        self.source,
+                        nodes,
+                        index,
+                        &rule.pattern,
+                        &self.classes,
+                        &rule.refines,
+                    )
+                    .is_some()
                 })
             });
         if accepted {
@@ -1327,7 +1345,15 @@ impl<'a> Printer<'a> {
             .filter(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
             .flat_map(|macro_| macro_.rules.iter())
             .any(|rule| {
-                match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes).is_some()
+                match_rule_with(
+                    self.source,
+                    nodes,
+                    index,
+                    &rule.pattern,
+                    &self.classes,
+                    &rule.refines,
+                )
+                .is_some()
             })
     }
 
@@ -1620,6 +1646,7 @@ impl<'a> Printer<'a> {
             template: Vec::new(),
             introduced: Vec::new(),
             expect: Some("upper argument segment".to_owned()),
+            refines: Vec::new(),
             literal_alias: None,
         };
         if let Some(existing) = self
@@ -1765,6 +1792,9 @@ struct Rule {
     introduced: Vec<String>,
     /// `expect "..."` on this rule. The diagnostic quotes it when present.
     expect: Option<String>,
+    /// `refine $terms length equal 1`. A match that fails one is not a match,
+    /// so the next rule of the macro can take the same tokens.
+    refines: Vec<Refine>,
     /// `literal globalThis.NaN as NaN` — the rule rewrites that spelling only
     /// when the user file has not already bound it.
     literal_alias: Option<String>,
@@ -2013,6 +2043,12 @@ fn load_syntax_module(
     for macro_ in taken {
         push_macro(&mut loaded.macros, macro_);
     }
+    // `query` calls `condition`, `conjunction`, `term` and `compare`, which
+    // are syntax in the same module. The import names `query` only. The
+    // template still needs the others, so they stay available.
+    for macro_ in found.into_values() {
+        push_macro(&mut loaded.macros, macro_);
+    }
     merge_runtime_imports(
         &mut loaded.runtime_imports,
         rebase_runtime_imports(user_dir, &path, used),
@@ -2138,6 +2174,7 @@ fn unless_macro() -> Macro {
             introduced: introduced_of(template_source, &read.children),
             template,
             expect: None,
+            refines: Vec::new(),
             literal_alias: None,
         }],
     }
@@ -2502,6 +2539,7 @@ fn rules_in_source(source: &str, body: &Syntax) -> Vec<Rule> {
                 template,
                 introduced,
                 expect,
+                refines: refines_after(source, children, group_index(children, pattern_group)),
                 literal_alias: literal_alias_before(children, index),
             });
         }
@@ -2940,6 +2978,17 @@ fn read_rep(nodes: &[Syntax], index: usize) -> (Pat, usize) {
         };
         cursor += 1;
         Some(raw)
+    } else if matches!(nodes.get(cursor), Some(Syntax::Token { raw, .. }) if is_ident_text(raw))
+        && matches!(nodes.get(cursor + 1), Some(Syntax::Operator { raw, .. }) if raw == "+" || raw == "*" || raw == "?")
+    {
+        // `$($terms:Term) and +` separates on the word. The `+` is the
+        // quantifier, not a literal after the repetition.
+        let raw = match &nodes[cursor] {
+            Syntax::Token { raw, .. } => raw.clone(),
+            _ => String::new(),
+        };
+        cursor += 1;
+        Some(raw)
     } else {
         None
     };
@@ -2947,6 +2996,11 @@ fn read_rep(nodes: &[Syntax], index: usize) -> (Pat, usize) {
         cursor += 1;
         RepKind::OneOrMore
     } else if operator_is(nodes.get(cursor), "*") {
+        cursor += 1;
+        RepKind::ZeroOrMore
+    } else if operator_is(nodes.get(cursor), "?") {
+        // `$($filter:Filter)?` is optional, not a literal `?` after the
+        // repetition. Zero or more covers one optional item.
         cursor += 1;
         RepKind::ZeroOrMore
     } else {
@@ -3481,6 +3535,10 @@ fn push_gap(source: &str, tpls: &mut Vec<Tpl>, cursor: &mut usize, until: usize)
     if text.is_empty() {
         return;
     }
+    // `$$name` is a literal `$` followed by the name. The source spells the
+    // dollar twice so it is not a hole; the printed text has one.
+    let owned = text.replace("$$", "$");
+    let text = owned.as_str();
     if let Some(Tpl::Text(existing)) = tpls.last_mut() {
         existing.push_str(text);
     } else {
@@ -3750,7 +3808,7 @@ fn match_pats_fail(
     progress: &mut i32,
     expect: &mut Option<String>,
 ) -> Option<Span> {
-    for pat in pattern {
+    for (pat_index, pat) in pattern.iter().enumerate() {
         match pat {
             Pat::Lit(expected) => {
                 skip_comments(nodes, cursor);
@@ -3875,15 +3933,34 @@ fn match_pats_fail(
                         }
                         return Some(found.span);
                     }
-                    let (capture, end, next) = take_class(source, nodes, *cursor, class_, classes)?;
+                    let (capture, end, next) =
+                        take_class(source, nodes, *cursor, class_, classes, false, &[])?;
                     captures.insert(name.clone(), capture);
                     *progress = (*progress).max(end as i32);
                     *cursor = next;
                 } else {
                     skip_comments(nodes, cursor);
-                    let taken = if *kind == HoleKind::Binding && pattern.len() == 1 {
+                    let stop = match pattern.get(pat_index + 1) {
+                        Some(Pat::Lit(text)) => Some(text.as_str()),
+                        _ => None,
+                    };
+                    let taken = if matches!(kind, HoleKind::Ident | HoleKind::Binding)
+                        && stop.is_some_and(|word| {
+                            nodes
+                                .get(*cursor)
+                                .is_some_and(|node| node_is_lit(node, word))
+                        }) {
+                        // `$left:ident join` and the token is already `join`.
+                        // The optional word is absent; taking it as the ident
+                        // makes `posts` fail `on` and hides the next rule.
+                        None
+                    } else if *kind == HoleKind::Binding && pattern.len() == 1 {
                         take_expr(source, nodes, *cursor)
                             .or_else(|| take_ident(source, nodes, *cursor))
+                    } else if *kind == HoleKind::Expr {
+                        let stop = stop
+                            .filter(|word| word.chars().all(|ch| "!=<>&|?+-*/%^~".contains(ch)));
+                        take_expr_until(source, nodes, *cursor, stop)
                     } else {
                         take_hole(source, nodes, *cursor, kind, false)
                     };
@@ -4512,7 +4589,7 @@ fn class_failure(
 }
 
 fn match_rule(source: &str, nodes: &[Syntax], index: usize, pattern: &[Pat]) -> Option<Match> {
-    match_rule_with(source, nodes, index, pattern, &[])
+    match_rule_with(source, nodes, index, pattern, &[], &[])
 }
 
 fn match_rule_with(
@@ -4521,6 +4598,7 @@ fn match_rule_with(
     index: usize,
     pattern: &[Pat],
     classes: &[SyntaxClass],
+    refines: &[Refine],
 ) -> Option<Match> {
     let mut captures = HashMap::new();
     let mut cursor = index;
@@ -4534,6 +4612,9 @@ fn match_rule_with(
     let unwrapped = unwrap_call_group(nodes, index, pattern).to_vec();
     let owned = comma_separated_rest(&unwrapped);
     let end = match_pats(source, nodes, &mut cursor, &owned, &mut captures, classes)?;
+    if !refine_accepts(refines, &captures) {
+        return None;
+    }
     Some(Match {
         next: cursor,
         end,
@@ -4759,11 +4840,60 @@ fn skip_matched_prefix<'a>(nodes: &[Syntax], index: usize, pattern: &'a [Pat]) -
         return pattern;
     }
     // Only skip modifiers. A hole before the name is the form itself.
+    // `export function` matched at `function` skips `export`. `$left join`
+    // matched at `join` does not: the hole before `join` is the form.
     if pattern[..at].iter().all(|pat| matches!(pat, Pat::Lit(_))) {
         &pattern[at..]
     } else {
         pattern
     }
+}
+
+/// Words that open the class hole after this repetition. `where` opens
+/// the filter that follows `join ... on $condition`, so the condition's
+/// last expression stops on `where` instead of consuming it.
+fn following_clause_words(
+    pattern: &[Pat],
+    pat_index: usize,
+    classes: &[SyntaxClass],
+) -> Vec<String> {
+    let mut inner = match pattern.get(pat_index + 1) {
+        Some(Pat::Rep {
+            inner, sep: None, ..
+        }) => inner.as_slice(),
+        _ => return Vec::new(),
+    };
+    // `$($filter:Filter)?` is itself a repetition. The word is the class
+    // inside it (`where`), not the repetition.
+    while let [
+        Pat::Rep {
+            inner: nested,
+            sep: None,
+            ..
+        },
+    ] = inner
+    {
+        inner = nested.as_slice();
+    }
+    let Some(Pat::Hole {
+        kind: HoleKind::Class(name),
+        ..
+    }) = inner.first()
+    else {
+        return Vec::new();
+    };
+    let Some(class_) = classes.iter().find(|class_| class_.name == *name) else {
+        return Vec::new();
+    };
+    let mut words = Vec::new();
+    for rule in &class_.rules {
+        if let Some(Pat::Lit(word)) = rule.pattern.first() {
+            if !words.contains(word) {
+                words.push(word.clone());
+            }
+        }
+    }
+    words
 }
 
 fn match_pats(
@@ -4788,6 +4918,30 @@ fn match_pats_in(
     captures: &mut HashMap<String, Capture>,
     classes: &[SyntaxClass],
     in_rep: bool,
+) -> Option<usize> {
+    match_pats_stop(
+        source,
+        nodes,
+        cursor,
+        pattern,
+        captures,
+        classes,
+        in_rep,
+        &[],
+    )
+}
+
+fn match_pats_stop(
+    source: &str,
+    nodes: &[Syntax],
+    cursor: &mut usize,
+    pattern: &[Pat],
+    captures: &mut HashMap<String, Capture>,
+    classes: &[SyntaxClass],
+    in_rep: bool,
+    // Words that end this pattern even when it does not name them. A
+    // repetition step stops before `where`, which belongs to the next clause.
+    rep_stop: &[String],
 ) -> Option<usize> {
     let start_end = nodes.get(*cursor).map(node_start).unwrap_or(0);
     let mut last_end = start_end;
@@ -4852,9 +5006,9 @@ fn match_pats_in(
                     _ => None,
                 };
                 if let Some(name) = whole {
-                    let already = captures
-                        .get(&name)
-                        .is_some_and(|have| matches!(have, Capture::Many(_)));
+                    let already = captures.get(&name).is_some_and(|have| {
+                        matches!(have, Capture::Many(_) | Capture::Record { .. })
+                    });
                     if !already {
                         let text = sweetener_reader::slice_range(
                             source,
@@ -4871,7 +5025,12 @@ fn match_pats_in(
             Pat::Hole { name, kind } => {
                 if let HoleKind::Class(class_name) = kind {
                     let class_ = classes.iter().find(|class_| class_.name == *class_name)?;
-                    let (capture, end, next) = take_class(source, nodes, *cursor, class_, classes)?;
+                    let (capture, end, next) = match take_class(
+                        source, nodes, *cursor, class_, classes, false, rep_stop,
+                    ) {
+                        Some(found) => found,
+                        None => return None,
+                    };
                     captures.insert(name.clone(), capture);
                     last_end = end;
                     *cursor = next;
@@ -4885,13 +5044,40 @@ fn match_pats_in(
                         Some(Pat::Lit(text)) => Some(text.as_str()),
                         _ => None,
                     };
-                    let taken = if *kind == HoleKind::Binding && pattern.len() == 1 {
+                    let taken = if matches!(kind, HoleKind::Ident | HoleKind::Binding)
+                        && stop.is_some_and(|word| {
+                            nodes
+                                .get(*cursor)
+                                .is_some_and(|node| node_is_lit(node, word))
+                        }) {
+                        // `from $table:ident $($joins)` and the next token is
+                        // `join`. The ident is absent, not the word `join`.
+                        None
+                    } else if *kind == HoleKind::Binding && pattern.len() == 1 {
                         // `rule { clamp(...) }` is a binding hole standing for the
                         // whole call. Inside `function $name(...)` it is one name.
                         take_expr(source, nodes, *cursor)
                             .or_else(|| take_ident(source, nodes, *cursor))
                     } else if *kind == HoleKind::Expr {
-                        take_expr_until(source, nodes, *cursor, stop)
+                        // `$left:expr == $right` stops before `==`. The
+                        // operator is the next pattern piece, not part of
+                        // the operand. `take_expr_until` already stops on a
+                        // word; this covers an operator spelling. A word
+                        // the repetition stops on (`where`) is the same.
+                        let word = stop
+                            .filter(|word| !word.chars().all(|ch| "!=<>&|?+-*/%^~".contains(ch)));
+                        let stop = stop
+                            .filter(|word| word.chars().all(|ch| "!=<>&|?+-*/%^~".contains(ch)))
+                            .or(word);
+                        let clause = rep_stop.iter().find(|word| {
+                            nodes
+                                .get(*cursor..)
+                                .into_iter()
+                                .flatten()
+                                .take(8)
+                                .any(|node| node_is_lit(node, word))
+                        });
+                        take_expr_until(source, nodes, *cursor, stop.or(clause.map(String::as_str)))
                     } else {
                         take_hole(source, nodes, *cursor, kind, in_rep)
                     };
@@ -4902,6 +5088,40 @@ fn match_pats_in(
                 }
             }
             Pat::Rep { inner, sep, kind } => {
+                // `condition($($terms) or +)` is written without a paren, and
+                // the call has one: `condition(a or b)`. Match the repetition
+                // against the arguments. A token-tree repetition is a list of
+                // groups, so it still matches the group itself.
+                let class_rep = inner.iter().any(|part| {
+                    matches!(
+                        part,
+                        Pat::Hole {
+                            kind: HoleKind::Class(_),
+                            ..
+                        }
+                    )
+                });
+                if class_rep {
+                    if let Some(Syntax::Group {
+                        delimiter: Delimiter::Paren,
+                        children,
+                        ..
+                    }) = nodes.get(*cursor)
+                    {
+                        let mut sub = 0;
+                        let wrapped = [pat.clone()];
+                        if match_pats_stop(
+                            source, children, &mut sub, &wrapped, captures, classes, in_rep,
+                            rep_stop,
+                        )
+                        .is_some()
+                        {
+                            last_end = node_end(nodes.get(*cursor).unwrap());
+                            *cursor += 1;
+                            continue;
+                        }
+                    }
+                }
                 let mut many = Vec::new();
                 let saved_start = *cursor;
                 // A nested `$($parameter ...),*` reuses the head's hole names.
@@ -4912,8 +5132,31 @@ fn match_pats_in(
                     let saved = *cursor;
                     let mut one = captures.clone();
                     let before: Vec<String> = one.keys().cloned().collect();
-                    if match_pats_in(source, nodes, cursor, inner, &mut one, classes, true)
-                        .is_none()
+                    let follows = match pattern.get(pat_index + 1) {
+                        Some(Pat::Lit(text))
+                            if !text.chars().all(|ch| "!=<>&|?+-*/%^~.,;()".contains(ch)) =>
+                        {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    };
+                    // `where` opens the class after this repetition. The last
+                    // expression of `$($terms) and +` must stop on that word,
+                    // not run into the next clause. `and` only separates steps.
+                    let mut step_stop = following_clause_words(pattern, pat_index, classes);
+                    for word in std::iter::once(follows)
+                        .chain(rep_stop.iter().map(String::as_str).map(Some))
+                        .chain(std::iter::once(sep.as_deref()))
+                        .flatten()
+                    {
+                        if !step_stop.iter().any(|have| have == word) {
+                            step_stop.push(word.to_owned());
+                        }
+                    }
+                    if match_pats_stop(
+                        source, nodes, cursor, inner, &mut one, classes, true, &step_stop,
+                    )
+                    .is_none()
                     {
                         *cursor = saved;
                         break;
@@ -5006,15 +5249,32 @@ fn match_pats_in(
                     let rows: Vec<Vec<(String, Capture)>> = rows
                         .into_iter()
                         .map(|one| {
-                            let mut row = if one.len() == 1 && one[0].0 != name {
-                                vec![(name.clone(), one[0].1.clone())]
+                            let mut row = if one.len() == 1 {
+                                let (key, value) = one.into_iter().next().unwrap();
+                                let mut row = vec![(name.clone(), value.clone())];
+                                // The one entry is the class record. A repeated
+                                // field lives inside it (`modifiers`), and the
+                                // template writes `$column.modifiers`, so copy
+                                // those fields onto the row.
+                                if let Capture::Record { fields, .. } = &value {
+                                    for (field, child) in fields {
+                                        if matches!(child, Capture::Many(_)) {
+                                            row.push((format!("{name}.{field}"), child.clone()));
+                                        }
+                                    }
+                                }
+                                if key != name {
+                                    row[0].0 = name.clone();
+                                }
+                                let _ = key;
+                                row
                             } else {
                                 one
                             };
                             // `$field.name` is not the row key. The class
                             // record is stored as `field`; copy its fields
                             // onto that path so the repetition can see them.
-                            let extras: Vec<(String, Capture)> = row
+                            let mut extras: Vec<(String, Capture)> = row
                                 .iter()
                                 .filter_map(|(key, value)| match value {
                                     Capture::Record { fields, .. } if key == &name => {
@@ -5025,6 +5285,32 @@ fn match_pats_in(
                                 .flatten()
                                 .map(|(field, value)| (format!("{name}.{field}"), value))
                                 .collect();
+                            // `$column.modifiers` is a sibling of the record,
+                            // not one of its fields. Copy it onto the record
+                            // so `$column.modifiers.primary` walks one path.
+                            let siblings: Vec<(String, Capture)> = row
+                                .iter()
+                                .filter(|(key, _)| key.starts_with(&format!("{name}.")))
+                                .map(|(key, value)| {
+                                    (key[name.len() + 1..].to_owned(), value.clone())
+                                })
+                                .filter(|(field, _)| !field.contains('.'))
+                                .collect();
+                            if let Some(Capture::Record { fields, .. }) = row
+                                .iter_mut()
+                                .find_map(|(key, value)| (key == &name).then_some(value))
+                            {
+                                for (field, value) in &siblings {
+                                    if !fields.contains_key(field) {
+                                        fields.insert(field.clone(), value.clone());
+                                    }
+                                }
+                            }
+                            extras.extend(
+                                siblings
+                                    .into_iter()
+                                    .map(|(field, value)| (format!("{name}.{field}"), value)),
+                            );
                             row.extend(extras);
                             row
                         })
@@ -5044,10 +5330,22 @@ fn match_pats_in(
 /// `function $name(...)` inside `syntax function` starts at `function`,
 /// which is already `nodes[index]`. Drop that one literal and match the
 /// parameters. A rule that does not repeat the head is unchanged.
-fn class_pattern_at<'a>(nodes: &[Syntax], index: usize, pattern: &'a [Pat]) -> &'a [Pat] {
+fn class_pattern_at<'a>(
+    nodes: &[Syntax],
+    index: usize,
+    pattern: &'a [Pat],
+    at_macro_head: bool,
+) -> &'a [Pat] {
+    if !at_macro_head {
+        return pattern;
+    }
     let Some(Pat::Lit(head)) = pattern.first() else {
         return pattern;
     };
+    // A class matched as `syntax function` already sits on `function`.
+    // Its rule repeats that word, so the rest of the rule is the form.
+    // A class used as a hole (`$joins:Join`) does not: `join posts on`
+    // starts at `join`, and stripping it reads `posts` as the keyword.
     if nodes.get(index).is_some_and(|node| node_is_lit(node, head)) {
         &pattern[1..]
     } else {
@@ -5064,6 +5362,8 @@ fn take_class(
     cursor: usize,
     class_: &SyntaxClass,
     classes: &[SyntaxClass],
+    at_macro_head: bool,
+    outer_stop: &[String],
 ) -> Option<(Capture, usize, usize)> {
     let mut index = cursor;
     skip_comments(nodes, &mut index);
@@ -5074,8 +5374,10 @@ fn take_class(
         // `syntax function` matches at the keyword. A class rule written
         // `function $name(...)` repeats that head; the keyword is already
         // the token this hole started on, so the rest of the rule is the form.
-        let pattern = class_pattern_at(nodes, index, &rule.pattern);
-        let Some(end) = match_pats(source, nodes, &mut child, pattern, &mut raw, classes) else {
+        let pattern = class_pattern_at(nodes, index, &rule.pattern, at_macro_head);
+        let Some(end) = match_pats_stop(
+            source, nodes, &mut child, pattern, &mut raw, classes, false, outer_stop,
+        ) else {
             continue;
         };
         // `refine $left spelling equals "left"` rejects a match the pattern
@@ -5536,6 +5838,14 @@ fn take_expr_until(
         if matches!(node, Syntax::Operator { raw, .. } if raw == "," || raw == ":") {
             break;
         }
+        // `posts.authorId == users.id where ...`. The following pattern
+        // piece is the word `where`, so the expression stops before it. A
+        // word that is not the stop stays part of the expression.
+        if let Some(stop) = stop_op {
+            if matches!(node, Syntax::Token { raw, .. } if raw == stop) {
+                break;
+            }
+        }
         // The reader splits `=>` into `=` and `>`. An arrow is part of the
         // expression (`(value) => value + 1`), not a type annotation.
         if operator_is(Some(node), "=") && operator_is(nodes.get(index + 1), ">") {
@@ -5557,6 +5867,11 @@ fn take_expr_until(
         if matches!(node, Syntax::Token { .. } | Syntax::String { .. }) {
             // The operator branch lands on the operand (`0` in `!== 0`).
             // Include it; a bare token after a finished primary is the next statement.
+            // `where` after that operand ends the expression.
+            if stop_op.is_some_and(|stop| matches!(node, Syntax::Token { raw, .. } if raw == stop))
+            {
+                break;
+            }
             if index > cursor && matches!(nodes.get(index - 1), Some(Syntax::Operator { .. })) {
                 index += 1;
                 continue;
@@ -5694,6 +6009,7 @@ fn apply_plan(text: &str, plan: &[(String, String)]) -> String {
         plan,
         &mut seen,
         false,
+        false,
         &mut out,
         &mut cursor,
     );
@@ -5739,6 +6055,9 @@ fn apply_plan_nodes(
     plan: &[(String, String)],
     seen: &mut HashMap<String, usize>,
     after_dot: bool,
+    // True while the nodes are a destructuring pattern. Its names are
+    // binders, so `const { id }` prints `id_1` when `id` is taken.
+    pattern: bool,
     out: &mut String,
     cursor: &mut usize,
 ) {
@@ -5747,9 +6066,20 @@ fn apply_plan_nodes(
     while index < nodes.len() {
         match &nodes[index] {
             Syntax::Token { span, raw } if !dotted && is_ident_text(raw) => {
-                let binder = is_binder_at(nodes, index) || in_type_params(nodes, index);
+                let binder = is_binder_at(nodes, index)
+                    || in_type_params(nodes, index)
+                    || (pattern && !operator_is(nodes.get(index + 1), ":"));
                 if let Some(printed) = planned(raw, binder, plan, seen) {
                     push_until(source, out, cursor, span.start as usize);
+                    // `{ id }` keeps the property and renames the binding:
+                    // `{ id: id_1 }`. `cond: conditionInput` already names both.
+                    let shorthand = pattern
+                        && printed != *raw
+                        && !operator_is(nodes.get(index.wrapping_sub(1)), ":");
+                    if shorthand {
+                        out.push_str(raw);
+                        out.push_str(": ");
+                    }
                     out.push_str(&printed);
                     *cursor = span.end as usize;
                     if binder {
@@ -5834,6 +6164,7 @@ fn apply_plan_nodes(
                                 plan,
                                 seen,
                                 false,
+                                false,
                                 out,
                                 cursor,
                             );
@@ -5880,6 +6211,7 @@ fn apply_plan_nodes(
                                         plan,
                                         seen,
                                         false,
+                                        false,
                                         out,
                                         &mut local,
                                     );
@@ -5908,6 +6240,7 @@ fn apply_plan_nodes(
                             plan,
                             seen,
                             false,
+                            false,
                             out,
                             cursor,
                         );
@@ -5915,7 +6248,27 @@ fn apply_plan_nodes(
                         continue;
                     }
                 } else {
-                    apply_plan_nodes(source, children, plan, seen, false, out, cursor);
+                    let binding_pattern = pattern
+                        || (matches!(
+                            nodes.get(index),
+                            Some(Syntax::Group {
+                                delimiter: Delimiter::Brace,
+                                ..
+                            })
+                        ) && index > 0
+                            && (token_at(nodes, index - 1, "const")
+                                || token_at(nodes, index - 1, "let")
+                                || token_at(nodes, index - 1, "var")));
+                    apply_plan_nodes(
+                        source,
+                        children,
+                        plan,
+                        seen,
+                        false,
+                        binding_pattern,
+                        out,
+                        cursor,
+                    );
                 }
                 dotted = false;
             }
@@ -6433,6 +6786,32 @@ fn collect_user_binders(nodes: &[Syntax], names: &mut std::collections::HashSet<
             if let Some(name) = binder_name_after(nodes, index) {
                 names.insert(name);
             }
+            // `function Component({ cond = false, id }: Props)` binds `id`.
+            // The template's own `id` is then printed `id_1`.
+            let params = if token_at(nodes, index, "function") {
+                nodes.get(index + 2)
+            } else {
+                nodes.get(index + 1)
+            };
+            if let Some(Syntax::Group {
+                delimiter: Delimiter::Paren,
+                children,
+                ..
+            }) = params
+            {
+                let mut bound = Vec::new();
+                for child in children {
+                    if let Syntax::Group {
+                        delimiter: Delimiter::Brace,
+                        children,
+                        ..
+                    } = child
+                    {
+                        pattern_binders(children, &mut bound);
+                    }
+                }
+                names.extend(bound);
+            }
         }
         // `declare class Option<A>` binds `A` only when a macro also
         // introduces `A`. Recording every type argument would rename `F`
@@ -6440,6 +6819,44 @@ fn collect_user_binders(nodes: &[Syntax], names: &mut std::collections::HashSet<
         if let Syntax::Group { children, .. } = &nodes[index] {
             collect_user_binders(children, names);
         }
+        index += 1;
+    }
+}
+
+/// Names bound by one destructuring pattern. `cond: conditionInput`
+/// binds `conditionInput`; a bare `id` binds `id`. The property name is not
+/// a binder.
+fn pattern_binders(nodes: &[Syntax], names: &mut Vec<String>) {
+    let mut index = 0;
+    while index < nodes.len() {
+        if let Syntax::Group {
+            delimiter: Delimiter::Brace,
+            children,
+            ..
+        } = &nodes[index]
+        {
+            pattern_binders(children, names);
+            index += 1;
+            continue;
+        }
+        let Some(Syntax::Token { raw, .. }) = nodes.get(index) else {
+            index += 1;
+            continue;
+        };
+        if !is_ident_text(raw) {
+            index += 1;
+            continue;
+        }
+        if operator_is(nodes.get(index + 1), ":") {
+            if let Some(Syntax::Token { raw: bound, .. }) = nodes.get(index + 2) {
+                if is_ident_text(bound) {
+                    names.push(bound.clone());
+                }
+            }
+            index += 3;
+            continue;
+        }
+        names.push(raw.clone());
         index += 1;
     }
 }
@@ -6813,6 +7230,17 @@ fn collect_introduced_source(source: &str, nodes: &[Syntax], names: &mut Vec<Str
         if is_binder_keyword(nodes, index) {
             if let Some(name) = binder_name_after(nodes, index) {
                 names.push(name);
+            }
+            // `const { cond: conditionInput, id } = input` binds the
+            // pattern names. `id` is already a user spelling, so the
+            // printed binding is `id_1`.
+            if let Some(Syntax::Group {
+                delimiter: Delimiter::Brace,
+                children,
+                ..
+            }) = nodes.get(index + 1)
+            {
+                pattern_binders(children, names);
             }
         }
         if let Some(params) = type_param_names(nodes, index) {
@@ -7393,6 +7821,15 @@ fn rep_row_scope(
         scoped.insert(key.clone(), value.clone());
     }
     for (name, value) in scope_rep_row(path, row) {
+        // A later row of the same record (`column.kind`) must not replace
+        // the record that already has the repeated fields (`modifiers`).
+        if let Some(Capture::Record { fields: have, .. }) = scoped.get(&name) {
+            if let Capture::Record { fields: next, .. } = &value {
+                if next.len() < have.len() {
+                    continue;
+                }
+            }
+        }
         scoped.insert(name, value);
     }
     scope_record_fields(&mut scoped);
@@ -7853,6 +8290,12 @@ fn capture_present(captures: &HashMap<String, Capture>, path: &str) -> bool {
 /// field keeps the repetition so the template row splitter can see it.
 fn capture_at<'a>(captures: &'a HashMap<String, Capture>, path: &str) -> Option<&'a Capture> {
     let (root, rest) = path.split_once('.').unwrap_or((path, ""));
+    // The row stores `$column.modifiers` both inside the record and as its
+    // own key. The record copy can be a later row that dropped the repeated
+    // field. The direct key is the one this path names.
+    if captures.contains_key(path) {
+        return captures.get(path);
+    }
     let mut value = captures.get(root)?;
     if rest.is_empty() {
         return Some(value);
@@ -7874,10 +8317,31 @@ fn capture_at<'a>(captures: &'a HashMap<String, Capture>, path: &str) -> Option<
                 }
                 return Some(value);
             }
-            Capture::Many(_) => {
-                // A field of a sequence is itself a sequence. `capture_at`
-                // cannot return an owned projection; `capture_sequence` does.
-                return None;
+            Capture::Many(rows) => {
+                // `$column.modifiers` is a sequence of records. The next
+                // field (`primary`) is on this row's record. `rest` is the
+                // whole path after `column`, so skip the fields already
+                // walked. A path that stops at the sequence is
+                // `capture_sequence`'s.
+                let walked = rest.split('.').position(|part| part == field).unwrap_or(0);
+                let rest_fields: Vec<&str> = rest.split('.').skip(walked + 1).collect();
+                if rest_fields.is_empty() {
+                    return None;
+                }
+                return rows.iter().find_map(|row| {
+                    let record = row.iter().find_map(|(_, element)| match element {
+                        Capture::Record { fields, .. } => Some(fields),
+                        _ => None,
+                    })?;
+                    let mut child = record.get(rest_fields[0])?;
+                    for field in &rest_fields[1..] {
+                        child = match child {
+                            Capture::Record { fields, .. } => fields.get(*field)?,
+                            _ => return None,
+                        };
+                    }
+                    Some(child)
+                });
             }
             Capture::Text(_) => return None,
         };
@@ -8264,6 +8728,20 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
             } else {
                 path.to_owned()
             };
+        // A repeated field (`modifiers`) is stored beside the record, not
+        // inside it. Copy it onto the record so `$column.modifiers.primary`
+        // walks the same path the template wrote.
+        let mut element = element;
+        if let Capture::Record { fields, .. } = &mut element {
+            for (key, value) in row {
+                if key.starts_with(&format!("{record_path}.")) {
+                    let field = &key[record_path.len() + 1..];
+                    if !field.contains('.') && !fields.contains_key(field) {
+                        fields.insert(field.to_owned(), value.clone());
+                    }
+                }
+            }
+        }
         scoped.push((record_path.clone(), element.clone()));
         if let Capture::Record { fields, .. } = &element {
             for (field, value) in fields {

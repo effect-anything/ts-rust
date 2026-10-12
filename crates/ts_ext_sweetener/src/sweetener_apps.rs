@@ -311,6 +311,248 @@ fn end_index(nodes: &[Syntax], index: usize, end: usize) -> usize {
     cursor
 }
 
+fn fields_in(source: &str, children: &[Syntax]) -> Vec<Field> {
+    let mut fields = Vec::new();
+    let mut index = 0;
+    while index < children.len() {
+        skip_trivia(children, &mut index);
+        if index >= children.len() {
+            break;
+        }
+        let Some(name) = token_raw(children.get(index)) else {
+            index += 1;
+            continue;
+        };
+        if !operator_is(children.get(index + 1), ":") {
+            index += 1;
+            continue;
+        }
+        let start = index + 2;
+        let mut end = start;
+        while end < children.len() && !operator_is(children.get(end), ";") {
+            end += 1;
+        }
+        if let (Some(first), Some(last)) =
+            (children.get(start), children.get(end.saturating_sub(1)))
+        {
+            let kind = sweetener_reader::slice_range(source, node_start(first), node_end(last))
+                .trim()
+                .to_owned();
+            if !kind.is_empty() {
+                fields.push(Field { name, kind });
+            }
+        }
+        index = end + 1;
+    }
+    fields
+}
+
+fn methods_in(source: &str, children: &[Syntax]) -> Vec<Method> {
+    let mut methods = Vec::new();
+    let mut index = 0;
+    while index < children.len() {
+        skip_trivia(children, &mut index);
+        let Some(name) = token_raw(children.get(index)) else {
+            break;
+        };
+        let Some(params) = children.get(index + 1) else {
+            break;
+        };
+        if group_children(Some(params), Delimiter::Paren).is_none() {
+            break;
+        }
+        if !operator_is(children.get(index + 2), ":")
+            || !token_is(children.get(index + 3), "Effect")
+        {
+            break;
+        }
+        // `Effect<ok, fails>` — the angle brackets are operators, not a group.
+        // Read the source between `Effect` and `;` and split the type arguments.
+        let after = node_end(children.get(index + 3).unwrap());
+        let stop = children
+            .iter()
+            .skip(index + 4)
+            .find(|node| operator_is(Some(node), ";"))
+            .map(node_end)
+            .unwrap_or(after);
+        let type_args = sweetener_reader::slice_range(source, after, stop);
+        let inner = type_args
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches(';')
+            .trim()
+            .trim_end_matches('>')
+            .trim();
+        let mut parts = split_top(inner, ',');
+        let ok = parts.first().cloned().unwrap_or_default();
+        let fails = parts.get(1).cloned().unwrap_or_default();
+        if ok.is_empty() || fails.is_empty() {
+            break;
+        }
+        let parameters = param_fields(
+            source,
+            group_children(Some(params), Delimiter::Paren).unwrap_or(&[]),
+        );
+        methods.push(Method {
+            name,
+            parameters,
+            ok,
+            fails,
+        });
+        index += 5;
+        while index < children.len() && !operator_is(children.get(index), ";") {
+            index += 1;
+        }
+        index += 1;
+        let _ = parts.split_off(0);
+    }
+    methods
+}
+
+fn param_fields(source: &str, children: &[Syntax]) -> Vec<Field> {
+    let text = if children.is_empty() {
+        String::new()
+    } else {
+        sweetener_reader::slice_range(
+            source,
+            node_start(&children[0]),
+            node_end(children.last().unwrap()),
+        )
+        .to_owned()
+    };
+    text.split(',')
+        .filter_map(|part| {
+            let (name, kind) = part.split_once(':')?;
+            let name = name.trim();
+            let kind = kind.trim();
+            if name.is_empty() || kind.is_empty() {
+                return None;
+            }
+            Some(Field {
+                name: name.to_owned(),
+                kind: kind.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn params_of(fields: &[Field]) -> String {
+    fields
+        .iter()
+        .map(|field| format!("{}: {}", field.name, field.kind))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn handlers_in(source: &str, children: &[Syntax]) -> Vec<(String, String, String)> {
+    let mut handlers = Vec::new();
+    let mut index = 0;
+    while index < children.len() {
+        skip_trivia(children, &mut index);
+        if index >= children.len() {
+            break;
+        }
+        let Some(tag) = token_raw(children.get(index)) else {
+            index += 1;
+            continue;
+        };
+        let Some(binder_group) = children.get(index + 1) else {
+            break;
+        };
+        let Some(binder_children) = group_children(Some(binder_group), Delimiter::Paren) else {
+            break;
+        };
+        let binder = token_raw(binder_children.first()).unwrap_or_default();
+        if !operator_is(children.get(index + 2), "=>") {
+            break;
+        }
+        let start = index + 3;
+        let mut end = start;
+        let mut depth = 0i32;
+        while end < children.len() {
+            if operator_is(children.get(end), ",") && depth == 0 {
+                break;
+            }
+            if group_children(children.get(end), Delimiter::Paren).is_some()
+                || group_children(children.get(end), Delimiter::Brace).is_some()
+                || group_children(children.get(end), Delimiter::Bracket).is_some()
+            {
+                // Groups are one node, so depth stays on sibling operators.
+            }
+            if operator_is(children.get(end), "(") {
+                depth += 1;
+            } else if operator_is(children.get(end), ")") && depth > 0 {
+                depth -= 1;
+            }
+            end += 1;
+        }
+        if let (Some(first), Some(last)) =
+            (children.get(start), children.get(end.saturating_sub(1)))
+        {
+            let expr = sweetener_reader::slice_range(source, node_start(first), node_end(last))
+                .trim()
+                .to_owned();
+            handlers.push((tag, binder, expr));
+        }
+        index = end + 1;
+    }
+    handlers
+}
+
+fn take_primary(source: &str, nodes: &[Syntax], index: usize) -> Option<(String, usize)> {
+    let start = nodes.get(index)?;
+    let mut end = index + 1;
+    if group_children(Some(start), Delimiter::Paren).is_some() {
+        return Some((
+            group_interior(source, start, Delimiter::Paren)?
+                .trim()
+                .to_owned(),
+            end,
+        ));
+    }
+    if matches!(start, Syntax::Token { .. })
+        && group_children(nodes.get(end), Delimiter::Paren).is_some()
+    {
+        end += 1;
+    }
+    while end < nodes.len() && operator_is(nodes.get(end), ".") {
+        end += 1;
+        if matches!(nodes.get(end), Some(Syntax::Token { .. })) {
+            end += 1;
+        }
+        if group_children(nodes.get(end), Delimiter::Paren).is_some() {
+            end += 1;
+        }
+    }
+    let last = nodes.get(end - 1)?;
+    let text = sweetener_reader::slice_range(source, node_start(start), node_end(last))
+        .trim()
+        .to_owned();
+    Some((text, end))
+}
+
+fn split_top(text: &str, sep: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' if depth > 0 => depth -= 1,
+            _ if ch == sep && depth == 0 => {
+                parts.push(text[start..index].trim().to_owned());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail.to_owned());
+    }
+    parts
+}
+
 fn skip_trivia(nodes: &[Syntax], index: &mut usize) {
     while matches!(nodes.get(*index), Some(Syntax::Comment { .. })) {
         *index += 1;

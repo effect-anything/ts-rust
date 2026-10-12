@@ -185,10 +185,14 @@ impl<'a> Reader<'a> {
             return self.read_string(start, ch);
         }
         if ch == '$' {
-            self.index += 1;
+            // `$$inferSelect` is one literal `$` and the name. A hole is a
+            // single `$`. Reading the pair as one token keeps the name out
+            // of the hole.
+            let doubled = self.peek(1) == Some('$');
+            self.index += if doubled { 2 } else { 1 };
             return Syntax::Operator {
                 span: span(start, self.index),
-                raw: "$".to_owned(),
+                raw: if doubled { "$$" } else { "$" }.to_owned(),
             };
         }
         if is_ident_start(ch) {
