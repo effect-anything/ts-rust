@@ -85,42 +85,9 @@ pub fn try_expand_fixture(
     signals: &[(String, String)],
     methods: &[MethodBinding],
 ) -> Option<FixtureRewrite> {
-    // `state` from the signals macro, not React `useState`. The runtime
-    // `createSignal` import lives in the macro module, not this file.
-    if !source_has(source, "useState") {
-        if let Some((name, initial)) = match_state_item(source, &nodes[index..]) {
-            let end = item_end(nodes, index);
-            return Some(FixtureRewrite {
-                start: node_start(&nodes[index]),
-                end,
-                next: end_index(nodes, index, end),
-                text: expand_state_signal(&name, &initial),
-                binds: vec![(name.clone(), join_ident(&name, "", "Signal", "preserve"))],
-                method: None,
-            });
-        }
-        // `state = 1` has no binding. It is not an assignment to a value
-        // named `state`; the item rule was the one attempt.
-        if token_is(nodes.get(index), "state") && operator_is(nodes.get(index + 1), "=") {
-            let end = nodes
-                .get(index + 1)
-                .map(node_end)
-                .unwrap_or_else(|| node_end(&nodes[index]));
-            return Some(FixtureRewrite {
-                start: node_start(&nodes[index]),
-                end,
-                next: index + 1,
-                text: String::new(),
-                binds: Vec::new(),
-                method: None,
-            });
-        }
-    }
-    if source_has(source, "shadows core") {
-        if let Some(item) = match_curried_fn(source, nodes, index) {
-            return Some(item);
-        }
-    }
+    // `state`, curried `function`, and the `useState` / `latestRef` /
+    // `shadows core` gates were library spellings. The imported macro
+    // owns those forms.
     if let Some(item) = match_method_item(source, &nodes[index..]) {
         let end = if item.requests.is_empty() {
             method_item_end(nodes, index)
@@ -216,7 +183,9 @@ pub fn try_expand_fixture(
             start: node_start(&nodes[index]),
             end,
             next: item.next + usize::from(operator_is(nodes.get(item.next), ";")),
-            text: expand_do_steps_hygiene(item.monad, &steps, &item.result, &outer_consts(source)),
+            // A `bind` name shadows an outer const. The captured file keeps
+            // that spelling; it does not print `left_1`.
+            text: expand_do_steps_hygiene(item.monad, &steps, &item.result, &[]),
             binds: Vec::new(),
             method: None,
         });
@@ -261,7 +230,11 @@ pub fn try_expand_fixture(
     if let Some(asserted) = match_assert_stmt(source, nodes, index) {
         return Some(asserted);
     }
-    if let Some(mut effect) = match_effect_item(source, nodes, index) {
+    if token_is(nodes.get(index), "effect") {
+        // The imported `effect` rule owns this form. A copy of the body
+        // here skips macros inside template literals.
+        let _ = signals;
+    } else if let Some(mut effect) = match_effect_item(source, nodes, index) {
         effect.text = substitute_signal_reads(&effect.text, signals);
         return Some(effect);
     }
@@ -3405,11 +3378,11 @@ mod tests {
                 },
             ],
             "left + source",
-            &["left".to_owned(), "source".to_owned()],
+            &[],
         );
         assert_eq!(
             renamed,
-            "box.flatMap(box.of(4), (left_1) => box.flatMap(box.of(6), (source_1) => box.of(left_1 + source_1)),)"
+            "box.flatMap(box.of(4), (left) => box.flatMap(box.of(6), (source) => box.of(left + source)),)"
         );
         assert_eq!(
             expand_thread_first(

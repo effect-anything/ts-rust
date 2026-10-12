@@ -1,5 +1,0 @@
---- theirs.ts
-+++ ours.ts
-@@ -1,1 +1,1 @@
--import { c as _c } from "react/compiler-runtime";
-+

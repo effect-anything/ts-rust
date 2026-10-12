@@ -12,5 +12,5 @@ const source = "outer source";
 
 export const hygieneResult = {
   outer: [left, source],
-  nested: box.flatMap(box.of(4), (left_1) => box.flatMap(box.of(6), (source_1) => box.of(left_1 + source_1)),),
+  nested: box.flatMap(box.of(4), (left) => box.flatMap(box.of(6), (source) => box.of(left + source)),),
 };

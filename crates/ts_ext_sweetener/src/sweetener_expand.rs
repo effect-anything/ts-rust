@@ -61,7 +61,15 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     let read = sweetener_reader::read_syntax(source);
     let imports = syntax_imports(&read.children);
     let user_names = user_spellings(&read.children);
-    let loaded = load_macros(request.filename, source, &imports, &user_names);
+    let mut loaded = load_macros(request.filename, source, &imports, &user_names);
+    let mut local = HashMap::new();
+    collect_macros(source, &read.children, &mut local);
+    for macro_ in local.into_values() {
+        push_macro(&mut loaded.macros, macro_);
+    }
+    loaded
+        .classes
+        .extend(collect_classes(source, &read.children));
     let mut printer = Printer {
         source,
         out: String::new(),
@@ -185,14 +193,12 @@ impl<'a> Printer<'a> {
             // Channel `->` / `<-` are statement forms. The form pass suffixes
             // a binder the file already has; the infix expander does not.
             if let Some(at) = self.infix_in_expr(nodes, index) {
-                let channel = operator_spelling(&nodes[at])
-                    .is_some_and(|name| name == "->" || name == "<-")
-                    && super::sweetener_forms::match_channel_stmt(self.source, nodes, index)
-                        .is_some();
                 // `(->> ...)` is a prefix group. Its `>` is not an infix
                 // operator between the thread and the next statement.
+                // Channel `->` / `<-` are infix macros. Skipping them here
+                // left `2 -> table` for a form that never saw the operand.
                 let thread_group = grouped_prefix(nodes, index).is_some();
-                if !channel && !thread_group {
+                if !thread_group {
                     index = self.expand_infix_expr(nodes, index, at);
                     continue;
                 }
@@ -248,17 +254,16 @@ impl<'a> Printer<'a> {
             // form rewrite can print one that shares a macro name, so it must
             // not reach the macro dispatch.
             if macro_call_position(nodes, index) {
-                if self.rules_reject(nodes, index) {
-                    index = self.last_form_next;
-                    continue;
-                }
                 if let Some(name) = macro_head(&nodes[index]) {
-                    if self
-                        .macros
-                        .iter()
-                        .any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
-                    {
+                    if self.compiled_rule_matches(nodes, index, name) {
                         index = self.expand_head(nodes, index, name);
+                        continue;
+                    }
+                    // `(service)` is a parameter. A bare name that no rule
+                    // claims is ordinary TypeScript. A following group or
+                    // token is a call the rules rejected.
+                    if macro_invocation(nodes, index) && self.rules_reject(nodes, index) {
+                        index = self.last_form_next;
                         continue;
                     }
                 }
@@ -276,10 +281,9 @@ impl<'a> Printer<'a> {
                 }
             }
             if self.depth == 0 {
-                if let Some((end, text)) = csp_decl_span(self.source, nodes, index) {
+                if let Some(end) = local_syntax_end(nodes, index) {
                     let start = node_start(&nodes[index]);
                     self.copy_until(start);
-                    self.emit(u32_at(start), u32_at(end), &text, SegmentKind::Atom);
                     self.last_original = end;
                     index = nodes
                         .iter()
@@ -296,7 +300,10 @@ impl<'a> Printer<'a> {
     /// `${... |> callee}` is still an operator use. The reader keeps the
     /// whole template as one string, so the infix walk never sees it.
     fn expand_template_literal(&mut self, raw: &str) -> Option<String> {
-        if !raw.starts_with('`') || !raw.contains("${") || !raw.contains("|>") {
+        if !raw.starts_with('`') || !raw.contains("${") {
+            return None;
+        }
+        if !raw.contains("|>") && !self.replacement_needs_expand(raw) {
             return None;
         }
         let mut out = String::new();
@@ -322,7 +329,7 @@ impl<'a> Printer<'a> {
                     break;
                 }
                 let body = &raw[body_at..index - 1];
-                if body.contains("|>") {
+                if body.contains("|>") || self.replacement_needs_expand(body) {
                     let expanded = self.expand_fragment(body);
                     if expanded != body {
                         changed = true;
@@ -749,16 +756,6 @@ impl<'a> Printer<'a> {
                 if dangling_separator(self.source, node_span(head).start as usize, matched.end) {
                     continue;
                 }
-                // The form pass already owns `state`, a curried `function`
-                // the compiled rule did not accept, and multi-part `method`.
-                // Skipping a rule that already matched leaves the head for
-                // `rules_reject`, which then discards the file.
-                if name == "state" && !self.source.contains("useState") {
-                    continue;
-                }
-                if name == "method" {
-                    continue;
-                }
                 self.diagnose_unknown(&rule.template, head_span);
                 let was_core = self.printing_core;
                 if template_is_core(&rule.template) {
@@ -790,9 +787,7 @@ impl<'a> Printer<'a> {
                 // rule just inserted. A core wrapper around `$body` still
                 // contains macros (`record` inside `namespace`), so those
                 // holes are expanded before the wrapper is printed.
-                let mut expanded = if name == "function" && self.source.contains("shadows core") {
-                    replacement
-                } else if template_is_core(&rule.template) {
+                let expanded = if template_is_core(&rule.template) {
                     // `record` inside `#core` is already rendered. Expanding
                     // the hole again walks the same template without the
                     // repetition's row scope and prints empty fields.
@@ -803,6 +798,8 @@ impl<'a> Printer<'a> {
                         // plan applied above is gone. Apply it to the text
                         // that is actually printed.
                         let rendered = self.expand_core(&rule.template, &matched.captures);
+                        let rendered =
+                            strip_already_printed(self.source, head_span.start as usize, &rendered);
                         match &plan {
                             Some(plan) => apply_plan(&rendered, plan),
                             None => rendered,
@@ -813,16 +810,6 @@ impl<'a> Printer<'a> {
                 };
                 // `$self` is a capture, so the plan above does not rename it.
                 // An outer `const self` still requires `self_1` in this method.
-                if name == "extend"
-                    && self.user_names.contains("self")
-                    && expanded.contains("function last(self:")
-                {
-                    expanded = expanded
-                        .replace("(self:", "(self_1:")
-                        .replace("self.tail", "self_1.tail")
-                        .replace("self.head", "self_1.head");
-                    self.user_names.insert("self_1".to_owned());
-                }
                 self.printing_core = was_core;
                 self.emit(
                     head_span.start,
@@ -970,6 +957,7 @@ impl<'a> Printer<'a> {
     fn tree_needs_walk(&self, nodes: &[Syntax]) -> bool {
         nodes.iter().enumerate().any(|(index, node)| {
             self.form_candidate(nodes, index)
+                || matches!(node, Syntax::String { raw, .. } if raw.contains("${") && (raw.contains("|>") || self.replacement_needs_expand(raw)))
                 || matches!(node, Syntax::Group { children, .. } if self.tree_needs_walk(children))
         })
     }
@@ -1046,7 +1034,7 @@ impl<'a> Printer<'a> {
         let (path, rows) = rep_rows_for(&inner, captures);
         for (index, row) in rows.iter().enumerate() {
             push_sep(out, index, sep.as_deref());
-            let scoped = rep_row_scope(captures, &path, row);
+            let scoped = with_rep_index(rep_row_scope(captures, &path, row), index);
             self.render_core(out, &inner, &scoped);
         }
     }
@@ -1295,35 +1283,6 @@ impl<'a> Printer<'a> {
             .flat_map(|macro_| macro_.rules.clone())
             .collect();
         if rules.is_empty() {
-            return false;
-        }
-        // `state`, curried `function`, and multi-part `method` are owned by
-        // the form pass. A compiled rule that rejects the head must not
-        // discard that expansion.
-        if name == "state" && !self.source.contains("useState") {
-            if super::sweetener_forms::match_state_item(self.source, &nodes[index..]).is_some() {
-                return false;
-            }
-        }
-        if name == "function" && self.source.contains("shadows core") {
-            // Curried `function` is a form-pass rewrite. A one-parameter
-            // `shadows core` rule that already matches must not be refused
-            // here, or the file is discarded before `expand_head`.
-            let matched = self
-                .macros
-                .iter()
-                .filter(|macro_| macro_.name == name)
-                .any(|macro_| {
-                    macro_.rules.iter().any(|rule| {
-                        match_rule_with(self.source, nodes, index, &rule.pattern, &self.classes)
-                            .is_some()
-                    })
-                });
-            if !matched {
-                return false;
-            }
-        }
-        if name == "method" {
             return false;
         }
         self.fail_macro(nodes, index, &name, &rules);
@@ -1876,6 +1835,18 @@ enum Tpl {
         /// Byte offset of the directive token in the macro source.
         at: usize,
     },
+    /// `#metavar("value", $name)` — a hole of the rule being defined.
+    /// The string is the hole name. The second argument names the binding
+    /// the hole belongs to; it is not text to print.
+    Metavar {
+        hole: String,
+    },
+    /// `#trim($path)` — that capture with surrounding whitespace removed.
+    Trim {
+        path: String,
+    },
+    /// `#index()` — the zero-based index of the current repetition row.
+    Index,
     Rep {
         inner: Vec<Tpl>,
         sep: Option<String>,
@@ -1930,90 +1901,201 @@ fn load_macros(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
+    let mut seen = std::collections::HashSet::<PathBuf>::new();
     for import in imports {
-        let Some(body) = specifier_body(&import.specifier) else {
-            continue;
-        };
-        let path = base.join(body);
-        let text = std::fs::read_to_string(&path).ok();
-        let Some(text) = text else {
-            for name in &import.names {
-                if builtin_unless(name, source, &import.specifier) {
-                    loaded.macros.push(unless_macro());
-                } else {
-                    loaded.diagnostics.push(Diagnostic {
-                        message: format!(
-                            "SWR4001: Sweetener macro error: macro `{name}` was imported for syntax but its module could not be read"
-                        ),
-                        start: import.span.start,
-                        end: import.span.end,
-                    });
-                }
-            }
-            continue;
-        };
-        if let Ok(canonical) = path.canonicalize() {
-            loaded.dependencies.push(canonical.display().to_string());
-        } else {
-            loaded.dependencies.push(path.display().to_string());
-        }
-        let read = sweetener_reader::read_syntax(&text);
-        let mut found = HashMap::<String, Macro>::new();
-        collect_macros(&text, &read.children, &mut found);
-        loaded
-            .classes
-            .extend(collect_classes(&text, &read.children));
-        let runtime = runtime_imports_of(&read.children);
-        let mut taken = Vec::new();
-        for name in &import.names {
-            let exported = import
-                .aliases
-                .iter()
-                .find(|(_, local)| local == name)
-                .map(|(exported, _)| exported.as_str())
-                .unwrap_or(name.as_str());
-            if let Some(mut macro_) = found.remove(exported).or_else(|| found.remove(name)) {
-                if exported != name {
-                    for rule in &mut macro_.rules {
-                        rename_pat_lit(&mut rule.pattern, exported, name);
-                    }
-                }
-                macro_.name = name.clone();
-                taken.push(macro_);
-            } else if name == "unless" {
-                loaded.macros.push(unless_macro());
-            } else {
-                loaded.diagnostics.push(Diagnostic {
-                    message: format!(
-                        "SWR4001: Sweetener macro error: macro `{name}` was imported for syntax but is not exported by its module"
-                    ),
-                    start: import.span.start,
-                    end: import.span.end,
-                });
-            }
-        }
-        // A sibling macro in the same module, such as `effect`, still names
-        // `createEffect`. Theirs imports it even when this file only uses
-        // `state`. Filtering to the imported macro drops that name.
-        let used = if taken.is_empty() {
-            runtime_used_by(&runtime, &taken)
-        } else {
-            runtime
-        };
-        loaded.macros.extend(taken);
-        // Keep every runtime import the taken macros use. A local name the
-        // user already binds is printed `name as name_1`; the rest keep
-        // their spelling. Filtering to collisions dropped imports theirs
-        // still prints.
-        let _ = user_names;
-        merge_runtime_imports(&mut loaded.runtime_imports, used);
+        load_syntax_module(&mut loaded, &base, &base, import, &mut seen, source, true);
     }
     if imports.is_empty() && source.contains("unless") {
         // Unit tests call `unless` with no import. The language form is the
         // same rule the tour's macros.sts exports.
         loaded.macros.push(unless_macro());
     }
+    let _ = user_names;
     loaded
+}
+
+/// Read one syntax module. `report` is false for a module pulled in only
+/// because another macro imported it: a missing transitive file is still
+/// reported, on the import that named it.
+fn load_syntax_module(
+    loaded: &mut Loaded,
+    user_dir: &Path,
+    from_dir: &Path,
+    import: &SyntaxImport,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    source: &str,
+    report: bool,
+) {
+    let Some(body) = specifier_body(&import.specifier) else {
+        return;
+    };
+    let path = from_dir.join(body);
+    let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+    if !seen.insert(key) {
+        return;
+    }
+    let text = std::fs::read_to_string(&path).ok();
+    let Some(text) = text else {
+        if !report {
+            return;
+        }
+        for name in &import.names {
+            if builtin_unless(name, source, &import.specifier) {
+                loaded.macros.push(unless_macro());
+            } else {
+                loaded.diagnostics.push(Diagnostic {
+                    message: format!(
+                        "SWR4001: Sweetener macro error: macro `{name}` was imported for syntax but its module could not be read"
+                    ),
+                    start: import.span.start,
+                    end: import.span.end,
+                });
+            }
+        }
+        return;
+    };
+    if let Ok(canonical) = path.canonicalize() {
+        loaded.dependencies.push(canonical.display().to_string());
+    } else {
+        loaded.dependencies.push(path.display().to_string());
+    }
+    let read = sweetener_reader::read_syntax(&text);
+    let mut found = HashMap::<String, Macro>::new();
+    collect_macros(&text, &read.children, &mut found);
+    loaded
+        .classes
+        .extend(collect_classes(&text, &read.children));
+    let runtime = runtime_imports_of(&read.children);
+    let mut taken = Vec::new();
+    for name in &import.names {
+        let exported = import
+            .aliases
+            .iter()
+            .find(|(_, local)| local == name)
+            .map(|(exported, _)| exported.as_str())
+            .unwrap_or(name.as_str());
+        if let Some(mut macro_) = found.remove(exported).or_else(|| found.remove(name)) {
+            if exported != name {
+                for rule in &mut macro_.rules {
+                    rename_pat_lit(&mut rule.pattern, exported, name);
+                }
+            }
+            macro_.name = name.clone();
+            taken.push(macro_);
+        } else if name == "unless" {
+            push_macro(&mut loaded.macros, unless_macro());
+        } else if report {
+            loaded.diagnostics.push(Diagnostic {
+                message: format!(
+                    "SWR4001: Sweetener macro error: macro `{name}` was imported for syntax but is not exported by its module"
+                ),
+                start: import.span.start,
+                end: import.span.end,
+            });
+        }
+    }
+    // A sibling macro in the same module, such as `effect`, still names
+    // `createEffect`. Theirs imports it even when this file only uses
+    // `state`. Filtering to the imported macro drops that name.
+    let used = if taken.is_empty() {
+        runtime_used_by(&runtime, &taken)
+    } else {
+        runtime
+    };
+    for macro_ in taken {
+        push_macro(&mut loaded.macros, macro_);
+    }
+    merge_runtime_imports(
+        &mut loaded.runtime_imports,
+        rebase_runtime_imports(user_dir, &path, used),
+    );
+    let nested_dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| from_dir.to_path_buf());
+    for nested in syntax_imports(&read.children) {
+        load_syntax_module(loaded, user_dir, &nested_dir, &nested, seen, source, true);
+    }
+}
+
+fn push_macro(macros: &mut Vec<Macro>, macro_: Macro) {
+    if let Some(existing) = macros.iter_mut().find(|have| have.name == macro_.name) {
+        let mut macro_ = macro_;
+        existing.rules.append(&mut macro_.rules);
+    } else {
+        macros.push(macro_);
+    }
+}
+
+/// `./atom-runtime.ts` next to the macro is not next to the file that
+/// imported the macro. Rebase a relative specifier onto the user file.
+fn rebase_runtime_imports(
+    user_dir: &Path,
+    macro_file: &Path,
+    imports: Vec<RuntimeImport>,
+) -> Vec<RuntimeImport> {
+    imports
+        .into_iter()
+        .map(|mut import| {
+            import.specifier = rebase_specifier(user_dir, macro_file, &import.specifier);
+            import
+        })
+        .collect()
+}
+
+fn rebase_specifier(user_dir: &Path, macro_file: &Path, specifier: &str) -> String {
+    let Some(body) = specifier_body(specifier) else {
+        return specifier.to_owned();
+    };
+    if !body.starts_with('.') {
+        return specifier.to_owned();
+    }
+    let Some(macro_dir) = macro_file.parent() else {
+        return specifier.to_owned();
+    };
+    let target = normalize_lexical(&macro_dir.join(body));
+    let relative = path_from_dir(&normalize_lexical(user_dir), &target);
+    let quote = specifier.chars().next().unwrap_or('"');
+    format!("{quote}{relative}{quote}")
+}
+
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn path_from_dir(from_dir: &Path, to: &Path) -> String {
+    let from: Vec<_> = from_dir.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let mut shared = 0usize;
+    while shared < from.len() && shared < to.len() && from[shared] == to[shared] {
+        shared += 1;
+    }
+    let mut parts = Vec::new();
+    for _ in shared..from.len() {
+        parts.push("..".to_owned());
+    }
+    for component in &to[shared..] {
+        parts.push(component.as_os_str().to_string_lossy().into_owned());
+    }
+    if parts.is_empty() {
+        return ".".to_owned();
+    }
+    let joined = parts.join("/");
+    if joined.starts_with('.') {
+        joined
+    } else {
+        format!("./{joined}")
+    }
 }
 
 fn rename_pat_lit(pats: &mut [Pat], from: &str, to: &str) {
@@ -3052,6 +3134,9 @@ fn directive_tpl(
         }
         "#join" => Some(read_join(children)),
         "#count" => text_hole_name(args).map(Tpl::Count),
+        "#metavar" => read_metavar(children),
+        "#trim" => read_trim(children),
+        "#index" => Some(Tpl::Index),
         name if name.starts_with('#') => Some(Tpl::Unknown {
             name: name.to_owned(),
             at,
@@ -3061,6 +3146,21 @@ fn directive_tpl(
 }
 
 /// `#join($name, suffix: "Signal")` and the prefix / casing options beside it.
+/// `#metavar("value", $name)` — the hole is `value`, not the binding.
+fn read_metavar(children: &[Syntax]) -> Option<Tpl> {
+    let hole = string_value(children.first())?;
+    if hole.is_empty() {
+        return None;
+    }
+    Some(Tpl::Metavar { hole })
+}
+
+/// `#trim($path)` and `#trim($path.field)`.
+fn read_trim(children: &[Syntax]) -> Option<Tpl> {
+    let (path, _, _) = read_var_path(children, 0)?;
+    Some(Tpl::Trim { path })
+}
+
 fn read_join(children: &[Syntax]) -> Tpl {
     let mut name = String::new();
     let mut index = 0;
@@ -5839,6 +5939,49 @@ fn property_access_at(nodes: &[Syntax], index: usize) -> bool {
 /// parameter list or an expression owns (`(service) =>`, `service;`) is not.
 /// A name a property access owns (`Effect.gen`) is a member, never a head.
 /// A form rewrite can print such an identifier that shares a macro name.
+/// `export syntax` / `export operator` in the file being expanded. The
+/// body is the next brace. The definition is a macro, not TypeScript.
+fn local_syntax_end(nodes: &[Syntax], index: usize) -> Option<usize> {
+    let mut cursor = index;
+    if token_at(nodes, cursor, "export") {
+        cursor += 1;
+    }
+    if token_at(nodes, cursor, "rec") {
+        cursor += 1;
+    }
+    if !token_at(nodes, cursor, "syntax") && !token_at(nodes, cursor, "operator") {
+        return None;
+    }
+    let mut look = cursor + 1;
+    while look < nodes.len() && look < cursor + 16 {
+        if let Syntax::Group {
+            delimiter: Delimiter::Brace,
+            span,
+            ..
+        } = &nodes[look]
+        {
+            return Some(span.end as usize);
+        }
+        look += 1;
+    }
+    None
+}
+
+/// A following group or word is an attempted call. A name at the end of
+/// `(service)` is not, once no rule has claimed it.
+fn macro_invocation(nodes: &[Syntax], index: usize) -> bool {
+    match nodes.get(index + 1) {
+        Some(Syntax::Group { .. } | Syntax::Token { .. } | Syntax::String { .. }) => true,
+        Some(Syntax::Operator { raw, .. }) => {
+            matches!(
+                raw.as_str(),
+                "<" | "#" | "=" | "+=" | "-=" | "*=" | "/=" | "%="
+            ) || raw.ends_with('=')
+        }
+        _ => false,
+    }
+}
+
 fn macro_call_position(nodes: &[Syntax], index: usize) -> bool {
     if nodes.get(index).and_then(macro_head).is_none() {
         return false;
@@ -5846,13 +5989,21 @@ fn macro_call_position(nodes: &[Syntax], index: usize) -> bool {
     if index > 0 && operator_is(nodes.get(index - 1), ".") {
         return false;
     }
+    // `flag` at the end of `[count, flag]` has no following sibling. A
+    // generated expression macro still owns that name.
     let Some(next) = nodes.get(index + 1) else {
-        return false;
+        return true;
     };
     match next {
         Syntax::Group { .. } => true,
         Syntax::Token { .. } | Syntax::String { .. } => true,
-        Syntax::Operator { raw, .. } => matches!(raw.as_str(), "<" | "#"),
+        // `=` and `+=` are how a generated `syntax count` is called.
+        // `<<=` used to match only because the reader splits it and the
+        // first character is `<`. A closer is not a call: `(service)` is a
+        // parameter, and treating `)` as a follower failed that macro.
+        // `,` separates arguments (`[count, flag]`). `)` does not: `(service)`
+        // is a parameter, and a failed rule there used to discard the file.
+        Syntax::Operator { raw, .. } => !matches!(raw.as_str(), "." | ")" | "]" | "}"),
         _ => false,
     }
 }
@@ -6251,6 +6402,7 @@ fn unknown_directives(template: &[Tpl]) -> Vec<(String, usize)> {
     for part in template {
         match part {
             Tpl::Unknown { name, at } => found.push((name.clone(), *at)),
+            Tpl::Metavar { .. } | Tpl::Trim { .. } | Tpl::Index => {}
             Tpl::Core(inner) | Tpl::Rep { inner, .. } | Tpl::Define(inner) => {
                 found.extend(unknown_directives(inner));
             }
@@ -6587,22 +6739,70 @@ fn render_keeping_holes(out: &mut String, template: &[Tpl], captures: &HashMap<S
                 }
             }
             Tpl::Rep { inner, sep } => {
-                out.push_str("$(");
-                render_keeping_holes(out, inner, captures);
-                out.push(')');
-                if let Some(sep) = sep {
-                    out.push_str(sep);
-                }
-                out.push('*');
+                render_keeping_rep(out, inner, sep.as_deref(), captures);
             }
             Tpl::Define(inner) => {
                 out.push_str("#syntax {");
                 render_keeping_holes(out, inner, captures);
                 out.push('}');
             }
+            Tpl::Metavar { hole } => {
+                out.push('$');
+                out.push_str(hole);
+            }
+            Tpl::Trim { path } => {
+                if capture_at(captures, path).is_some() {
+                    let mut protected = Vec::new();
+                    render(
+                        out,
+                        std::slice::from_ref(part),
+                        captures,
+                        &[],
+                        &mut protected,
+                    );
+                } else {
+                    out.push_str("#trim($");
+                    out.push_str(path);
+                    out.push(')');
+                }
+            }
+            Tpl::Index => out.push_str("#index()"),
             Tpl::Unknown { name, .. } => out.push_str(name),
         }
     }
+}
+
+/// A repetition inside `#syntax`. Rows this invocation already captured
+/// are written out, so `$segment` becomes `lower`. A repetition that is a
+/// hole of the macro being defined stays `$($name)*`.
+fn render_keeping_rep(
+    out: &mut String,
+    inner: &[Tpl],
+    sep: Option<&str>,
+    captures: &HashMap<String, Capture>,
+) {
+    let (inner, sep) = rep_layout(inner, sep);
+    let (path, rows) = rep_rows_for(&inner, captures);
+    if rows.is_empty() {
+        out.push_str("$(");
+        render_keeping_holes(out, &inner, captures);
+        out.push(')');
+        if let Some(sep) = &sep {
+            out.push_str(sep);
+        }
+        out.push('*');
+        return;
+    }
+    for (index, row) in rows.iter().enumerate() {
+        push_sep(out, index, sep.as_deref());
+        let scoped = with_rep_index(rep_row_scope(captures, &path, row), index);
+        render_keeping_holes(out, &inner, &scoped);
+    }
+}
+
+fn with_rep_index(mut scoped: HashMap<String, Capture>, index: usize) -> HashMap<String, Capture> {
+    scoped.insert("__rep_index".to_owned(), Capture::Text(index.to_string()));
+    scoped
 }
 
 fn render(
@@ -6685,6 +6885,23 @@ fn render(
             }
             Tpl::Define(_) => {}
             Tpl::Unknown { .. } => {}
+            Tpl::Metavar { hole } => {
+                if let Some(text) = capture_text(captures, hole) {
+                    let start = out.len();
+                    out.push_str(text.trim());
+                    protected.push((start, out.len()));
+                }
+            }
+            Tpl::Trim { path } => {
+                if let Some(text) = capture_text(captures, path) {
+                    out.push_str(text.trim());
+                }
+            }
+            Tpl::Index => {
+                if let Some(text) = capture_text(captures, "__rep_index") {
+                    out.push_str(text.trim());
+                }
+            }
             Tpl::Rep { inner, sep } => {
                 render_rep(out, inner, sep.as_deref(), captures, classes, protected);
             }
@@ -6708,7 +6925,7 @@ fn render_rep(
     let (path, rows) = rep_rows_for(&inner, captures);
     for (index, row) in rows.iter().enumerate() {
         push_sep(out, index, sep.as_deref());
-        let scoped = rep_row_scope(captures, &path, row);
+        let scoped = with_rep_index(rep_row_scope(captures, &path, row), index);
         render(out, &inner, &scoped, classes, protected);
     }
 }
@@ -6759,7 +6976,11 @@ fn rep_rows_for(
     let mut own = Vec::new();
     for part in inner {
         match part {
-            Tpl::Var(name) | Tpl::Quote(name) | Tpl::Count(name) | Tpl::Join { name, .. } => {
+            Tpl::Var(name)
+            | Tpl::Quote(name)
+            | Tpl::Count(name)
+            | Tpl::Join { name, .. }
+            | Tpl::Trim { path: name } => {
                 if !own.contains(name) {
                     own.push(name.clone());
                 }
@@ -7475,7 +7696,11 @@ fn rep_rows(inner: &[Tpl], captures: &HashMap<String, Capture>) -> Vec<Vec<(Stri
     let mut own = Vec::new();
     for part in inner {
         match part {
-            Tpl::Var(name) | Tpl::Quote(name) | Tpl::Count(name) | Tpl::Join { name, .. } => {
+            Tpl::Var(name)
+            | Tpl::Quote(name)
+            | Tpl::Count(name)
+            | Tpl::Join { name, .. }
+            | Tpl::Trim { path: name } => {
                 if !own.contains(name) {
                     own.push(name.clone());
                 }
@@ -7677,7 +7902,7 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
 fn collect_vars(template: &[Tpl], names: &mut Vec<String>) {
     for part in template {
         match part {
-            Tpl::Var(name) | Tpl::Quote(name) | Tpl::Count(name) => {
+            Tpl::Var(name) | Tpl::Quote(name) | Tpl::Count(name) | Tpl::Trim { path: name } => {
                 if !names.contains(name) {
                     names.push(name.clone());
                 }
@@ -7703,7 +7928,7 @@ fn collect_vars(template: &[Tpl], names: &mut Vec<String>) {
                     collect_vars(else_body, names);
                 }
             }
-            Tpl::Text(_) | Tpl::Unknown { .. } => {}
+            Tpl::Text(_) | Tpl::Unknown { .. } | Tpl::Metavar { .. } | Tpl::Index => {}
         }
     }
 }
@@ -7995,6 +8220,9 @@ fn collect_free_idents(template: &[Tpl], names: &mut std::collections::HashSet<S
             | Tpl::Var(_)
             | Tpl::Quote(_)
             | Tpl::Count(_)
+            | Tpl::Metavar { .. }
+            | Tpl::Trim { .. }
+            | Tpl::Index
             | Tpl::Unknown { .. } => {}
         }
     }
@@ -8115,40 +8343,6 @@ fn strip_already_printed(source: &str, head: usize, expanded: &str) -> String {
 /// Captured CSP declarations the source already wrote. A leading `|`
 /// on the union, a dropped trailing comma in `put`, and a missing
 /// `void channel` are not shape. The hygiene file has none of these.
-fn csp_decl_span(source: &str, nodes: &[Syntax], index: usize) -> Option<(usize, String)> {
-    if token_is(nodes.get(index), "type") && token_is(nodes.get(index + 1), "Effect") {
-        let mut end_at = index;
-        while end_at < nodes.len() && !operator_is(nodes.get(end_at), ";") {
-            end_at += 1;
-        }
-        let end = nodes.get(end_at).map(node_end)?;
-        return Some((end, "type Effect =\n  { readonly kind: \"put\"; readonly value: number } | { readonly kind: \"take\" };".to_owned()));
-    }
-    if token_is(nodes.get(index), "const") && token_is(nodes.get(index + 1), "put") {
-        let mut end_at = index;
-        while end_at < nodes.len() && !operator_is(nodes.get(end_at), ";") {
-            end_at += 1;
-        }
-        let end = nodes.get(end_at).map(node_end)?;
-        let body = source.get(node_start(&nodes[index])..end)?;
-        if body.contains("kind: \"put\"") {
-            return Some((end, "const put = (_channel: object, value: number): Effect => ({ kind: \"put\", value, });".to_owned()));
-        }
-    }
-    if token_is(nodes.get(index), "const") && token_is(nodes.get(index + 1), "take") {
-        let mut end_at = index;
-        while end_at < nodes.len() && !operator_is(nodes.get(end_at), ";") {
-            end_at += 1;
-        }
-        let end = nodes.get(end_at).map(node_end)?;
-        let body = source.get(node_start(&nodes[index])..end)?;
-        if body.contains("kind: \"take\"") && !body.contains("void") {
-            return Some((end, "const take = (channel: object): Effect => { void channel; return { kind: \"take\" }; };".to_owned()));
-        }
-    }
-    None
-}
-
 fn first_const_name(text: &str) -> Option<String> {
     let at = text.find("const ")?;
     let rest = text[at + "const ".len()..].trim_start();

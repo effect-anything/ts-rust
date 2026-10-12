@@ -48,9 +48,10 @@ The token walk should not know Effect, signals, or React. It does:
 
 ### Not implemented, so some macros cannot be written
 
-- `#metavar` is `Tpl::Unknown` (`directive_tpl` in `sweetener_expand.rs`). `metavar_capture` is unused. The signal cases use `#metavar`, but only the form pass above actually expands them.
-- `#syntax` and `#join` do run. A generated `syntax count` still does not see `count`, `count = 5`, or `count += 1`. `macro_call_position` accepts an operator after the name only when it is `<` or `#`. `<<=` matched by accident; `=` and `+=` did not.
-- A runtime import is pasted with the macro file's specifier. `./atom-runtime.ts` next to the macro does not resolve from `src/`.
+- [x] `#metavar` is a hole of the generated rule (`Tpl::Metavar`). `#trim` and `#index` render too.
+- [x] `macro_call_position` accepts `=`, `+=`, and the other assignment spellings, plus a bare name and a comma. A closer such as `)` is not a call.
+- [x] A relative runtime import is rebased from the macro file onto the file that imported it. Syntax imports inside a macro module are loaded too.
+- [ ] Seven captured cases still differ: memoized, function-shadow, vite-react main, both multi-part-methods, both adt. The form pass still owns service, query, table, and memoized where the compiled rule does not match.
 
 ### Goal
 

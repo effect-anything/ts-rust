@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! App macros the expander still prints as source.
 //!
 //! [`expand_apps`] is the one entry the form pass calls. Each form is a
@@ -11,6 +12,8 @@ use super::sweetener_reader::{self, Delimiter, Syntax};
 /// the cases this file owns.
 #[must_use]
 pub fn expand_apps(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
+    // `state` / `useState` / `latestRef` are the imported macro. The arms
+    // below stay only where the compiled rule does not yet match.
     if let Some(item) = match_runtime_import(source, nodes, index) {
         return Some(item);
     }
@@ -41,30 +44,7 @@ pub fn expand_apps(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
     if let Some(item) = match_shadowed_fn(source, nodes, index) {
         return Some(item);
     }
-    if let Some(item) = match_states_stmt(source, nodes, index) {
-        return Some(item);
-    }
-    // `state` is `useState` only in a module that imported that macro.
-    // The signals fixture has the same spelling and keeps `createSignal`.
-    if super::sweetener_forms::source_has(source, "useState") {
-        if let Some(item) = match_react_state(source, nodes, index) {
-            return Some(item);
-        }
-    }
-    if super::sweetener_forms::source_has(source, "latestRef") {
-        if let Some(item) = match_latest_ref(source, nodes, index) {
-            return Some(item);
-        }
-    }
-    // Nested expansion reprints one statement, so the source no longer
-    // contains `useState`. The statement spelling is the gate. These forms
-    // keep the binder spellings the captured file uses.
-    if let Some(item) = match_react_hooks(source, nodes, index) {
-        return Some(item);
-    }
-    if let Some(item) = match_syntax_export(nodes, index) {
-        return Some(item);
-    }
+    let _ = (source, nodes, index);
     None
 }
 
