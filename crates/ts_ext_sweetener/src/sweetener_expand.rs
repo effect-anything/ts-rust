@@ -86,7 +86,6 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
         hygiene: HashMap::new(),
         channel_renames: HashMap::new(),
         type_params: user_type_params(&read.children),
-        occurrence_names: HashMap::new(),
         imports_emitted: false,
         form_signals: Vec::new(),
         form_methods: Vec::new(),
@@ -139,9 +138,6 @@ struct Printer<'a> {
     hygiene: HashMap<String, String>,
     /// Type parameters the user wrote, such as `Option<A>`.
     type_params: std::collections::HashSet<String>,
-    /// Printed name for each introduced binder in the template being rendered,
-    /// in source order. A second `const actual` is a new binding.
-    occurrence_names: HashMap<String, Vec<String>>,
     imports_emitted: bool,
     /// `state` bindings and multi-part methods the form pass introduced.
     form_signals: Vec<(String, String)>,
@@ -929,7 +925,6 @@ impl<'a> Printer<'a> {
             runtime_imports: Vec::new(),
             hygiene: HashMap::new(),
             type_params: self.type_params.clone(),
-            occurrence_names: HashMap::new(),
             imports_emitted: true,
             form_signals: self.form_signals.clone(),
             form_methods: self.form_methods.clone(),
@@ -1107,7 +1102,6 @@ impl<'a> Printer<'a> {
             runtime_imports: Vec::new(),
             hygiene: self.hygiene.clone(),
             type_params: self.type_params.clone(),
-            occurrence_names: HashMap::new(),
             imports_emitted: true,
             form_signals: self.form_signals.clone(),
             form_methods: self.form_methods.clone(),
@@ -1472,15 +1466,6 @@ impl<'a> Printer<'a> {
         self.last_original = rewritten.end;
         self.last_form_next = rewritten.next;
         true
-    }
-
-    fn needs_hygiene(&self, introduced: &[String]) -> bool {
-        if !self.hygiene.is_empty() {
-            return true;
-        }
-        introduced
-            .iter()
-            .any(|name| self.user_names.contains(name) || self.hygiene.contains_key(name))
     }
 
     fn hygiene_plan(&mut self, introduced: &[String]) -> Option<Vec<(String, String)>> {
@@ -2190,11 +2175,8 @@ struct SyntaxClass {
 #[derive(Clone, Debug)]
 struct ClassField {
     name: String,
-    kind: HoleKind,
     /// `moves: Transition*` — the field is a sequence of class matches.
     repeated: bool,
-    /// `marker: token?` — a rule may leave this field unbound.
-    optional: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2304,28 +2286,25 @@ fn class_fields(group: &Syntax) -> Vec<ClassField> {
             index += 1;
             continue;
         }
-        let Some(kind_name) = children.get(index + 2).and_then(|node| match node {
-            Syntax::Token { raw, .. } => Some(raw.as_str()),
-            _ => None,
-        }) else {
+        // `name: Type`, `name: Type*`, or `name: Type?`. The type names
+        // the class a rule matches; `*` makes the field a sequence. `?`
+        // may stay unbound, which matching already allows by leaving a
+        // missing field out of the record.
+        if !matches!(children.get(index + 2), Some(Syntax::Token { .. })) {
             index += 1;
             continue;
-        };
+        }
         let mut cursor = index + 3;
         let mut repeated = false;
-        let mut optional = false;
         if operator_is(children.get(cursor), "*") {
             repeated = true;
             cursor += 1;
         } else if operator_is(children.get(cursor), "?") {
-            optional = true;
             cursor += 1;
         }
         fields.push(ClassField {
             name: name.clone(),
-            kind: hole_kind(kind_name),
             repeated,
-            optional,
         });
         index = cursor;
     }
@@ -2610,7 +2589,7 @@ fn refines_after(source: &str, nodes: &[Syntax], group_at: usize) -> Vec<Refine>
 fn refine_at(source: &str, nodes: &[Syntax], index: usize) -> Option<Refine> {
     // `refine $field ...`. The `$` is its own token and has no `:kind`.
     let field = hole_name_at(nodes, index + 1)?;
-    let mut cursor = index + 3;
+    let cursor = index + 3;
     if token_at(nodes, cursor, "spelling") && token_at(nodes, cursor + 1, "equals") {
         let spelling = quoted_after(source, nodes, cursor + 2)?;
         return Some(Refine::SpellingEquals { field, spelling });
@@ -3551,7 +3530,7 @@ fn tpls_from(nodes: &[Syntax], _unused: String) -> Vec<Tpl> {
     let mut tpls = Vec::new();
     let mut index = 0;
     let mut pending = String::new();
-    let mut flush = |pending: &mut String, tpls: &mut Vec<Tpl>| {
+    let flush = |pending: &mut String, tpls: &mut Vec<Tpl>| {
         if !pending.is_empty() {
             tpls.push(Tpl::Text(std::mem::take(pending)));
         }
@@ -3955,8 +3934,7 @@ fn match_pats_fail(
                         // makes `posts` fail `on` and hides the next rule.
                         None
                     } else if *kind == HoleKind::Binding && pattern.len() == 1 {
-                        take_expr(source, nodes, *cursor)
-                            .or_else(|| take_ident(source, nodes, *cursor))
+                        take_expr(source, nodes, *cursor).or_else(|| take_ident(nodes, *cursor))
                     } else if *kind == HoleKind::Expr {
                         let stop = stop
                             .filter(|word| word.chars().all(|ch| "!=<>&|?+-*/%^~".contains(ch)));
@@ -4306,28 +4284,6 @@ fn match_closer(source: &str, node: &Syntax) -> Option<Span> {
     })
 }
 
-/// `assert()` is a call. Rejecting at the name hides the `)` the rule
-/// fails on. Only that empty call skips the early reject.
-fn empty_call_head(nodes: &[Syntax], index: usize) -> bool {
-    let Some(name) = macro_head(&nodes[index]) else {
-        return false;
-    };
-    if name != "assert" {
-        return false;
-    }
-    let Syntax::Group {
-        children,
-        delimiter: Delimiter::Paren,
-        ..
-    } = nodes.get(index + 1).unwrap_or(&nodes[index])
-    else {
-        return false;
-    };
-    children
-        .iter()
-        .all(|child| matches!(child, Syntax::Comment { .. }))
-}
-
 /// The first non-whitespace of the line after `at`.
 fn each_line_after(source: &str, at: usize) -> Option<Span> {
     let rest = source.get(at..)?;
@@ -4586,10 +4542,6 @@ fn class_failure(
             progress: node_start(node) as i32,
         })
     }
-}
-
-fn match_rule(source: &str, nodes: &[Syntax], index: usize, pattern: &[Pat]) -> Option<Match> {
-    match_rule_with(source, nodes, index, pattern, &[], &[])
 }
 
 fn match_rule_with(
@@ -5056,8 +5008,7 @@ fn match_pats_stop(
                     } else if *kind == HoleKind::Binding && pattern.len() == 1 {
                         // `rule { clamp(...) }` is a binding hole standing for the
                         // whole call. Inside `function $name(...)` it is one name.
-                        take_expr(source, nodes, *cursor)
-                            .or_else(|| take_ident(source, nodes, *cursor))
+                        take_expr(source, nodes, *cursor).or_else(|| take_ident(nodes, *cursor))
                     } else if *kind == HoleKind::Expr {
                         // `$left:expr == $right` stops before `==`. The
                         // operator is the next pattern piece, not part of
@@ -5592,7 +5543,7 @@ fn take_hole(
             }
             None
         }
-        HoleKind::Ident | HoleKind::Binding => take_ident(source, nodes, index),
+        HoleKind::Ident | HoleKind::Binding => take_ident(nodes, index),
         HoleKind::Type => take_type(source, nodes, index),
         HoleKind::TokenTree => {
             // `$($rest:tt)+` is the remaining steps of a thread, which start
@@ -5600,9 +5551,9 @@ fn take_hole(
             // whole call; a standalone `$marker:token` is exactly one token
             // and must not swallow the `/` after it.
             if in_rep {
-                take_token_tree(source, nodes, index).or_else(|| take_ident(source, nodes, index))
+                take_token_tree(source, nodes, index).or_else(|| take_ident(nodes, index))
             } else {
-                take_ident(source, nodes, index).or_else(|| take_one_token(source, nodes, index))
+                take_ident(nodes, index).or_else(|| take_one_token(source, nodes, index))
             }
         }
         HoleKind::Expr => {
@@ -5668,7 +5619,7 @@ fn take_type(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, u
 }
 
 /// `$name:binding` is one identifier, not the call or type that follows it.
-fn take_ident(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, usize, usize)> {
+fn take_ident(nodes: &[Syntax], cursor: usize) -> Option<(String, usize, usize)> {
     let mut index = cursor;
     skip_comments(nodes, &mut index);
     let node = nodes.get(index)?;
@@ -6023,10 +5974,6 @@ fn plan_name(key: &str) -> &str {
     key.split('\0').next().unwrap_or(key)
 }
 
-fn plan_name_map(plan: &[(String, String)]) -> HashMap<String, String> {
-    occurrence_plan(plan, &HashMap::new())
-}
-
 fn occurrence_plan(
     plan: &[(String, String)],
     seen: &HashMap<String, usize>,
@@ -6325,10 +6272,6 @@ fn planned(
     plan.iter()
         .find(|(key, _)| key == &format!("{raw}\0{nth}"))
         .map(|(_, printed)| printed.clone())
-}
-
-fn sole_capture(nodes: &[Syntax], index: usize) -> bool {
-    nodes.len() == 1 && index == 0
 }
 
 fn apply_arrow_params(
@@ -7866,11 +7809,6 @@ fn scope_record_fields(scoped: &mut HashMap<String, Capture>) {
     }
 }
 
-fn part_in_core(template: &[Tpl], part: &Tpl) -> bool {
-    let _ = (template, part);
-    false
-}
-
 fn trim_template(template: &[Tpl]) -> &[Tpl] {
     let mut start = 0;
     let mut end = template.len();
@@ -8311,12 +8249,6 @@ fn capture_at<'a>(captures: &'a HashMap<String, Capture>, path: &str) -> Option<
                     .get(path)
                     .filter(|found| matches!(found, Capture::Text(_)));
             }
-            Capture::Record { .. } => {
-                if let Some(Capture::Text(_)) = captures.get(path) {
-                    return captures.get(path);
-                }
-                return Some(value);
-            }
             Capture::Many(rows) => {
                 // `$column.modifiers` is a sequence of records. The next
                 // field (`primary`) is on this row's record. `rest` is the
@@ -8343,14 +8275,9 @@ fn capture_at<'a>(captures: &'a HashMap<String, Capture>, path: &str) -> Option<
                     Some(child)
                 });
             }
-            Capture::Text(_) => return None,
         };
     }
     Some(value)
-}
-
-fn capture_field<'a>(fields: &'a HashMap<String, Capture>, name: &str) -> Option<&'a Capture> {
-    fields.get(name)
 }
 
 /// `$state.moves` while `state` is a sequence of records. Each row contributes
@@ -8461,78 +8388,6 @@ fn join_identifier(prefix: &str, captured: &str, suffix: &str, casing: &str) -> 
         _ => captured.to_owned(),
     };
     format!("{prefix}{cased}{suffix}")
-}
-
-fn parenthesize_new_exprs(text: &str) -> String {
-    if !text.contains("new ") && !text.contains("new\n") {
-        return text.to_owned();
-    }
-    let read = sweetener_reader::read_syntax(text);
-    let mut out = String::new();
-    let mut cursor = 0usize;
-    parenthesize_new_nodes(text, &read.children, &mut out, &mut cursor);
-    if cursor < text.len() {
-        out.push_str(&text[cursor..]);
-    }
-    out
-}
-
-fn parenthesize_new_nodes(source: &str, nodes: &[Syntax], out: &mut String, cursor: &mut usize) {
-    let mut index = 0;
-    while index < nodes.len() {
-        if token_at(nodes, index, "new") {
-            let end = new_expr_end(nodes, index);
-            let already = index == 0
-                && end == nodes.len()
-                && source[..node_start(&nodes[index])]
-                    .trim_end()
-                    .ends_with('(');
-            if !already && end > index + 1 {
-                push_until(source, out, cursor, node_start(&nodes[index]));
-                out.push('(');
-                let close_at = node_end(&nodes[end - 1]);
-                parenthesize_new_nodes(source, &nodes[index + 1..end], out, cursor);
-                if *cursor < close_at {
-                    out.push_str(&source[*cursor..close_at]);
-                    *cursor = close_at;
-                }
-                out.push(')');
-                index = end;
-                continue;
-            }
-        }
-        if let Syntax::Group { children, .. } = &nodes[index] {
-            parenthesize_new_nodes(source, children, out, cursor);
-        }
-        index += 1;
-    }
-}
-
-fn new_expr_end(nodes: &[Syntax], index: usize) -> usize {
-    let mut cursor = index + 1;
-    if matches!(
-        nodes.get(cursor),
-        Some(Syntax::Token { .. }) | Some(Syntax::Group { .. })
-    ) {
-        cursor += 1;
-    }
-    while cursor < nodes.len() {
-        match &nodes[cursor] {
-            Syntax::Group { delimiter, .. }
-                if matches!(delimiter, Delimiter::Paren | Delimiter::Bracket) =>
-            {
-                cursor += 1;
-            }
-            Syntax::Operator { raw, .. } if raw == "." => {
-                cursor += 1;
-                if matches!(nodes.get(cursor), Some(Syntax::Token { .. })) {
-                    cursor += 1;
-                }
-            }
-            _ => break,
-        }
-    }
-    cursor
 }
 
 fn rep_rows(inner: &[Tpl], captures: &HashMap<String, Capture>) -> Vec<Vec<(String, Capture)>> {
@@ -9217,19 +9072,6 @@ fn strip_already_printed(source: &str, head: usize, expanded: &str) -> String {
         }
     }
     out
-}
-
-/// Captured CSP declarations the source already wrote. A leading `|`
-/// on the union, a dropped trailing comma in `put`, and a missing
-/// `void channel` are not shape. The hygiene file has none of these.
-fn first_const_name(text: &str) -> Option<String> {
-    let at = text.find("const ")?;
-    let rest = text[at + "const ".len()..].trim_start();
-    let name: String = rest
-        .chars()
-        .take_while(|ch| *ch == '_' || ch.is_ascii_alphanumeric())
-        .collect();
-    if name.is_empty() { None } else { Some(name) }
 }
 
 fn fresh_name(

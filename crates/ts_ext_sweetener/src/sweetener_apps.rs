@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! App macros the expander still prints as source.
 //!
 //! [`expand_apps`] is the one entry the form pass calls. Each form is a
@@ -18,6 +17,9 @@ pub fn expand_apps(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
     if let Some(item) = match_error_item(source, nodes, index) {
         return Some(item);
     }
+    if let Some(item) = match_service_item(source, nodes, index) {
+        return Some(item);
+    }
     if let Some(item) = match_effect_item(source, nodes, index) {
         return Some(item);
     }
@@ -29,53 +31,6 @@ pub fn expand_apps(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
     }
     let _ = (source, nodes, index);
     None
-}
-
-/// A macro module is not user code. `fine-jsx-implementation` keeps only
-/// the runtime import its template mentions; the `export syntax` items go.
-fn match_syntax_export(nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    if !token_is(nodes.get(index), "export") || !token_is(nodes.get(index + 1), "syntax") {
-        return None;
-    }
-    let end = syntax_item_end(nodes, index);
-    Some(rewrite(nodes, index, end, String::new()))
-}
-
-fn syntax_item_end(nodes: &[Syntax], index: usize) -> usize {
-    let mut depth = 0i32;
-    let mut cursor = index;
-    let mut saw_brace = false;
-    while cursor < nodes.len() {
-        if group_children(nodes.get(cursor), Delimiter::Brace).is_some() {
-            depth += 1;
-            saw_brace = true;
-            if depth == 0 {
-                return node_end(&nodes[cursor]);
-            }
-            // A brace group is one node. Nested groups are inside it, so
-            // each sibling brace is one level of the syntax item.
-            depth -= 1;
-            if saw_brace && depth == 0 && cursor > index + 2 {
-                // The item's body is the last top-level brace after the name.
-                // Keep scanning while a following brace is still the item.
-            }
-        }
-        cursor += 1;
-        if cursor > index + 400 {
-            break;
-        }
-    }
-    // The item runs through the last brace that started after `syntax`.
-    let mut last = index;
-    for (at, node) in nodes.iter().enumerate().skip(index) {
-        if group_children(Some(node), Delimiter::Brace).is_some() {
-            last = at;
-        }
-        if at > index + 400 {
-            break;
-        }
-    }
-    node_end(&nodes[last])
 }
 
 struct Field {
@@ -559,10 +514,6 @@ fn skip_trivia(nodes: &[Syntax], index: &mut usize) {
     }
 }
 
-fn node_text(source: &str, node: &Syntax) -> Option<String> {
-    Some(sweetener_reader::slice(source, node).trim().to_owned())
-}
-
 fn token_is(node: Option<&Syntax>, expected: &str) -> bool {
     match node {
         Some(Syntax::Token { raw, .. }) => raw == expected,
@@ -626,8 +577,4 @@ fn node_end(node: &Syntax) -> usize {
         | Syntax::Operator { span, .. }
         | Syntax::Group { span, .. } => span.end as usize,
     }
-}
-
-fn is_ident_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
 }

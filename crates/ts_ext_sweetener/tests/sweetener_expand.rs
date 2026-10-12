@@ -1,49 +1,6 @@
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use ts_ext_sweetener::{ExpandRequest, Phase, SegmentKind, expand, structure};
-
-const OPERATORS: &str = r#"export operator (|>):expr {
-  fixity infix;
-  associativity left;
-  precedence 35;
-  rule { $value:expr |> $function:ident } => {
-    $function($value)
-  }
-}
-"#;
-
-fn main_source() -> String {
-    // Sweetener resolves syntax imports relative to the source file. An
-    // absolute path is reported as an unresolved macro module.
-    "import { (|>) } from \"./operators.sts\" for syntax;\nconst result = [1, 2, 3] |> sum;\n"
-        .to_owned()
-}
-
-fn write_fixture() -> (PathBuf, String) {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("ts-rust-sweetener-{nanos}"));
-    fs::create_dir_all(&dir).expect("temp fixture dir");
-    let operators = dir.join("operators.sts");
-    fs::write(&operators, OPERATORS).expect("operators.sts");
-    let main = dir.join("main.sts");
-    let code = main_source();
-    fs::write(&main, &code).expect("main.sts");
-    fs::write(
-        dir.join("tsconfig.json"),
-        r#"{
-  "compilerOptions": { "module": "ESNext", "target": "ES2022" },
-  "files": ["operators.sts", "main.sts"]
-}
-"#,
-    )
-    .expect("tsconfig.json");
-    (main, code)
-}
+use ts_ext_sweetener::{ExpandRequest, Phase, expand, structure};
 
 #[test]
 fn every_local_macro_case_matches_theirs() {
@@ -176,51 +133,6 @@ fn case_matches_theirs(rel: &str) {
         expansion.code,
         theirs,
         structure::unified(&theirs, &expansion.code)
-    );
-}
-
-fn pipe_expands_or_reports_not_built_in() {
-    let (main, code) = write_fixture();
-    let expansion = expand(ExpandRequest {
-        filename: &main.display().to_string(),
-        code: &code,
-        phase: Phase::Check,
-    });
-    let unavailable = expansion.diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("Sweetener expansion is not built in yet")
-    });
-    if unavailable {
-        assert_eq!(expansion.code, code);
-        assert_eq!(expansion.segments.len(), 1);
-        assert!(expansion.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message.contains(&main.display().to_string())
-                || diagnostic.message.contains("not built in yet")
-        }));
-        return;
-    }
-    assert!(
-        expansion.code.contains("sum("),
-        "expanded code missing sum(: {}",
-        expansion.code
-    );
-    assert!(
-        !expansion.code.contains("|>"),
-        "expanded code still contains |>\n{}",
-        expansion.code
-    );
-    assert!(
-        expansion.segments.len() > 1,
-        "source map should yield more than one segment, got {}",
-        expansion.segments.len()
-    );
-    assert!(
-        expansion
-            .segments
-            .iter()
-            .any(|segment| segment.kind == SegmentKind::Verbatim),
-        "expected a verbatim segment from the source map"
     );
 }
 

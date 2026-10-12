@@ -14,6 +14,7 @@ use super::sweetener_reader::{self, Delimiter, Syntax};
 /// bind `#join($name, suffix: "Signal")` in the following items, then emit
 /// `const <name>Signal = createSignal($initial)` and a nested `syntax $name`
 /// whose rules substitute that joined name and `#metavar("value", $name)`.
+#[cfg(test)]
 pub fn expand_state_signal(name: &str, initial: &str) -> String {
     let signal = join_ident(name, "", "Signal", "preserve");
     format!("const {signal} = createSignal({initial});")
@@ -52,11 +53,7 @@ pub fn try_expand_fixture(
             segments,
             result: item.result.to_owned(),
             body: item.body.to_owned(),
-            requests: item
-                .requests
-                .iter()
-                .map(|request| (request.pattern.clone(), request.expansion.clone()))
-                .collect(),
+            requests: item.requests,
         };
         // The second `method` rule emits `#syntax`, which is not printed.
         // The binding is what a later call expands. The grammar form is
@@ -453,14 +450,6 @@ fn parse_ctor_fields(source: &str, children: &[Syntax]) -> Vec<(String, String)>
         index = end_at;
     }
     fields
-}
-
-fn expand_data_decl(
-    name: &str,
-    type_param: &str,
-    variants: &[(String, Vec<(String, String)>)],
-) -> String {
-    expand_data_decl_hygiene(name, type_param, variants, &[])
 }
 
 /// Constructor parameters are new binders. An outer `const value` makes the
@@ -1022,34 +1011,6 @@ pub struct MethodBinding {
     pub requests: Vec<(String, String)>,
 }
 
-/// The nested `syntax $name:expr` produced by `state`, with every directive
-/// already substituted. Assignment operators that read-then-write keep the
-/// operator between `.get()` and the value; `&&=` / `||=` / `??=` short-circuit
-/// into `.set`. A bare name is `.get()`.
-pub fn signal_syntax(name: &str, signal: &str) -> String {
-    let value = "value";
-    let mut rules = Vec::new();
-    rules.push(format!(
-        "rule {{ {name} = {value}:expr }} => {{ {signal}.set({value}) }}"
-    ));
-    for op in [
-        "+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>",
-    ] {
-        let assign = format!("{op}=");
-        rules.push(format!(
-            "rule {{ {name} {assign} {value}:expr }} => {{ {signal}.set({signal}.get() {op} {value}) }}"
-        ));
-    }
-    for op in ["&&", "||", "??"] {
-        let assign = format!("{op}=");
-        rules.push(format!(
-            "rule {{ {name} {assign} {value}:expr }} => {{ {signal}.get() {op} {signal}.set({value}) }}"
-        ));
-    }
-    rules.push(format!("rule {{ {name} }} => {{ {signal}.get() }}"));
-    format!("syntax {name}:expr {{\n{}\n}}", rules.join("\n"))
-}
-
 /// `effect { body... }` => `createEffect(() => { body... })`.
 pub fn expand_effect(body: &str) -> String {
     // The `effect` rule's template ends with `;` after the call.
@@ -1066,14 +1027,6 @@ pub fn join_ident(name: &str, prefix: &str, suffix: &str, casing: &str) -> Strin
         _ => name.to_owned(),
     };
     format!("{prefix}{cased}{suffix}")
-}
-
-/// `#metavar("value", $name)` is the expression hole of the rule being
-/// applied, not text to print. The call-site capture is that hole.
-pub fn metavar_capture<'a>(hole: &str, captures: &'a [(&str, &'a str)]) -> Option<&'a str> {
-    captures
-        .iter()
-        .find_map(|(name, value)| (*name == hole).then_some(*value))
 }
 
 /// Apply one already-substituted signal rule to a use of `name`.
@@ -1107,6 +1060,7 @@ pub fn apply_signal_use(name: &str, signal: &str, op: Option<&str>, value: Optio
 /// drops the block's `return`, so the arrow body is the returned expression
 /// when the block is only that return. A parameter the user file already
 /// binds is printed `name_1` in the generated function only.
+#[cfg(test)]
 pub fn expand_method_call(
     head_params: &[(&str, &str)],
     head_args: &[&str],
@@ -1280,6 +1234,7 @@ pub fn expand_channel_receive(name: &str, channel: &str) -> String {
 /// `$monad.flatMap($source, ($name) => ...)`, and a trailing `return $result`
 /// becomes `$monad.of($result)`. Nested `doSteps` calls are this function
 /// again, not text left for a later pass.
+#[cfg(test)]
 pub fn expand_do_steps(monad: &str, steps: &[DoStep<'_>], result: &str) -> String {
     expand_do_steps_hygiene(monad, steps, result, &[])
 }
@@ -1332,15 +1287,13 @@ pub struct DoStep<'a> {
 /// `(-> $next($value, $($argument),*), $($rest)+)`.
 /// Thread-last inserts it last. A trailing comma is the same rule with no
 /// rest. One remaining call is the base rule, not another `(-> ...)`.
+#[cfg(test)]
 pub fn expand_thread_first(value: &str, steps: &[ThreadStep<'_>]) -> String {
     thread_calls(value, steps, true)
 }
 
-pub fn expand_thread_last(value: &str, steps: &[ThreadStep<'_>]) -> String {
-    thread_calls(value, steps, false)
-}
-
 /// `map((value) => value + 1)` as one threading step.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub struct ThreadStep<'a> {
     pub callee: &'a str,
@@ -1365,108 +1318,6 @@ pub fn expand_jsx_each(items: &str, item: &str, index: Option<&str>, body: &str)
         None => item.to_owned(),
     };
     format!("{{({items}).map(({params}) => {body})}}")
-}
-
-/// Read a `state name = initial` item out of a token tree. Returns the
-/// binding and the initializer text. This is the pattern the `state` rule
-/// matches before [`expand_state_signal`].
-pub fn match_state_item(source: &str, nodes: &[Syntax]) -> Option<(String, String)> {
-    let mut index = 0;
-    if token_is(nodes.get(index), "export") {
-        index += 1;
-    }
-    if !token_is(nodes.get(index), "state") {
-        return None;
-    }
-    let name = token_raw(nodes.get(index + 1))?;
-    if !operator_is(nodes.get(index + 2), "=") {
-        return None;
-    }
-    let start = node_start(nodes.get(index + 3)?);
-    let mut end = start;
-    let mut cursor = index + 3;
-    while cursor < nodes.len() && !operator_is(nodes.get(cursor), ";") {
-        end = node_end(&nodes[cursor]);
-        cursor += 1;
-    }
-    let initial = source.get(start..end)?.trim().to_owned();
-    Some((name, initial))
-}
-
-/// `export function add(left: T, right: U): R { body }` under `shadows core`.
-/// The parameter names stay as written. An outer `const right` is a different
-/// binding; theirs does not suffix the parameter.
-fn match_curried_fn(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    let mut cursor = index;
-    let mut exported = false;
-    if token_is(nodes.get(cursor), "export") {
-        exported = true;
-        cursor += 1;
-    } else if token_is(nodes.get(cursor), "function")
-        && index > 0
-        && token_is(nodes.get(index - 1), "export")
-    {
-        // The syntax import dropped `export` before this head. It is still
-        // part of the item; theirs keeps it on every overload.
-        exported = true;
-    }
-    if !token_is(nodes.get(cursor), "function") {
-        return None;
-    }
-    let name = token_raw(nodes.get(cursor + 1))?;
-    let params = group_children(nodes.get(cursor + 2), Delimiter::Paren)?;
-    let pairs = param_pairs(source, params);
-    if pairs.len() != 2 {
-        return None;
-    }
-    let mut after = cursor + 3;
-    if !operator_is(nodes.get(after), ":") {
-        return None;
-    }
-    after += 1;
-    let result_start = node_start(nodes.get(after)?);
-    let mut result_end = result_start;
-    while after < nodes.len()
-        && !matches!(
-            nodes.get(after),
-            Some(Syntax::Group {
-                delimiter: Delimiter::Brace,
-                ..
-            })
-        )
-    {
-        result_end = node_end(&nodes[after]);
-        after += 1;
-    }
-    let body_node = nodes.get(after)?;
-    let body = group_interior(source, body_node, Delimiter::Brace)?;
-    let result = source.get(result_start..result_end)?.trim();
-    let (left, left_ty) = &pairs[0];
-    let (right, right_ty) = &pairs[1];
-    let export = if exported { "export " } else { "" };
-    // The implementation parameter is a new binder. An outer `const right`
-    // is printed `right_1` there only; the overload spellings stay.
-    let impl_right = fresh_param(right, &outer_consts(source));
-    let impl_body = rename_params(body, &[(right.as_str(), impl_right.clone())]);
-    let text = format!(
-        "{export}function {name}({left}: {left_ty}): ({right}: {right_ty}) => {result};
-    {export}function {name}({left}: {left_ty}, {right}: {right_ty}): {result};
-    {export}function {name}({left}: {left_ty}, {impl_right}?: {right_ty},): {result} | (({right}: {right_ty}) => {result}) {{
-      if ({impl_right} === undefined) {{
-        return ({impl_right}: {right_ty}): {result} => {{ {impl_body} }};
-      }}
-      {impl_body}
-    }}"
-    );
-    let end = node_end(body_node);
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end,
-        next: end_index(nodes, index, end),
-        text,
-        binds: Vec::new(),
-        method: None,
-    })
 }
 
 /// Read `method head(params) segment(params): result { body }` without the
@@ -1522,9 +1373,9 @@ pub fn match_method_item<'a>(source: &'a str, nodes: &'a [Syntax]) -> Option<Met
 }
 
 /// `method query { request { ... } expect "..."; => { ... } }` becomes the
-/// `syntax query` the first `method` rule would define. `#syntax` is not
-/// printed; the rules are.
-fn method_requests(source: &str, body: &Syntax) -> Vec<MethodRequest> {
+/// pattern and expansion a later `query(...)` call fills in. `expect` is
+/// the failure the matcher reports; it is not part of the expansion.
+fn method_requests(source: &str, body: &Syntax) -> Vec<(String, String)> {
     let Some(children) = group_children(Some(body), Delimiter::Brace) else {
         return Vec::new();
     };
@@ -1544,12 +1395,7 @@ fn method_requests(source: &str, body: &Syntax) -> Vec<MethodRequest> {
             continue;
         };
         index += 2;
-        let mut expectation = "";
         if token_is(children.get(index), "expect") {
-            expectation = children
-                .get(index + 1)
-                .map(|node| sweetener_reader::slice(source, node).trim())
-                .unwrap_or("");
             index += 2;
             if operator_is(children.get(index), ";") {
                 index += 1;
@@ -1566,37 +1412,10 @@ fn method_requests(source: &str, body: &Syntax) -> Vec<MethodRequest> {
             index += 1;
             continue;
         };
-        requests.push(MethodRequest {
-            pattern: pattern.trim().to_owned(),
-            expectation: expectation.trim_matches('"').to_owned(),
-            expansion: expansion.trim().to_owned(),
-        });
+        requests.push((pattern.trim().to_owned(), expansion.trim().to_owned()));
         index += 2;
     }
     requests
-}
-
-struct MethodRequest {
-    pattern: String,
-    expectation: String,
-    expansion: String,
-}
-
-pub fn expand_method_grammar(head: &str, requests: &[MethodRequest]) -> String {
-    let mut rules = Vec::new();
-    for request in requests {
-        let expect = if request.expectation.is_empty() {
-            String::new()
-        } else {
-            format!("\nexpect \"{}\";", request.expectation)
-        };
-        rules.push(format!(
-            "rule {{ {} }}{expect}\n=> {{ {} }}",
-            request.pattern.trim(),
-            request.expansion.trim()
-        ));
-    }
-    format!("syntax {head}:expr {{\n{}\n}}", rules.join("\n"))
 }
 
 /// Pieces of a multi-part method item. Parameter groups are still token trees;
@@ -1607,7 +1426,7 @@ pub struct MethodItem<'a> {
     pub segments: Vec<(String, &'a [Syntax])>,
     pub result: &'a str,
     pub body: &'a str,
-    requests: Vec<MethodRequest>,
+    requests: Vec<(String, String)>,
 }
 
 /// `2 -> table` or `received <- table` at statement position.
@@ -2069,31 +1888,6 @@ pub struct ThreadItem<'a> {
     pub value: &'a str,
     pub body: &'a [Syntax],
     pub next: usize,
-}
-
-/// `{when (cond)} child {else} other {end}` or `{each (items as item, index)}`.
-pub fn match_jsx_control<'a>(
-    source: &'a str,
-    nodes: &[Syntax],
-    index: usize,
-) -> Option<JsxControl<'a>> {
-    let children = group_children(nodes.get(index), Delimiter::Brace)?;
-    let head = token_raw(children.first())?;
-    if head != "when" && head != "each" {
-        return None;
-    }
-    let args = group_interior(source, children.get(1)?, Delimiter::Paren)?;
-    Some(JsxControl {
-        kind: head,
-        args: args.trim(),
-        at: index,
-    })
-}
-
-pub struct JsxControl<'a> {
-    pub kind: String,
-    pub args: &'a str,
-    pub at: usize,
 }
 
 /// `query(students) Where(adult) OrderBy(name) Select(name)` against the
@@ -2846,25 +2640,6 @@ fn split_each_args(args: &str) -> Option<(&str, &str, Option<&str>)> {
     Some((items.trim(), item, index))
 }
 
-fn call_args_trail(source: &str, node: &Syntax) -> bool {
-    let Some(children) = group_children(Some(node), Delimiter::Paren) else {
-        return false;
-    };
-    let Some(last) = children.last() else {
-        return source
-            .get(node_start(node)..node_end(node))
-            .is_some_and(|text| {
-                text.trim_end().ends_with(",)") || text.trim_end().ends_with(", )")
-            });
-    };
-    if operator_is(Some(last), ",") {
-        return true;
-    }
-    source
-        .get(node_end(last)..node_end(node))
-        .is_some_and(|text| text.contains(','))
-}
-
 fn split_call_args(source: &str, node: &Syntax) -> Vec<String> {
     let Some(children) = group_children(Some(node), Delimiter::Paren) else {
         return Vec::new();
@@ -3091,6 +2866,7 @@ fn expand_thread_nodes(source: &str, value: &str, body: &[Syntax], first: bool) 
     current
 }
 
+#[cfg(test)]
 fn thread_calls(value: &str, steps: &[ThreadStep<'_>], first: bool) -> String {
     let mut current = value.trim().to_owned();
     for step in steps {
