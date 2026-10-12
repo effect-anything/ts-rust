@@ -2482,10 +2482,9 @@ fn rules_in_source(source: &str, body: &Syntax) -> Vec<Rule> {
             template_from_source(source, template_group)
         };
         // `fallback rule { $declaration:tt } => { coreItem $declaration }`
-        // reprints every function. The fixture expander owns that shadow.
-        if template_is_core_item(&template) {
-            continue;
-        }
+        // reprints a function the class rule did not take. Dropping it makes
+        // `function identity` fail. The fixture form still owns the one
+        // function it matches; this rule only runs when that form missed.
         if !pattern.is_empty() {
             let introduced = introduced_of(source, std::slice::from_ref(template_group));
             rules.push(Rule {
@@ -4880,10 +4879,7 @@ fn class_pattern_at<'a>(nodes: &[Syntax], index: usize, pattern: &'a [Pat]) -> &
     let Some(Pat::Lit(head)) = pattern.first() else {
         return pattern;
     };
-    if nodes
-        .get(index)
-        .is_some_and(|node| node_is_lit(node, head))
-    {
+    if nodes.get(index).is_some_and(|node| node_is_lit(node, head)) {
         &pattern[1..]
     } else {
         pattern
@@ -4911,19 +4907,6 @@ fn take_class(
         // the token this hole started on, so the rest of the rule is the form.
         let pattern = class_pattern_at(nodes, index, &rule.pattern);
         let Some(end) = match_pats(source, nodes, &mut child, pattern, &mut raw, classes) else {
-            if std::env::var_os("DUMP_CLASS").is_some() {
-                let here = nodes.get(index).map(|node| {
-                    format!("{}..{}", node_start(node), node_end(node))
-                });
-                eprintln!(
-                    "CLASS {} miss at {here:?} pat={:?}",
-                    class_.name,
-                    pattern
-                        .iter()
-                        .map(|pat| format!("{pat:?}").chars().take(80).collect::<String>())
-                        .collect::<Vec<_>>()
-                );
-            }
             continue;
         };
         let text = sweetener_reader::slice_range(source, start, end).to_owned();
@@ -6564,13 +6547,6 @@ fn unknown_directives(template: &[Tpl]) -> Vec<(String, usize)> {
         }
     }
     found
-}
-
-fn template_is_core_item(template: &[Tpl]) -> bool {
-    template.iter().any(|part| match part {
-        Tpl::Text(text) => text.contains("coreItem"),
-        _ => false,
-    })
 }
 
 fn template_is_core(template: &[Tpl]) -> bool {
