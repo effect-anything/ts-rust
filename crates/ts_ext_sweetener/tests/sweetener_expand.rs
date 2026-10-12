@@ -52,11 +52,7 @@ fn every_local_macro_case_matches_theirs() {
     // The compiled rule or the form still misses these. They stay listed so
     // a fix has to delete the name; every other captured case is checked,
     // including a macro defined inside `input.sts`.
-    let open = [
-        "examples-react-memoization-src-function-shadow",
-        "fixtures-acceptance-playground-multi-part-methods",
-        "fixtures-acceptance-playground-multi-part-methods-hygiene",
-    ];
+    let open = ["examples-react-memoization-src-function-shadow"];
     for entry in walk(&root) {
         let dir = input_dir(&entry);
         let Some(dir) = dir else {

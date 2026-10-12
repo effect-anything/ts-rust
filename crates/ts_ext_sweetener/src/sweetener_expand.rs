@@ -758,9 +758,22 @@ impl<'a> Printer<'a> {
                         }
                     )
                 });
-                let consumed = !call_shaped || nodes.get(matched.next).is_none_or(|node| {
-                    !matches!(node, Syntax::Operator { raw, .. } if raw == "," || raw == ")")
-                });
+                let finished_call = call_shaped
+                    && matched.next > 0
+                    && nodes.get(matched.next - 1).is_some_and(|node| {
+                        matches!(
+                            node,
+                            Syntax::Group {
+                                delimiter: Delimiter::Paren,
+                                ..
+                            }
+                        )
+                    });
+                let consumed = !call_shaped
+                    || finished_call
+                    || nodes.get(matched.next).is_none_or(|node| {
+                        !matches!(node, Syntax::Operator { raw, .. } if raw == "," || raw == ")")
+                    });
                 if !consumed {
                     continue;
                 }
@@ -1621,7 +1634,10 @@ impl<'a> Printer<'a> {
             .iter_mut()
             .find(|have| have.name == method.head)
         {
-            existing.rules.insert(0, rule);
+            // The compiled `between` rule already names `lower` and `upper`.
+            // Putting this stand-in first makes a complete call fail on the
+            // second segment (`upper argument segment`) before that rule runs.
+            existing.rules.push(rule);
         } else {
             self.macros_mut().push(Macro {
                 name: method.head.clone(),
@@ -3163,7 +3179,11 @@ fn read_metavar(children: &[Syntax]) -> Option<Tpl> {
 }
 
 fn metavar_hole(hole: &str, key: &str, captures: &HashMap<String, Capture>) -> String {
-    let Some(text) = capture_text(captures, key) else {
+    // `$parameter` is one binding. Inside `$($segment(... $parameter ...))+`
+    // the key is `segment.parameter`: this row's parameter, not the first
+    // segment's. A bare lookup of that path misses, and every nested
+    // segment is then stamped with the outer parameter.
+    let Some(text) = metavar_key_text(key, captures) else {
         return hole.to_owned();
     };
     let text = text.trim();
@@ -3171,6 +3191,28 @@ fn metavar_hole(hole: &str, key: &str, captures: &HashMap<String, Capture>) -> S
         return hole.to_owned();
     }
     format!("{hole}_{text}")
+}
+
+/// The binding `#metavar` suffixes with. A dotted key is this repetition
+/// row's field (`segment.parameter` -> `maximum`), not a capture stored
+/// under the whole path.
+fn metavar_key_text<'a>(key: &str, captures: &'a HashMap<String, Capture>) -> Option<&'a str> {
+    if let Some(text) = capture_text(captures, key) {
+        let text = text.trim();
+        if !text.is_empty() && is_ident_text(text) {
+            return Some(text);
+        }
+    }
+    let (parent, leaf) = key.rsplit_once('.')?;
+    let record = captures.get(parent).or_else(|| captures.get(leaf))?;
+    let Capture::Record { fields, .. } = record else {
+        return None;
+    };
+    let field = fields.get(leaf)?;
+    capture_spelling(field).filter(|text| {
+        let text = text.trim();
+        !text.is_empty() && is_ident_text(text)
+    })
 }
 
 /// `#trim($path)` and `#trim($path.field)`.
@@ -4830,6 +4872,24 @@ fn match_pats_in(
     Some(last_end)
 }
 
+/// A class rule may open with the macro head it is matched under.
+/// `function $name(...)` inside `syntax function` starts at `function`,
+/// which is already `nodes[index]`. Drop that one literal and match the
+/// parameters. A rule that does not repeat the head is unchanged.
+fn class_pattern_at<'a>(nodes: &[Syntax], index: usize, pattern: &'a [Pat]) -> &'a [Pat] {
+    let Some(Pat::Lit(head)) = pattern.first() else {
+        return pattern;
+    };
+    if nodes
+        .get(index)
+        .is_some_and(|node| node_is_lit(node, head))
+    {
+        &pattern[1..]
+    } else {
+        pattern
+    }
+}
+
 /// Match one syntax-class form. The first rule whose pattern accepts
 /// the input wins. Fields the rule did not bind stay absent so
 /// `#if(present ...)` can tell them from an empty capture.
@@ -4846,8 +4906,24 @@ fn take_class(
     for rule in &class_.rules {
         let mut child = index;
         let mut raw = HashMap::new();
-        let Some(end) = match_pats(source, nodes, &mut child, &rule.pattern, &mut raw, classes)
-        else {
+        // `syntax function` matches at the keyword. A class rule written
+        // `function $name(...)` repeats that head; the keyword is already
+        // the token this hole started on, so the rest of the rule is the form.
+        let pattern = class_pattern_at(nodes, index, &rule.pattern);
+        let Some(end) = match_pats(source, nodes, &mut child, pattern, &mut raw, classes) else {
+            if std::env::var_os("DUMP_CLASS").is_some() {
+                let here = nodes.get(index).map(|node| {
+                    format!("{}..{}", node_start(node), node_end(node))
+                });
+                eprintln!(
+                    "CLASS {} miss at {here:?} pat={:?}",
+                    class_.name,
+                    pattern
+                        .iter()
+                        .map(|pat| format!("{pat:?}").chars().take(80).collect::<String>())
+                        .collect::<Vec<_>>()
+                );
+            }
             continue;
         };
         let text = sweetener_reader::slice_range(source, start, end).to_owned();
@@ -6869,8 +6945,66 @@ fn render_keeping_rep(
 }
 
 fn with_rep_index(mut scoped: HashMap<String, Capture>, index: usize) -> HashMap<String, Capture> {
+    // A nested `$($parameter)*` is its own sequence. The outer row stored
+    // every iteration of that sequence, so a hole such as `#metavar` read
+    // the first parameter (`minimum`) for `lower` and for `upper`. Keep
+    // only the row this iteration captured.
+    retain_row_sequences(&mut scoped);
     scoped.insert("__rep_index".to_owned(), Capture::Text(index.to_string()));
     scoped
+}
+
+fn retain_row_sequences(scoped: &mut HashMap<String, Capture>) {
+    let keys: Vec<String> = scoped
+        .iter()
+        .filter(|(_, value)| matches!(value, Capture::Many(rows) if rows.len() > 1))
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in keys {
+        let Some(Capture::Many(rows)) = scoped.get(&key).cloned() else {
+            continue;
+        };
+        let Some(one) = rows.into_iter().find(|row| row_belongs_here(scoped, row)) else {
+            continue;
+        };
+        scoped.insert(key, Capture::Many(vec![one]));
+    }
+}
+
+/// True when this nested row is the iteration already in scope. A row of
+/// `$parameter` carries `minimum` only while the segment is `lower`.
+/// Text that also sits on another row (`number` for both parameters) does
+/// not decide: the row has to name this segment (`upper`), not the first.
+fn row_belongs_here(scoped: &HashMap<String, Capture>, row: &[(String, Capture)]) -> bool {
+    let texts: Vec<(&str, &str)> = row
+        .iter()
+        .filter_map(|(key, value)| match value {
+            Capture::Text(text) => Some((key.as_str(), text.trim())),
+            _ => None,
+        })
+        .filter(|(_, text)| !text.is_empty())
+        .collect();
+    if texts.is_empty() {
+        return false;
+    }
+    // The outer iteration already bound `segment` to `upper`. A nested row
+    // that still says `lower` belongs to the other segment, even when its
+    // parameter type (`number`) matches this one too.
+    if texts.iter().any(|(key, text)| {
+        capture_text(scoped, key).is_some_and(|have| have != *text && !have.is_empty())
+    }) {
+        return false;
+    }
+    texts.iter().any(|(key, text)| {
+        let Some(have) = capture_text(scoped, key) else {
+            return false;
+        };
+        if have != *text {
+            return false;
+        }
+        // A value every sibling row shares does not pick this iteration.
+        texts.iter().filter(|(_, own)| own == text).count() == 1 || texts.len() == 1
+    })
 }
 
 fn render(
@@ -7051,7 +7185,8 @@ fn rep_rows_for(
             | Tpl::Quote(name)
             | Tpl::Count(name)
             | Tpl::Join { name, .. }
-            | Tpl::Trim { path: name } => {
+            | Tpl::Trim { path: name }
+            | Tpl::Metavar { key: name, .. } => {
                 if !own.contains(name) {
                     own.push(name.clone());
                 }
@@ -7504,10 +7639,14 @@ fn capture_text<'a>(captures: &'a HashMap<String, Capture>, name: &str) -> Optio
             }
         }
     }
-    capture_spelling(value)
+    capture_spelling_key(value, name)
 }
 
 fn capture_spelling(value: &Capture) -> Option<&str> {
+    capture_spelling_key(value, "")
+}
+
+fn capture_spelling_key<'a>(value: &'a Capture, key: &str) -> Option<&'a str> {
     match value {
         Capture::Text(text) => Some(text.as_str()),
         Capture::Record { fields, text } => {
@@ -7517,10 +7656,34 @@ fn capture_spelling(value: &Capture) -> Option<&str> {
             let _ = fields;
             Some(text.as_str())
         }
-        Capture::Many(rows) => rows
-            .first()
-            .and_then(|row| row.iter().find_map(|(_, value)| capture_spelling(value))),
+        Capture::Many(rows) => {
+            let leaf = key.rsplit('.').next().unwrap_or(key);
+            rows.iter().find_map(|row| row_spelling(row, leaf))
+        }
     }
+}
+
+/// The text this row stores under `key`. A nested repetition keeps this
+/// row's own sequence under the same name (`parameter` -> `maximum`) and
+/// also copies the sibling sequence (`parameterType` -> `number`). Walking
+/// every nested sequence stamps the hole with the type. A sibling text on
+/// the row is the outer segment (`lower`), which is not the parameter.
+fn row_spelling<'a>(row: &'a [(String, Capture)], key: &str) -> Option<&'a str> {
+    if !key.is_empty() {
+        if let Some((_, value)) = row.iter().find(|(name, _)| name == key) {
+            return match value {
+                Capture::Text(text) => Some(text.as_str()),
+                Capture::Many(inner) => inner
+                    .iter()
+                    .find_map(|inner_row| row_spelling(inner_row, key)),
+                Capture::Record { text, .. } => Some(text.as_str()),
+            };
+        }
+    }
+    row.iter().find_map(|(_, value)| match value {
+        Capture::Text(text) => Some(text.as_str()),
+        _ => None,
+    })
 }
 
 fn capture_present(captures: &HashMap<String, Capture>, path: &str) -> bool {
@@ -8007,7 +8170,12 @@ fn collect_vars(template: &[Tpl], names: &mut Vec<String>) {
                     collect_vars(else_body, names);
                 }
             }
-            Tpl::Text(_) | Tpl::Unknown { .. } | Tpl::Metavar { .. } | Tpl::Index => {}
+            Tpl::Metavar { key, .. } => {
+                if !key.is_empty() && !names.contains(key) {
+                    names.push(key.clone());
+                }
+            }
+            Tpl::Text(_) | Tpl::Unknown { .. } | Tpl::Index => {}
         }
     }
 }
