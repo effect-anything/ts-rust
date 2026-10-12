@@ -36,17 +36,15 @@ pub(super) fn apply_bulk_edits(text: &str, edits: &[TextChange]) -> String {
     String::from_utf8(b).expect("edits split a UTF-8 character")
 }
 
-// Go: repo/paths.go TestDataPath
-// PORT: Go finds the repo root (`tsc/`) from the test source path. The port
-// reads the pinned Go checkout: `TS_GO_REPO` (set by goport-tests.sh), or
-// the default checkout path that `pin.py exec` binds.
-fn test_data_path() -> std::path::PathBuf {
-    let repo = match std::env::var_os("TS_GO_REPO") {
-        Some(repo) if !repo.is_empty() => std::path::PathBuf::from(repo),
-        _ => std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
-            .join(".explore/repos/microsoft__typescript-go"),
-    };
-    repo.join("testdata")
+// Go: repo/paths.go TestDataPath, then fixtures/compiler/checker.ts.
+// PORT: Go reads that file from the pinned checkout (`tsc/testdata`). This
+// test builds in ts_goport (format stayed out of goport_core), and a plain
+// `cargo test -p ts_goport --lib` has no checkout and no `TS_GO_REPO`
+// (goport-tests.sh is what sets it). The port keeps a byte copy of the file
+// at pin fed0bf24149f:
+// https://github.com/microsoft/TypeScript/blob/fed0bf24149fb1ed36039212648bafdafc1ea10e/tsc/testdata/fixtures/compiler/checker.ts
+fn checker_fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/format/checker.ts")
 }
 
 // Go: format/api_test.go:37 TestFormat, "format checker.ts"
@@ -69,7 +67,7 @@ fn test_format_format_checker_ts() {
         },
         "\n",
     );
-    let file_path = test_data_path().join("fixtures/compiler/checker.ts");
+    let file_path = checker_fixture_path();
     let file_content = std::fs::read(&file_path);
     if let Err(err) = &file_content {
         panic!("expected no error, got {err}");
