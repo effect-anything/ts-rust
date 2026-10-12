@@ -269,7 +269,7 @@ fn malformed_cases_are_refused() {
         for phrase in json_strings(&expected) {
             if matches!(
                 phrase.as_str(),
-                "SWR4001" | "TS4001" | "expansion" | "error" | "diagnostics" | "schemaVersion"
+                "SWR4001" | "expansion" | "error" | "diagnostics" | "schemaVersion"
             ) {
                 continue;
             }

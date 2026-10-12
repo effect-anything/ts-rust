@@ -64,13 +64,14 @@ fn transform_cli(path: Option<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `file.sts(line,col): error TSxxxx: message`. The message already
-/// carries `TS4001` or `SWR4001` when the expander wrote one.
+/// `file.sts(line,col): error SWRxxxx: message`. Sweetener diagnostics
+/// already start with `SWR`. A numeric code with no prefix is printed the
+/// same way. A `TS` prefix is a TypeScript diagnostic and is left as written.
 fn report_message(code: i32, message: &str) -> String {
-    if message.starts_with("TS") || message.starts_with("SWR") || code == 0 {
+    if message.starts_with("SWR") || message.starts_with("TS") || code == 0 {
         message.to_owned()
     } else {
-        format!("TS{code}: {message}")
+        format!("SWR{code}: {message}")
     }
 }
 

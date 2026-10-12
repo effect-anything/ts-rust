@@ -638,7 +638,7 @@ impl<'a> Printer<'a> {
             self.failed = true;
             self.diagnostics.push(Diagnostic {
                 message: format!(
-                    "TS4001: No rule for macro {name} accepted this input: expression or call step."
+                    "SWR4001: No rule for macro {name} accepted this input: expression or call step."
                 ),
                 start: at.start,
                 end: at.end,
@@ -1369,7 +1369,7 @@ impl<'a> Printer<'a> {
                     self.failed = true;
                     self.diagnostics.push(Diagnostic {
                         message: format!(
-                            "TS4001: No rule for macro {name} accepted this input: {detail}."
+                            "SWR4001: No rule for macro {name} accepted this input: {detail}."
                         ),
                         start,
                         end,
@@ -1589,7 +1589,7 @@ impl<'a> Printer<'a> {
             span
         };
         self.diagnostics.push(Diagnostic {
-            message: format!("TS4001: No rule for macro {name} accepted this input: {detail}."),
+            message: format!("SWR4001: No rule for macro {name} accepted this input: {detail}."),
             start: span.start,
             end: span.end,
         });
@@ -1674,7 +1674,7 @@ impl<'a> Printer<'a> {
             span
         };
         self.diagnostics.push(Diagnostic {
-            message: format!("TS4001: No rule for macro {name} accepted this input: {detail}."),
+            message: format!("SWR4001: No rule for macro {name} accepted this input: {detail}."),
             start: span.start,
             end: span.end,
         });

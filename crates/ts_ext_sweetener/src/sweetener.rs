@@ -3,7 +3,8 @@
 //! Output is ordinary TypeScript. This pass does not look for `"use gpu"`.
 //! A directive in the expanded text is rewritten later, on that text, by
 //! the TypeScript path. Expansion owns macro errors (`SWR4001` and the
-//! reader codes). TypeScript owns TypeScript semantics after this print.
+//! reader codes `SWR1002` and `SWR1003`). TypeScript owns TypeScript
+//! semantics after this print.
 
 use crate::{ExpandRequest, Expansion};
 

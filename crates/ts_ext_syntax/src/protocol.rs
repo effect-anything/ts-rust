@@ -22,11 +22,12 @@ pub struct ProtocolDiagnostic {
     pub code: i32,
 }
 
-/// The number in a `TS4001` or `SWR4001` message. Other messages stay `0`.
+/// The number in an `SWR4001` message. A `TS` prefix is still read so a
+/// TypeScript diagnostic keeps its code. Other messages stay `0`.
 fn diagnostic_code(message: &str) -> i32 {
     let rest = message
-        .strip_prefix("TS")
-        .or_else(|| message.strip_prefix("SWR"));
+        .strip_prefix("SWR")
+        .or_else(|| message.strip_prefix("TS"));
     let Some(rest) = rest else {
         return 0;
     };

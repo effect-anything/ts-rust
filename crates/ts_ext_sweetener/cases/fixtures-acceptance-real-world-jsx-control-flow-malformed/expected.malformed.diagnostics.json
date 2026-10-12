@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
   "diagnostics": [
-    "TS4001: No rule for macro each accepted this input: expected a braced group."
+    "SWR4001: No rule for macro each accepted this input: expected a braced group."
   ]
 }

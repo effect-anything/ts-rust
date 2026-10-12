@@ -8,7 +8,7 @@ Sweetener cases are flat directories under `crates/ts_ext_sweetener/cases`, one 
 - [x] Other files stay separate transforms
 - [x] The 16 `malformed` cases match the phrase in `expected.malformed.diagnostics.json`. A hole in `->` or `#` is not repaired into a call
 - [x] `ext-syntax transform` prints `file.sts(line,col): error <code>: message`
-- [ ] Diagnostic codes are not unified. The wrapper is done; the prefix is not. `report_message` keeps a message that already starts with `SWR` or `TS`. Reader errors are `SWR1002` and `SWR1003`. A missing template directive or a syntax import that cannot be loaded is `SWR4001`. "No rule for macro" is `TS4001`. `expected.malformed.diagnostics.json` uses both. The host format is `error TS<code>:`.
+- [x] Diagnostic codes use one prefix. Reader errors are `SWR1002` and `SWR1003`. A missing template directive, a syntax import that cannot be loaded, and "No rule for macro" are `SWR4001`. `expected.malformed.diagnostics.json` uses `SWR` only. `report_message` keeps a message that already starts with `SWR` or `TS`, and prints a bare code as `SWR<code>`.
 
 ## Source map
 
