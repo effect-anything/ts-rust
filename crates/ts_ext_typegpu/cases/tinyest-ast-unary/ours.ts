@@ -1,6 +1,5 @@
 const f = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = function f(a: number, b: boolean) {
   "use gpu";
-
   const x = -a;
   const y = !b;
   const z = ~a;

@@ -3,7 +3,7 @@
 const value = "outer value";
 const matched = "outer matched";
 
-type Option<T> = { readonly tag: "None" } | { readonly tag: "Some"; value: T }; const None = <T>(): Option<T> => { tag: "None" }; const Some = <T>(value_1: T): Option<T> => { tag: "Some", value: value_1 };
+type Option<T> = { readonly tag: "None" } | { readonly tag: "Some"; value: T }; const None = <T>(): Option<T> => ({ tag: "None" }); const Some = <T>(value_1: T): Option<T> => ({ tag: "Some", value: value_1 });
 
 export const hygieneResult = [
   value,

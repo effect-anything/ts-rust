@@ -7,4 +7,4 @@ const box = {
     next(source.value),
 };
 
-export const result = box.flatMap(box.of(2), (left) => box.flatMap(box.of(3), (right) => box.of(left + right),));
+export const result = box.flatMap(box.of(2), (left) => box.flatMap(box.of(3), (right) => box.of(left + right)),);

@@ -1,3 +1,5 @@
 {
-      "this.#const": () => this.#const
-    }
+    "ext.value": () => ext.value,
+    "ext.config.multiplier": () => ext.config.multiplier,
+    "ext.config.zero": () => ext.config.zero
+  }

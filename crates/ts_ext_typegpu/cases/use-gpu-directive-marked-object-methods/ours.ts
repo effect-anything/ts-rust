@@ -1,11 +1,10 @@
-const obj = {
-  /** MOD */
-  mod:
+    const obj = {
+      /** MOD */
+      mod:
 /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = (a, b) => {
-    'use gpu';
-
-    return __tsover_mod(a, b);
-  }, {
+        'use gpu';
+        return __tsover_mod(a, b);
+      }, {
   v: 2,
   name: "mod",
   ast: {
@@ -20,21 +19,22 @@ const obj = {
   },
   externals: {}
 }) && $.f)({})
-};
-/** PRIME */
-const isPrime = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = n => {
-  'use gpu';
-
-  if (n <= 1) {
-    return false;
-  }
-  for (let i = 2; i < n; i++) {
-    if (obj.mod(n, i) === 0) {
-      return false;
     }
-  }
-  return true;
-}, {
+
+    /** PRIME */
+    const isPrime = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = n => {
+      'use gpu';
+      if (n <= 1) {
+        return false;
+      }
+
+      for (let i = 2; i < n; i++) {
+        if (obj.mod(n, i) === 0) {
+          return false;
+        }
+      }
+      return true;
+    }, {
   v: 2,
   name: "isPrime",
   ast: {
@@ -47,5 +47,6 @@ const isPrime = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap(
   externals: {
     "obj.mod": () => obj.mod
   }
-}) && $.f)({});
-console.log(obj, isPrime);
+}) && $.f)({})
+
+    console.log(obj, isPrime);

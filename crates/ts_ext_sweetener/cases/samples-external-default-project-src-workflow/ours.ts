@@ -1,9 +1,9 @@
 
 
 export class OrderPlaced {
-      : ;
-      constructor(: ) {
-        this. = ;
+      id: string;total: number;
+      constructor(id: string, total: number) {
+        this.id = id;this.total = total;
       }
     }
 

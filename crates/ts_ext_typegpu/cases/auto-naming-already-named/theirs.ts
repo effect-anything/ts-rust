@@ -1,9 +1,4 @@
 import { tgpu } from 'typegpu';
-import * as d from 'typegpu/data';
-import { struct } from 'typegpu/data';
 const root = await tgpu.init();
-const myBuffer = root.createBuffer(d.u32, 2).$name('int buffer');
-const myStruct = struct({
-  a: u32
-}).$name('myStruct');
-console.log(myBuffer, myStruct);
+const myBuffer = /*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))(root.createBuffer(d.u32, 2), "myBuffer");
+console.log(myBuffer);

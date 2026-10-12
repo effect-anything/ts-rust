@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "preserve",
+    "rootDir": "src",
+    "outDir": "dist",
+    "skipLibCheck": true,
+    "allowArbitraryExtensions": true,
+    "allowImportingTsExtensions": true,
+    "types": ["react"],
+  },
+  "include": ["src"],
+  "contentMappers": [{ "package": "ext-syntax", "extensions": [".sts", ".stsx"] }]
+}

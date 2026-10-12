@@ -1,6 +1,7 @@
-import { tgpu } from 'typegpu';
+      import { tgpu } from 'typegpu';
 
-const root = await tgpu.init();
-const myBuffer = root.createBuffer(d.u32, 2);
+      const root = await tgpu.init();
+      const myBuffer = root.createBuffer(d.u32, 2);
 
-console.log(myBuffer);
+      console.log(myBuffer);
+    

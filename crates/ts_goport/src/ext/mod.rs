@@ -7,6 +7,7 @@
 /// decision and the rewrite both compare against it.
 pub const MAPPER_NAME: &str = "typegpu";
 
+pub mod overload;
 pub mod precheck;
 pub mod tsover;
 pub mod typegpu;

@@ -1,0 +1,16 @@
+--- theirs.ts
++++ ours.ts
+@@ -1,12 +1,1 @@
+-import {
+-  useCallback,
+-  useContext,
+-  useDeferredValue,
+-  useEffect,
+-  useId,
+-  useMemo,
+-  useReducer,
+-  useRef,
+-  useState,
+-  useTransition,
+-} from "react";
++

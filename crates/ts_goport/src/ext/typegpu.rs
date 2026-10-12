@@ -7,9 +7,8 @@
 //!
 //! The directive is legal TypeScript, so it cannot be a content-mapper
 //! extension. Sweetener has already expanded `.sts` by the time a file
-//! reaches [`rewrite_after_parse`]. The checker, the emitter, and LSP then
-//! see `__tsover_*` calls. The span map sends diagnostics back to the
-//! author's operator.
+//! reaches check. The checker and LSP type the author's operator from
+//! `Symbol.operatorPlus`. Emit prints `__tsover_*` and then this wrapper.
 //!
 //! A bundler that does not use this compiler calls [`rewrite_text`] on each
 //! `.ts` / `.tsx` file before its own pipeline.
@@ -3047,6 +3046,15 @@ fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
                         ctx.unsupported
                             .get_or_insert_with(|| unsupported_message(prop.kind()));
                         return None;
+                    }
+                    if prop.kind() == SyntaxKind::ShorthandPropertyAssignment {
+                        let key = prop.name().text().to_owned();
+                        if !ctx.declared.iter().any(|declared| declared == &key)
+                            && !ctx.externals.contains(&key)
+                        {
+                            ctx.externals.push(key.clone());
+                        }
+                        return Some(format!("{key}: \"{key}\""));
                     }
                     if prop.kind() != SyntaxKind::PropertyAssignment {
                         return None;

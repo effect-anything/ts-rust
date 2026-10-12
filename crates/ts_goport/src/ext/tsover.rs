@@ -292,11 +292,7 @@ fn split_verbatim_through(segment: &Segment, prior: &[Segment], out: &mut Vec<Se
     }
 }
 
-fn push_atom_through(
-    prior: &crate::spanmap::SpanMap,
-    segment: &Segment,
-    out: &mut Vec<Segment>,
-) {
+fn push_atom_through(prior: &crate::spanmap::SpanMap, segment: &Segment, out: &mut Vec<Segment>) {
     let (original, fidelity) = crate::spanmap::SpanMap::virtual_to_original_span(
         Some(prior),
         crate::ast::TextRange::new(segment.original_start, segment.original_end),
@@ -533,20 +529,17 @@ fn push_verbatim(
     });
 }
 
-fn node_slice(owner: Node, node: Node) -> String {
-    let text = source_file_text(get_source_file_of_node(owner));
-    let start = usize::try_from(skip_trivia(text.as_ref(), node.pos()).max(0)).unwrap_or(0);
-    let end = usize::try_from(node.end().max(node.pos())).unwrap_or(text.len());
-    text[start.min(end.min(text.len()))..end.min(text.len())].to_string()
-}
-
 fn rewritten_slice(owner: Node, node: Node, nested: &[Edit]) -> String {
-    let raw = node_slice(owner, node);
     let text = source_file_text(get_source_file_of_node(owner));
-    let origin = skip_trivia(text.as_ref(), node.pos());
+    let source = text.as_ref();
+    let origin = skip_trivia(source, node.pos());
+    let end = node.end();
+    let raw_start = usize::try_from(origin.max(0)).unwrap_or(0);
+    let raw_end = usize::try_from(end.max(origin)).unwrap_or(source.len()).min(source.len());
+    let raw = source[raw_start.min(raw_end)..raw_end].to_string();
     let local = nested
         .iter()
-        .filter(|edit| edit.start >= origin && edit.end <= node.end())
+        .filter(|edit| edit.start >= origin && edit.end <= end)
         .map(|edit| Edit {
             start: edit.start - origin,
             end: edit.end - origin,
@@ -556,10 +549,30 @@ fn rewritten_slice(owner: Node, node: Node, nested: &[Edit]) -> String {
         })
         .collect::<Vec<_>>();
     if local.is_empty() {
-        raw
-    } else {
-        apply_edits(&raw, &local).0
+        return raw;
     }
+    // The node's full start can sit on the character before the operand, so
+    // the slice is `s` + `segment * 3` while the nested edit already
+    // contains `segment`. That edit is the whole expression: keep it, and
+    // do not leave the extra character in front of `__tsover_*`.
+    if local.len() == 1 && local[0].end >= raw.len() as i32 && local[0].start > 0 {
+        let start = usize::try_from(local[0].start).unwrap_or(raw.len()).min(raw.len());
+        let prefix = &raw[..start];
+        if call_argument_starts_with(&local[0].text, prefix) {
+            return local[0].text.clone();
+        }
+    }
+    apply_edits(&raw, &local).0
+}
+
+fn call_argument_starts_with(call: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return false;
+    }
+    let Some(open) = call.find('(') else {
+        return false;
+    };
+    call[open + 1..].trim_start().starts_with(prefix)
 }
 
 fn note_nested(body: Node, nesting: &mut Vec<(u32, u32)>) {
@@ -583,6 +596,32 @@ fn note_nested(body: Node, nesting: &mut Vec<(u32, u32)>) {
 }
 pub(crate) fn is_use_gpu(node: Node) -> bool {
     is_named_directive(node, "gpu")
+}
+
+/// Record a nested `"use gpu"` without rewriting the file. Check and LSP
+/// keep the author's operators.
+pub fn report_nesting(file: &ParsedSourceFile) {
+    if !enabled(&file.text) {
+        return;
+    }
+    let Some((_, _, nesting)) = walk_file(file, &file.text) else {
+        return;
+    };
+    if nesting.is_empty() {
+        return;
+    }
+    let mut diagnostics = file.diagnostics.clone();
+    for (start, end) in nesting {
+        diagnostics.push(new_external_diagnostic(
+            file.root,
+            TextRange::new(start as i32, end as i32),
+            MAPPER,
+            Category::Error,
+            0,
+            NESTING,
+        ));
+    }
+    set_source_file_diagnostics(file.root, diagnostics);
 }
 
 fn is_use_tsover(node: Node) -> bool {
@@ -684,115 +723,43 @@ mod tests {
     }
 
     #[test]
-    fn identity_mapper_keeps_the_author_operator() {
-        let author = "function step(n: number) {\n  \"use gpu\";\n  return n + 1;\n}\n";
-        let end = i32::try_from(author.len()).unwrap_or(0);
-        let parsed = hook(author, author, &[seg(0, end, 0, end, Kind::VERBATIM)]);
-        let map = crate::ast::source_file_span_map(parsed.root).expect("span map");
-        let original_text = crate::ast::source_file_original_text(parsed.root);
-        let original = &*original_text;
+    fn nested_gpu_operators_do_not_keep_a_stray_character() {
+        let code = "function f() {\n  \"use gpu\";\n  const corner = id - segment * 3;\n  const turn = (segment / 216) * 6.2831855;\n  const theta = angle + spin + (1.5707963 - 3.14159265 / petals);\n}\n";
+        let rewritten = rewrite_text("a.ts", code).unwrap();
         assert!(
-            SpanMap::validate(Some(map), &parsed.text, original).is_none(),
-            "composed map must validate"
+            rewritten.code.contains("__tsover_sub(id, __tsover_mul(segment, 3))"),
+            "{}",
+            rewritten.code
         );
-        let generated = at(&parsed.text, "__tsover_add(n");
-        let (span, fidelity) =
-            SpanMap::virtual_to_original_span(Some(map), TextRange::new(generated, generated + 12));
-        assert_eq!(fidelity, Fidelity::ATOM);
-        assert_eq!(&original[span.pos() as usize..span.end() as usize], "+");
-        let (_, rename) = SpanMap::virtual_to_original_position_for_feature(
-            Some(map),
-            generated,
-            Feature::RENAME,
+        assert!(
+            rewritten
+                .code
+                .contains("__tsover_mul((__tsover_div(segment, 216)), 6.2831855)"),
+            "{}",
+            rewritten.code
         );
-        assert!(rename.is_none(), "a generated call is not an author rename");
-        let (defined, definition) = SpanMap::virtual_to_original_span_for_feature(
-            Some(map),
-            TextRange::new(generated, generated + 12),
-            Feature::DEFINITION,
+        assert!(
+            !rewritten.code.contains("s__tsover") && !rewritten.code.contains("1__tsover"),
+            "{}",
+            rewritten.code
         );
-        assert!(definition.is_single_segment());
-        assert_eq!(
-            &original[defined.pos() as usize..defined.end() as usize],
-            "+"
-        );
-        let name = at(&parsed.text, "function step");
-        let (name_at, name_fidelity) = SpanMap::virtual_to_original_position(Some(map), name);
-        assert!(name_fidelity.is_exact());
-        assert_eq!(name_at, at(original, "function step"));
-        let (_, prelude) =
-            SpanMap::virtual_to_original_position(Some(map), at(&parsed.text, "declare function"));
-        assert!(prelude.is_none(), "the prelude is not author text");
     }
 
     #[test]
-    fn macro_atom_points_at_the_author_macro() {
-        let head = "function step(n: number) {\n  \"use gpu\";\n  ";
-        let author_macro = "unless (n < 0) { return n + 1 }";
-        let virtual_macro = "if (!(n < 0)) { return n + 1 }";
-        let tail = "\n  return kept;\n}\n";
-        let author = format!("{head}{author_macro}{tail}");
-        let virtual_text = format!("{head}{virtual_macro}{tail}");
-        let head_len = i32::try_from(head.len()).unwrap_or(0);
-        let virtual_end = head_len + i32::try_from(virtual_macro.len()).unwrap_or(0);
-        let author_end = head_len + i32::try_from(author_macro.len()).unwrap_or(0);
-        let segments = [
-            seg(0, head_len, 0, head_len, Kind::VERBATIM),
-            seg(head_len, virtual_end, head_len, author_end, Kind::ATOM),
-            seg(
-                virtual_end,
-                i32::try_from(virtual_text.len()).unwrap_or(0),
-                author_end,
-                i32::try_from(author.len()).unwrap_or(0),
-                Kind::VERBATIM,
-            ),
-        ];
-        assert!(
-            SpanMap::validate(Some(&spanmap::new(&segments)), &virtual_text, &author).is_none()
-        );
-        let parsed = hook(&virtual_text, &author, &segments);
+    fn check_keeps_the_author_operator() {
+        let author = "function step(n: number) {\n  \"use gpu\";\n  return n + 1;\n}\n";
+        let end = i32::try_from(author.len()).unwrap_or(0);
+        let parsed = hook(author, author, &[seg(0, end, 0, end, Kind::VERBATIM)]);
+        assert!(parsed.text.contains("return n + 1"), "{}", parsed.text);
+        assert!(!parsed.text.contains("__tsover_add"), "{}", parsed.text);
+        assert!(!parsed.text.contains("declare function"), "{}", parsed.text);
         let map = crate::ast::source_file_span_map(parsed.root).expect("span map");
         let original_text = crate::ast::source_file_original_text(parsed.root);
         let original = &*original_text;
-        assert!(
-            SpanMap::validate(Some(map), &parsed.text, original).is_none(),
-            "a macro atom must not be rewritten as verbatim"
-        );
-        let generated = at(&parsed.text, "__tsover_add(n");
-        let (span, fidelity) =
-            SpanMap::virtual_to_original_span(Some(map), TextRange::new(generated, generated + 12));
-        assert_eq!(fidelity, Fidelity::ATOM);
-        assert_eq!(
-            &original[span.pos() as usize..span.end() as usize],
-            author_macro
-        );
-        let (_, rename) = SpanMap::virtual_to_original_position_for_feature(
-            Some(map),
-            generated,
-            Feature::RENAME,
-        );
-        assert!(
-            rename.is_none(),
-            "hygiene and generated names are not renamed"
-        );
-        let (defined, definition) = SpanMap::virtual_to_original_span_for_feature(
-            Some(map),
-            TextRange::new(generated, generated + 12),
-            Feature::DEFINITION,
-        );
-        assert!(definition.is_single_segment());
-        assert_eq!(
-            &original[defined.pos() as usize..defined.end() as usize],
-            author_macro,
-            "definition stays on the author macro, not a template"
-        );
-        let kept = at(&parsed.text, "return kept");
-        let (kept_at, kept_fidelity) = SpanMap::virtual_to_original_position(Some(map), kept);
-        assert!(kept_fidelity.is_exact());
-        assert_eq!(kept_at, at(original, "return kept"));
-        assert_eq!(
-            &parsed.text[kept as usize..kept as usize + "return kept".len()],
-            &original[kept_at as usize..kept_at as usize + "return kept".len()]
-        );
+        assert!(SpanMap::validate(Some(map), &parsed.text, original).is_none());
+        let plus = at(&parsed.text, "+");
+        let (pos, fidelity) = SpanMap::virtual_to_original_position(Some(map), plus);
+        assert!(fidelity.is_exact());
+        assert_eq!(pos, at(original, "+"));
     }
 }

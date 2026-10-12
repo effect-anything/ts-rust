@@ -1,3 +1,3 @@
 
 
-export const vector = vector(3, 5, 8);
+export const vector = [3, 5, 8];

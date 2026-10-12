@@ -3,8 +3,8 @@
 //!
 //! `cargo run -q -p ts_ext_sweetener --example capture_ours -- --all`
 //! `cargo run -q -p ts_ext_sweetener --example capture_ours -- fixtures-acceptance`
-//! visits flat ids with that prefix. Cases already equal are skipped unless
-//! `--all` is passed.
+//! visits flat ids with that prefix. With no arguments, only a case that has
+//! no `ours` file or a `diff.txt` is written.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,13 +33,16 @@ fn main() {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
         if !path.is_dir() || (!prefix.is_empty() && !name.starts_with(&prefix)) {
             continue;
         }
         visit(
             &path,
-            all,
+            all || !prefix.is_empty(),
             &mut wrote,
             &mut equal,
             &mut shape,

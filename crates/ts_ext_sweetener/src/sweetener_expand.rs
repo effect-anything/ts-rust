@@ -4764,6 +4764,99 @@ fn take_class(
     None
 }
 
+/// The index just after a JSX element that starts at `index`.
+/// `<name .../>` and `<name>...</name>` both count, including fragments.
+fn jsx_element_end(nodes: &[Syntax], index: usize) -> Option<usize> {
+    if !operator_is(nodes.get(index), "<") || operator_is(nodes.get(index + 1), "/") {
+        return None;
+    }
+    let mut cursor = index + 1;
+    if operator_is(nodes.get(cursor), ">") {
+        return jsx_children_end(nodes, cursor + 1, None);
+    }
+    let name = jsx_tag_name(nodes, &mut cursor)?;
+    let self_closing = jsx_skip_attributes(nodes, &mut cursor)?;
+    if self_closing {
+        return Some(cursor);
+    }
+    jsx_children_end(nodes, cursor, Some(name))
+}
+
+fn jsx_tag_name(nodes: &[Syntax], cursor: &mut usize) -> Option<String> {
+    let mut name = String::new();
+    loop {
+        match nodes.get(*cursor)? {
+            Syntax::Token { raw, .. } if is_ident_text(raw) => {
+                name.push_str(raw);
+                *cursor += 1;
+            }
+            Syntax::Operator { raw, .. } if raw == "." && !name.is_empty() => {
+                name.push('.');
+                *cursor += 1;
+            }
+            _ => break,
+        }
+    }
+    if name.is_empty() { None } else { Some(name) }
+}
+
+/// `Some(true)` when the tag ended at `/>`.
+fn jsx_skip_attributes(nodes: &[Syntax], cursor: &mut usize) -> Option<bool> {
+    let start = *cursor;
+    while *cursor < nodes.len() {
+        if operator_is(nodes.get(*cursor), "/") && operator_is(nodes.get(*cursor + 1), ">") {
+            *cursor += 2;
+            return Some(true);
+        }
+        if operator_is(nodes.get(*cursor), ">") {
+            *cursor += 1;
+            return Some(false);
+        }
+        if operator_is(nodes.get(*cursor), "<") {
+            *cursor = jsx_element_end(nodes, *cursor)?;
+            continue;
+        }
+        *cursor += 1;
+        if *cursor - start > 400 {
+            return None;
+        }
+    }
+    None
+}
+
+fn jsx_children_end(nodes: &[Syntax], mut cursor: usize, name: Option<String>) -> Option<usize> {
+    let mut stack = vec![name];
+    while cursor < nodes.len() && !stack.is_empty() {
+        if operator_is(nodes.get(cursor), "<") && operator_is(nodes.get(cursor + 1), "/") {
+            cursor += 2;
+            if operator_is(nodes.get(cursor), ">") {
+                cursor += 1;
+                stack.pop();
+                continue;
+            }
+            let close = jsx_tag_name(nodes, &mut cursor)?;
+            if !operator_is(nodes.get(cursor), ">") {
+                return None;
+            }
+            cursor += 1;
+            match stack.last() {
+                Some(Some(open)) if open == &close => {
+                    stack.pop();
+                }
+                Some(None) => return None,
+                _ => return None,
+            }
+            continue;
+        }
+        if operator_is(nodes.get(cursor), "<") {
+            cursor = jsx_element_end(nodes, cursor)?;
+            continue;
+        }
+        cursor += 1;
+    }
+    if stack.is_empty() { Some(cursor) } else { None }
+}
+
 fn take_hole(
     source: &str,
     nodes: &[Syntax],
@@ -4777,6 +4870,15 @@ fn take_hole(
     match kind {
         HoleKind::Class(_) => None,
         HoleKind::Stmt => {
+            // `<li>item</li>` is one JSX child. A later `{else}` or `{end}`
+            // is the next pattern token, not part of this element, and a
+            // `{name}` inside the element is a child, not the end of it.
+            if operator_is(Some(node), "<") {
+                if let Some(end_index) = jsx_element_end(nodes, index) {
+                    let end = node_end(&nodes[end_index - 1]);
+                    return Some((source[node_start(node)..end].to_owned(), end, end_index));
+                }
+            }
             // `record Empty();` is an item. The name is not a brace, and
             // the semicolon is the closer. A following item in the same
             // module must not be swallowed with it.

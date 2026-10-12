@@ -3,15 +3,15 @@
 export type DoorState = "Closed"|"Opened"|"Locked"
 
     export type DoorEvent =
-      |||
+      "lock"|"open"|"close"|"unlock"
 
     export interface DoorTable {
-        Closed: { : , :  };Opened: { :  };Locked: { :  };
+        Closed: { lock: "Locked", open: "Opened" };Opened: { close: "Closed" };Locked: { unlock: "Closed" };
       }
 
     // The table is also the runtime transition map, so the two cannot drift.
     export const DoorMoves = {
-        Closed: { : , :  },Opened: { :  },Locked: { :  },
+        Closed: { lock: "Locked", open: "Opened" },Opened: { close: "Closed" },Locked: { unlock: "Closed" },
       } as const
 
     // `event` is keyed on the state, so an event that state does not accept

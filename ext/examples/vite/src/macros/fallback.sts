@@ -1,0 +1,4 @@
+// Nullish default. `fallback(value, backup)` becomes `value ?? backup`.
+export syntax fallback:expr {
+  rule { fallback($value:expr, $backup:expr) } => { $value ?? $backup }
+}

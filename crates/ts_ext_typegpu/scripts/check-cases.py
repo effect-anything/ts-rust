@@ -8,6 +8,7 @@ gets an empty `ours.check.txt`. This does not discover cases.
 Usage:
   check-cases.py            print how many cases have diagnostics
   check-cases.py --apply    write ours.check.txt for every listed case
+  check-cases.py <id>       one case, or every id with that prefix
 """
 
 from __future__ import annotations
@@ -109,15 +110,21 @@ def check_one(case: Path) -> str:
 def main() -> int:
     if not TSGO.is_file():
         raise SystemExit(f"tsgo missing at {TSGO}")
+    args = [arg for arg in sys.argv[1:] if arg != "--apply"]
     apply = "--apply" in sys.argv
+    prefix = args[0] if args else ""
     titles()
     rows = [json.loads(line) for line in MANIFEST.read_text().splitlines() if line.strip()]
     dirty = 0
+    seen = 0
     for row in rows:
+        if prefix and not row["id"].startswith(prefix):
+            continue
         case = CASES / row["id"]
         if not (case / "input.ts").is_file():
             print(f"skip {row['id']}: no input.ts")
             continue
+        seen += 1
         report = check_one(case)
         if report.strip():
             dirty += 1
@@ -125,7 +132,7 @@ def main() -> int:
             print(report.rstrip())
         if apply:
             (case / "ours.check.txt").write_text(report, encoding="utf-8")
-    print(f"cases={len(rows)} with_diagnostics={dirty}")
+    print(f"cases={seen} with_diagnostics={dirty}")
     if not apply:
         print("dry-run; pass --apply to write ours.check.txt")
     return 0

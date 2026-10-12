@@ -1,11 +1,7 @@
-import { tgpu, type TgpuUniform } from 'typegpu';
-import * as d from 'typegpu/data';
-const root = await tgpu.init();
+      import { tgpu } from 'typegpu';
 
-class MyController {
-  myBuffer: TgpuUniform<d.U32>;
+      const root = await tgpu.init();
+      const myBuffer = root.createBuffer(d.u32, 2);
 
-  constructor() {
-    this.myBuffer = root.createUniform(d.u32);
-  }
-}
+      console.log(myBuffer);
+    

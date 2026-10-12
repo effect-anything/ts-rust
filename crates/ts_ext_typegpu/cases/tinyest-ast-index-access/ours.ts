@@ -1,6 +1,5 @@
 const f = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = function f(a: number[], i: number, o: any) {
   "use gpu";
-
   const x = a[i];
   const y = o["k"];
   return __tsover_add(x, y);

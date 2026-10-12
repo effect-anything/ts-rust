@@ -1,4 +1,3 @@
-// extracted from use-gpu-directive.test.ts pin fc85681e title: transforms numeric operations
     import { tgpu, d } from 'typegpu';
 
     const root = await tgpu.init();

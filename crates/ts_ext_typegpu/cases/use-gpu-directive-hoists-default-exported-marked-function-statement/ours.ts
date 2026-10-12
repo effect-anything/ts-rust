@@ -1,9 +1,8 @@
-/** ADD */
-const add = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = function add(a, b) {
-  'use gpu';
-
-  return __tsover_add(a, b);
-}, {
+    /** ADD */
+    const add = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = function add(a, b) {
+      'use gpu';
+      return __tsover_add(a, b);
+    }, {
   v: 2,
   name: "add",
   ast: {
@@ -18,5 +17,7 @@ const add = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).s
   },
   externals: {}
 }) && $.f)({});
-console.log(add);
+    console.log(add);
+
+
 export default add;

@@ -1,4 +1,3 @@
-// extracted from use-gpu-directive.test.ts pin fc85681e title: hoists function statements marked with "use gpu", scoped inside an if statement
     const c = 1 + 2;
     if (globalThis.YUP) {
       console.log(add, mul);

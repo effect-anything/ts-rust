@@ -2,8 +2,15 @@
 """Materialise the cases named in cases.jsonl. Nothing else.
 
 Discovery does not write the manifest. Add a line by hand, then run this.
-A case that is already on disk is left alone unless `--refresh` is set.
-Probe cases (`sources: probe`) have no vendor test; this script only checks
+
+  1. Copy the upstream snippet named by the manifest.
+  2. Read the babel `toMatchInlineSnapshot` already written in that test.
+     The plugin is not built or run.
+  3. Write that snapshot to `theirs.ts`. `capture_ours` compares our build
+     with it.
+
+A case that is already on disk is left alone unless `--refresh`.
+Probe rows (`sources: probe`) have no vendor test; this script only checks
 that their files are present.
 
 Usage:
@@ -17,16 +24,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import subprocess
+import re
 import sys
-import tempfile
 from pathlib import Path
 
 CRATE = Path(__file__).resolve().parents[1]
 ROOT = Path(__file__).resolve().parents[3]
 CASES = CRATE / "cases"
 MANIFEST = CRATE / "cases.jsonl"
-UPSTREAM = ROOT / "scripts" / "ext-bench" / "upstream-typegpu.mjs"
 
 
 def load_discover():
@@ -59,34 +64,48 @@ def code_for(row: dict) -> str | None:
     return None
 
 
-def theirs_text(code: str, auto_naming: bool, externals_only: bool) -> str:
-    payload = json.dumps(
-        [{"name": "case", "code": code, "options": {"autoNamingEnabled": auto_naming}}]
-    )
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
-        handle.write(payload)
-        spec = handle.name
-    completed = subprocess.run(
-        ["node", str(UPSTREAM), spec],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    Path(spec).unlink(missing_ok=True)
-    if completed.returncode != 0:
-        raise SystemExit(completed.stderr.strip() or "upstream plugin failed")
-    text = completed.stdout
-    body = text.split("\n", 1)[1] if text.startswith("### ") else text
-    if body.startswith("<<threw>>"):
-        raise SystemExit(body.strip())
-    if not externals_only:
-        return body if body.endswith("\n") else body + "\n"
-    start = body.find("externals:")
-    end = body.find("}) && $.f")
-    if start < 0 or end < 0:
-        raise SystemExit("upstream output has no externals object")
-    chunk = body[start + len("externals:") : end].strip()
-    return chunk + "\n"
+def find_code(text: str, start: int, end: int, last: bool = False) -> int:
+    """Index of the opening backtick of a const code template."""
+    found = [match.end() - 1 for match in re.finditer(r"const code\s*=\s*`", text[start:end])]
+    if not found:
+        return -1
+    return start + (found[-1] if last else found[0])
+
+
+def case_from_test(path: Path, title: str) -> tuple[str, str] | None:
+    """Upstream `const code` and the babel snapshot already written after it."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    at = text.find(title)
+    if at < 0:
+        at = text.find(title.replace("'", "\\'"))
+    if at < 0:
+        return None
+    nxt = text.find("describe(", at + len(title))
+    if nxt < 0:
+        nxt = len(text)
+    code_at = find_code(text, at, nxt)
+    if code_at < 0:
+        code_at = find_code(text, 0, at, last=True)
+    if code_at < 0:
+        return None
+    code = DISCOVER.template_at(text, code_at)
+    if code is None:
+        return None
+    nxt_code = find_code(text, code_at + 1, len(text))
+    snap = text.find("toMatchInlineSnapshot", code_at)
+    if snap < 0 or (nxt_code >= 0 and snap > nxt_code):
+        return None
+    raw = DISCOVER.template_at(text, text.find("`", snap))
+    if raw is None:
+        return None
+    lines = raw.split("\n")
+    indents = [len(line) - len(line.lstrip(" ")) for line in lines if line.strip()]
+    cut = min(indents) if indents else 0
+    body = "\n".join(line[cut:] for line in lines).strip("\n")
+    if len(body) >= 2 and body[0] == '"' and body[-1] == '"':
+        body = body[1:-1]
+    snapshot = body if body.endswith("\n") or body == "" else body + "\n"
+    return code, snapshot
 
 
 def main() -> int:
@@ -117,11 +136,12 @@ def main() -> int:
                 (case / "test.title").write_text(row.get("testTitle", "") + "\n", encoding="utf-8")
             print(f"kept {case_id}")
             continue
-        code = code_for(row)
-        if code is None:
-            print(f"missing {case_id}: no `const code` for {row.get('testTitle')!r} in {row.get('entry')}")
+        found = case_from_test(vendor_file(row.get("entry", "")), row.get("testTitle", ""))
+        if found is None:
+            print(f"missing {case_id}: no snippet and babel snapshot for {row.get('testTitle')!r}")
             changes += 1
             continue
+        code, snapshot = found
         action = "refresh" if have else "write"
         print(f"{action} {case_id}")
         changes += 1
@@ -130,10 +150,7 @@ def main() -> int:
         case.mkdir(parents=True, exist_ok=True)
         input_path.write_text(code if code.endswith("\n") else code + "\n", encoding="utf-8")
         (case / "test.title").write_text(row.get("testTitle", "") + "\n", encoding="utf-8")
-        theirs_path.write_text(
-            theirs_text(code, row.get("autoNaming") is True, case_id.startswith("externals-")),
-            encoding="utf-8",
-        )
+        theirs_path.write_text(snapshot, encoding="utf-8")
     if not apply and changes:
         print("dry-run; pass --apply to write")
     return 0

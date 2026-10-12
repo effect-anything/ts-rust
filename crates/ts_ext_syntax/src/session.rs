@@ -6,8 +6,8 @@
 //!
 //! - Sweetener source (`.sts`, `.stsx`): macro expansion,
 //!   then [`ts_ext_typegpu::TypegpuSession`] on the expanded text.
-//! - Any other file: that session only. It rewrites when the text has
-//!   `"use gpu"` or `"use tsover"`, and otherwise returns the text.
+//! - Any other file: that session only. Check leaves operators alone.
+//!   Build rewrites them to `__tsover_*` and then wraps marked functions.
 
 use crate::{ExpandRequest, Phase, expand, sweetener_matches};
 
@@ -318,10 +318,7 @@ fn map_through(first: &crate::Expansion, start: u32, end: u32) -> Option<MappedR
                 let at = segment
                     .original_start
                     .saturating_add(start - segment.virtual_start);
-                MappedRange {
-                    start: at,
-                    end: at,
-                }
+                MappedRange { start: at, end: at }
             }
             crate::SegmentKind::Atom => MappedRange {
                 start: segment.original_start,
@@ -430,30 +427,18 @@ mod tests {
 
     #[test]
     fn ordinary_file_runs_typegpu_only() {
-        let out = TransformSession::new()
-            .transform("a.ts", "function f(a, b) { \"use gpu\"; return a + b }");
-        assert!(out.changed);
-        assert!(out.code.contains("__tsover_add"), "{}", out.code);
-        assert!(
-            !out.code.contains("function f") || out.code.contains("return"),
-            "{}",
-            out.code
-        );
+        let code = "function f(a, b) { \"use gpu\"; return a + b }";
+        let out = TransformSession::new().transform("a.ts", code);
+        assert!(!out.changed);
+        assert_eq!(out.code, code);
+        assert!(!out.code.contains("__tsover_add"), "{}", out.code);
     }
 
     #[test]
-    fn check_rewrites_operators_without_meta() {
-        let out = TransformSession::check()
-            .transform("a.ts", "function add(a, b) { \"use gpu\"; return a + b }");
-        assert!(out.code.contains("__tsover_add"), "{}", out.code);
-        assert!(!out.code.contains("__TYPEGPU_META__"), "{}", out.code);
-    }
-
-    #[test]
-    fn check_has_operator_rewrite_and_build_has_meta() {
+    fn check_keeps_the_operator_and_build_emits_the_call() {
         let code = "function add(a, b) { \"use gpu\"; return a + b }";
         let check = TransformSession::check().transform("a.ts", code);
-        assert!(check.code.contains("__tsover_add"), "{}", check.code);
+        assert_eq!(check.code, code);
         assert!(!check.code.contains("__TYPEGPU_META__"), "{}", check.code);
         let build = TransformSession::build().transform("a.ts", code);
         assert!(build.code.contains("__tsover_add"), "{}", build.code);
@@ -475,18 +460,17 @@ mod tests {
     }
 
     #[test]
-    fn check_map_shifts_past_the_prelude_and_lands_on_the_operator() {
+    fn check_keeps_the_author_operator_in_place() {
         let code = "function step(n: number) {\n  \"use gpu\";\n  return n + 1;\n}\n";
         let out = TransformSession::check().transform("a.ts", code);
-        let call = out.code.find("__tsover_add(n").expect("call") as i32;
+        assert_eq!(out.code, code);
         let plus = code.find('+').expect("plus") as i32;
         let covering = tuples(&out.mappings)
             .into_iter()
-            .find(|item| item[0] <= call && call < item[0] + item[1])
+            .find(|item| item[0] <= plus && plus < item[0] + item[1])
             .expect("segment");
-        assert_eq!(covering[4], 1, "the call is an atom, not a verbatim slice");
-        assert_eq!(covering[2], plus);
-        assert_eq!(covering[3], 1);
+        assert_eq!(covering[4], 0, "check does not rewrite the operator");
+        assert_eq!(covering[2] + (plus - covering[0]), plus);
         let name = out.code.find("function step").expect("name") as i32;
         let name_seg = tuples(&out.mappings)
             .into_iter()

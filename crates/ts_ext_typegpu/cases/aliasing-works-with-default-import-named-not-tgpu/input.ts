@@ -1,5 +1,6 @@
-import hello from 'typegpu';
+      import hello from 'typegpu';
 
-const increment = hello.fn([])(() => {
-  const x = 2+2;
-});
+      const increment = hello.fn([])(() => {
+        const x = 2+2;
+      });
+    

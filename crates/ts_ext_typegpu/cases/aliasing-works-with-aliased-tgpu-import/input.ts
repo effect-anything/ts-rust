@@ -1,5 +1,6 @@
-import { tgpu as t } from 'typegpu';
+      import { tgpu as t } from 'typegpu';
 
-const increment = t.fn([])(() => {
-  const x = 2+2;
-});
+      const increment = t.fn([])(() => {
+        const x = 2+2;
+      });
+    

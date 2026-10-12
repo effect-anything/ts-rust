@@ -1,4 +1,3 @@
-// extracted from use-gpu-directive.test.ts pin fc85681e title: marked function statements
 
     /** ADD */
     function addGPU(a, b) {

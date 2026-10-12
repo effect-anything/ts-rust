@@ -1,4 +1,5 @@
-import { tgpu } from 'typegpu';
-  import * as d from 'typegpu/data';
+        import { tgpu } from 'typegpu';
+        import * as d from 'typegpu/data';
 
-  tgpu.x()(d.arrayOf(d.u32));
+        tgpu.x()(d.arrayOf(d.u32));
+    

@@ -1,7 +1,8 @@
-import { tgpu as t } from 'typegpu';
-const increment = t.fn([])(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
-  const x = 2 + 2;
-}, {
+      import { tgpu as t } from 'typegpu';
+
+      const increment = t.fn([])(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
+        const x = 2+2;
+      }, {
   v: 2,
   name: undefined,
   ast: {

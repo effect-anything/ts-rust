@@ -1,7 +1,11 @@
-import { tgpu } from 'typegpu';
-import * as d from 'typegpu/data';
+      import { tgpu } from 'typegpu';
+      import * as d from 'typegpu/data';
 
-let nothing, accessor = tgpu['~unstable'].accessor(d.u32);
-const hello = tgpu.comptime(() => 1 + 2);
+      const bindGroupLayout = tgpu.bindGroupLayout({});
+      const vertexLayout = tgpu.vertexLayout(d.arrayOf(d.u32));
+      var fn = tgpu.fn([])(() => {});
+      let shell = tgpu.fn([]);
+      const cst = tgpu.const(d.u32, 1);
 
-console.log(accessor, shell, fn, cst);
+      console.log(bindGroupLayout, vertexLayout);
+    

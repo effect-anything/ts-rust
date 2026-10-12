@@ -1,14 +1,7 @@
-import { tgpu } from 'typegpu';
+      import { tgpu } from 'typegpu';
 
-const root = await tgpu.init();
+      const root = await tgpu.init();
+      const myBuffer = root.createBuffer(d.u32, 2);
 
-const myGuardedPipeline = root.createGuardedComputePipeline(() => {
-  'use gpu';
-});
-
-const anotherGuardedPipeline = root
-  .createGuardedComputePipeline(() => {
-    'use gpu';
-  }).dispatchThreads();
-
-console.log(myGuardedPipeline, anotherGuardedPipeline);
+      console.log(myBuffer);
+    

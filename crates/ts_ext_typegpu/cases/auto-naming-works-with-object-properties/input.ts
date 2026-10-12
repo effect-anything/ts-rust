@@ -1,7 +1,7 @@
-import { tgpu } from 'typegpu';
-import * as d from 'typegpu/data';
-const root = await tgpu.init();
+      import { tgpu } from 'typegpu';
 
-const items: { myBuffer: unknown } = { myBuffer: undefined };
+      const root = await tgpu.init();
+      const myBuffer = root.createBuffer(d.u32, 2);
 
-items.myBuffer = root.createUniform(d.u32);
+      console.log(myBuffer);
+    

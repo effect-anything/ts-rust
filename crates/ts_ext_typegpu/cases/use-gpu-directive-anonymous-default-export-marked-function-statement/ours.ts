@@ -1,8 +1,7 @@
-export default /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = function (a, b) {
-  'use gpu';
-
-  return __tsover_add(a, b);
-}, {
+    export default /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = function (a, b) {
+      'use gpu';
+      return __tsover_add(a, b);
+    }, {
   v: 2,
   name: undefined,
   ast: {

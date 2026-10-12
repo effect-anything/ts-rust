@@ -1,4 +1,3 @@
-// extracted from use-gpu-directive.test.ts pin fc85681e title: "use gpu" is preserved after transform
     const fn1 = () => {
       'use gpu';
     };

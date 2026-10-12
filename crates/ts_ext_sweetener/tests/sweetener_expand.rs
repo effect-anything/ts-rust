@@ -17,7 +17,8 @@ const OPERATORS: &str = r#"export operator (|>):expr {
 fn main_source() -> String {
     // Sweetener resolves syntax imports relative to the source file. An
     // absolute path is reported as an unresolved macro module.
-    "import { (|>) } from \"./operators.sts\" for syntax;\nconst result = [1, 2, 3] |> sum;\n".to_owned()
+    "import { (|>) } from \"./operators.sts\" for syntax;\nconst result = [1, 2, 3] |> sum;\n"
+        .to_owned()
 }
 
 fn write_fixture() -> (PathBuf, String) {
@@ -46,10 +47,7 @@ fn write_fixture() -> (PathBuf, String) {
 
 #[test]
 fn every_local_macro_case_matches_theirs() {
-    let root = format!(
-        "{}/cases",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let root = format!("{}/cases", env!("CARGO_MANIFEST_DIR"));
     let mut failed = Vec::new();
     for entry in walk(&root) {
         if !entry.ends_with("/input.sts") {
@@ -67,7 +65,12 @@ fn every_local_macro_case_matches_theirs() {
             failed.push(rel.to_owned());
         }
     }
-    assert!(failed.is_empty(), "{} cases differ:\n{}", failed.len(), failed.join("\n"));
+    assert!(
+        failed.is_empty(),
+        "{} cases differ:\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
 }
 
 fn walk(dir: &str) -> Vec<String> {
@@ -117,10 +120,7 @@ fn small_cases_match_theirs() {
 }
 
 fn case_matches_theirs(rel: &str) {
-    let dir = format!(
-        "{}/cases/{rel}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let dir = format!("{}/cases/{rel}", env!("CARGO_MANIFEST_DIR"));
     let code = std::fs::read_to_string(format!("{dir}/input.sts")).unwrap();
     let theirs = std::fs::read_to_string(format!("{dir}/theirs.ts")).unwrap();
     let expansion = expand(ExpandRequest {
@@ -144,18 +144,18 @@ fn pipe_expands_or_reports_not_built_in() {
         code: &code,
         phase: Phase::Check,
     });
-    let unavailable = expansion
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.message.contains("Sweetener expansion is not built in yet"));
+    let unavailable = expansion.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("Sweetener expansion is not built in yet")
+    });
     if unavailable {
         assert_eq!(expansion.code, code);
         assert_eq!(expansion.segments.len(), 1);
-        assert!(expansion
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains(&main.display().to_string())
-                || diagnostic.message.contains("not built in yet")));
+        assert!(expansion.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message.contains(&main.display().to_string())
+                || diagnostic.message.contains("not built in yet")
+        }));
         return;
     }
     assert!(
@@ -187,10 +187,7 @@ fn pipe_expands_or_reports_not_built_in() {
 /// The span is the author token, not the whole file.
 #[test]
 fn malformed_cases_are_refused() {
-    let root = format!(
-        "{}/cases",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let root = format!("{}/cases", env!("CARGO_MANIFEST_DIR"));
     let mut seen = 0u32;
     for entry in fs::read_dir(&root).unwrap().flatten() {
         let dir = entry.path();
@@ -242,7 +239,10 @@ fn malformed_cases_are_refused() {
         for diagnostic in &expansion.diagnostics {
             let start = diagnostic.start as usize;
             let end = diagnostic.end as usize;
-            assert!(start <= end && end <= code.len(), "{name} span {start}..{end}");
+            assert!(
+                start <= end && end <= code.len(),
+                "{name} span {start}..{end}"
+            );
             assert!(
                 !(start == 0 && end == code.len()) || code.len() < 8,
                 "{name} span covers the whole file"

@@ -1,7 +1,6 @@
-const fn = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
-  'use gpu';
-
-}, {
+    const fn = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
+      'use gpu';
+    }, {
   v: 2,
   name: "fn",
   ast: {
@@ -10,4 +9,5 @@ const fn = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).se
   },
   externals: {}
 }) && $.f)({});
-console.log(fn);
+
+    console.log(fn);

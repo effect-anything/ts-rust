@@ -1,20 +1,21 @@
+
+
 const self = "outer self";
 const body = "outer body";
 
-namespace List {
+module List {
   export class Empty {}
-  export class Cons {
-    head: number;
-    tail: Empty | Cons;
-    constructor(head: number, tail: Empty | Cons) {
-      this.head = head;
-      this.tail = tail;
+  export class Cons { head: number;
+    tail: (Empty | Cons);
+      constructor(head: number, tail: (Empty | Cons)) { (this.head = head);
+        (this.tail = tail);
+      }
     }
-  }
 }
 
-function last(self_1: List.Cons): number {
-  return self_1.tail instanceof List.Empty ? self_1.head : last(self_1.tail);
+function last(self: List.Cons): number
+{
+    return (self.tail instanceof List.Empty ? self.head : last(self.tail));
 }
 
 const list = new List.Cons(1, new List.Cons(3, new List.Empty()));

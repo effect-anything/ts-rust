@@ -1,0 +1,19 @@
+export rec syntax (->):expr {
+  rule { (-> $value:expr) } => {
+    $value
+  }
+
+  rule {
+    (-> $value:expr, $next:ident($($argument:expr),*), $($rest:tt)+)
+  } => {
+    (-> $next($value, $($argument),*), $($rest)+)
+  }
+
+  rule { (-> $value:expr, $next:ident($($argument:expr),*),) } => {
+    $next($value, $($argument),*)
+  }
+
+  rule { (-> $value:expr, $next:ident($($argument:expr),*)) } => {
+    $next($value, $($argument),*)
+  }
+}

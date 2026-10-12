@@ -1,4 +1,3 @@
-// extracted from use-gpu-directive.test.ts pin fc85681e title: hoists global function statements marked with "use gpu"
     console.log(add, mul);
 
     /** ADD */

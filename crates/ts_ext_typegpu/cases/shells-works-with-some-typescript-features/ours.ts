@@ -1,7 +1,8 @@
-import { tgpu } from 'typegpu';
-const fun = tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = input => {
-  const x = true;
-}, {
+        import { tgpu } from 'typegpu';
+
+        const fun = tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = input => {
+          const x = true;
+        }, {
   v: 2,
   name: undefined,
   ast: {
@@ -13,9 +14,10 @@ const fun = tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThi
   },
   externals: {}
 }) && $.f)({}));
-const funcWithAs = tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = input => {
-  const x = true as boolean;
-}, {
+
+        const funcWithAs = tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = input => {
+          const x = true as boolean;
+        }, {
   v: 2,
   name: undefined,
   ast: {
@@ -27,9 +29,10 @@ const funcWithAs = tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (gl
   },
   externals: {}
 }) && $.f)({}));
-const funcWithSatisfies = tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = input => {
-  const x = true satisfies boolean;
-}, {
+
+        const funcWithSatisfies = tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = input => {
+          const x = true satisfies boolean;
+        }, {
   v: 2,
   name: undefined,
   ast: {

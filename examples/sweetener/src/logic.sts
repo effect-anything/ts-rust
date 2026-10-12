@@ -1,6 +1,0 @@
-export function step(n: number): number {
-  unless (n < 0) {
-    return n + 1;
-  }
-  return 0;
-}

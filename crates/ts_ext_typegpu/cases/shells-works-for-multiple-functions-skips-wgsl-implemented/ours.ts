@@ -1,7 +1,8 @@
-import { tgpu } from 'typegpu';
-const a = tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = input => {
-  const x = true;
-}, {
+      import { tgpu } from 'typegpu';
+
+      const a = tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = input => {
+        const x = true;
+      }, {
   v: 2,
   name: undefined,
   ast: {
@@ -13,9 +14,10 @@ const a = tgpu.computeFn({ workgroupSize: [1] })(/*#__PURE__*/($ => (globalThis.
   },
   externals: {}
 }) && $.f)({}));
-const b = tgpu.fn([])(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
-  const y = 2 + 2;
-}, {
+
+      const b = tgpu.fn([])(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
+        const y = 2 + 2;
+      }, {
   v: 2,
   name: undefined,
   ast: {
@@ -24,8 +26,9 @@ const b = tgpu.fn([])(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new We
   },
   externals: {}
 }) && $.f)({}));
-const cx = 2;
-const c = tgpu.fn([])(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => cx, {
+
+      const cx = 2;
+      const c = tgpu.fn([])(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => cx, {
   v: 2,
   name: undefined,
   ast: {
@@ -36,4 +39,5 @@ const c = tgpu.fn([])(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new We
     "cx": () => cx
   }
 }) && $.f)({}));
-const d = tgpu.fn([])('() {}');
+
+      const d = tgpu.fn([])('() {}');

@@ -1,3 +1,5 @@
+
+
 const value = "call-site value";
 const argument = 40;
 const add = (left: number, right: number): number => left + right;

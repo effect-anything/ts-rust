@@ -2,11 +2,17 @@
 """Materialise the cases named in cases.jsonl. Nothing else.
 
 Discovery does not write the manifest. Add a line by hand, then run this.
-One row is one program: one input, the macro files it imports, and one
-theirs. A case that is already on disk is left alone unless `--refresh`.
+One row is one program.
 
-`--refresh` copies bytes from `vendor/sweetener`. That tree is not always
-the pin in pins.json. Refresh only when the vendor checkout is that pin.
+  1. Copy the upstream source, and the syntax files it imports.
+  2. Run the sweetener CLI (`sweetener expand`) on that file.
+  3. Write its stdout to `theirs.ts` or `theirs.tsx`. `capture_ours`
+     compares our expansion with that snapshot.
+
+A case that is already on disk is left alone unless `--refresh`.
+`--refresh` uses the vendor checkout. That tree is not the pin in
+pins.json unless the checkout is. A malformed case has no expansion
+snapshot; only its input is copied.
 
 Usage:
   sync-cases.py                 print what would be written
@@ -19,6 +25,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,6 +33,7 @@ CRATE = Path(__file__).resolve().parents[1]
 ROOT = Path(__file__).resolve().parents[3]
 CASES = CRATE / "cases"
 MANIFEST = CRATE / "cases.jsonl"
+SWEETENER = ROOT / "vendor" / "sweetener" / "packages" / "cli" / "bin" / "sweetener.mjs"
 
 
 def load_discover():
@@ -56,6 +64,29 @@ def syntax_deps(source: Path) -> list[Path]:
             seen.append(dep)
             pending.append(dep)
     return seen
+
+
+def theirs_name(input_name: str) -> str:
+    if input_name.endswith("stsx") or input_name.endswith("tsx"):
+        return "theirs.tsx"
+    return "theirs.ts"
+
+
+def expand_upstream(source: Path) -> str:
+    if not SWEETENER.is_file():
+        raise SystemExit(f"sweetener CLI missing: {SWEETENER}")
+    completed = subprocess.run(
+        ["node", str(SWEETENER), "expand", str(source)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        print(f"expand failed {source.name}: {detail}")
+        return ""
+    text = completed.stdout
+    return text if text.endswith("\n") or text == "" else text + "\n"
 
 
 def vendor_file(entry: str) -> Path:
@@ -106,6 +137,12 @@ def main() -> int:
             if dest.exists() and dest.resolve() == dep.resolve():
                 continue
             dest.write_bytes(dep.read_bytes())
+        if "malformed" in case_id:
+            continue
+        expanded = expand_upstream(input_path)
+        if not expanded:
+            continue
+        (case / theirs_name(input_name)).write_text(expanded, encoding="utf-8")
     if not apply and changes:
         print("dry-run; pass --apply to write")
     return 0

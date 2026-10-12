@@ -1,15 +1,16 @@
-import { tgpu } from 'typegpu';
-import * as d from 'typegpu/data';
 
-const root = await tgpu.init();
+      import { tgpu } from 'typegpu';
+      import * as d from 'typegpu/data';
 
-class MyController {
-  myBuffer = root.createUniform(d.u32);
-  myFn = tgpu.fn([], d.u32)(() => {
-    return this.myBuffer.$;
-  });
-}
+      const root = await tgpu.init();
 
-const myController = new MyController();
+      class MyController {
+        myBuffer = root.createUniform(d.u32);
+        myFn = tgpu.fn([], d.u32)(() => {
+          return this.myBuffer.$;
+        });
+      }
 
-console.log(tgpu.resolve([myController.myFn]));
+      const myController = new MyController();
+
+      console.log(tgpu.resolve([myController.myFn]));

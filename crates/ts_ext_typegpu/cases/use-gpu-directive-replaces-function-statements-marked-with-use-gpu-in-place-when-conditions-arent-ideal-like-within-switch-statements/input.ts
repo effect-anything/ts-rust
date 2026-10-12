@@ -1,4 +1,3 @@
-// extracted from use-gpu-directive.test.ts pin fc85681e title: replaces function statements marked with "use gpu" in place when conditions aren't ideal (like within switch statements)
     const c = 1 + 2;
     switch (globalThis.YUP) {
       case 0:

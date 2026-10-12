@@ -1,7 +1,0 @@
---- theirs.ts
-+++ ours.ts
-@@ -1 +1 @@
--export const vector = [3, 5, 8];
-\ No newline at end of file
-+export const vector = vector(3, 5, 8);
-\ No newline at end of file

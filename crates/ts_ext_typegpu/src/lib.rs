@@ -117,41 +117,13 @@ fn build(path: &str, code: &str, auto_naming: bool) -> Transformed {
 }
 
 fn check(path: &str, code: &str) -> Transformed {
-    let Some(rewritten) = tsover::rewrite_text(path, code) else {
-        return Transformed {
-            code: code.to_owned(),
-            diagnostics: Vec::new(),
-            changed: false,
-            rewrite: None,
-        };
-    };
-    let diagnostics = rewritten
-        .diagnostics
-        .iter()
-        .cloned()
-        .map(|item| Diagnostic {
-            message: item.message,
-            start: item.start,
-            end: item.end,
-        })
-        .collect();
+    // Check and LSP keep the author's operators. The compiler types `+`
+    // from `Symbol.operatorPlus`. Build emits `__tsover_*`.
+    let _ = (path, code);
     Transformed {
-        code: with_prelude(&rewritten.code),
-        diagnostics,
-        changed: true,
-        rewrite: Some(rewritten),
-    }
-}
-
-/// Declarations check needs when the file does not already import them.
-/// Build output must not include them. `__tsover_pow` is not here: a
-/// `"use gpu"` file does not emit that call.
-const CHECK_PRELUDE: &str = "\ndeclare function __tsover_add(a: number, b: number): number;\ndeclare function __tsover_sub(a: number, b: number): number;\ndeclare function __tsover_mul(a: number, b: number): number;\ndeclare function __tsover_div(a: number, b: number): number;\ndeclare function __tsover_mod(a: number, b: number): number;\n";
-
-fn with_prelude(code: &str) -> String {
-    if code.contains("__tsover_") {
-        format!("{CHECK_PRELUDE}{code}")
-    } else {
-        code.to_owned()
+        code: code.to_owned(),
+        diagnostics: Vec::new(),
+        changed: false,
+        rewrite: None,
     }
 }

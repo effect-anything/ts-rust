@@ -1,9 +1,8 @@
 const miter = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = function miter(a) {
-  'use gpu';
-
-  const miter = __tsover_mul(a, 2);
-  return miter;
-}, {
+      'use gpu';
+      const miter = __tsover_mul(a, 2);
+      return miter;
+    }, {
   v: 2,
   name: "miter",
   ast: {
@@ -15,4 +14,5 @@ const miter = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap())
   },
   externals: {}
 }) && $.f)({});
-console.log(miter);
+    console.log(miter);
+

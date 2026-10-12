@@ -1,0 +1,48 @@
+import { useState } from "react";
+import { Canvas } from "./canvas.tsx";
+import { flowerScale, spanLabel } from "./flower.sts";
+import { DebugPanel, type Slider } from "./panel.stsx";
+
+function channels(hex: string): readonly [number, number, number] {
+  const value = Number.parseInt(hex.slice(1), 16);
+  return [((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255];
+}
+
+export function App() {
+  const [petalMm, setPetalMm] = useState(90);
+  const [petals, setPetals] = useState(5);
+  const [point, setPoint] = useState(0.25);
+  const [speed, setSpeed] = useState(0.6);
+  const [tint, setTint] = useState("#d4526a");
+  const scale = flowerScale(petalMm);
+  const rows: Slider[] = [
+    { id: "petal", name: "Petal", min: 40, max: 140, step: 1, value: petalMm },
+    { id: "petals", name: "Petals", min: 3, max: 9, step: 1, value: petals },
+    { id: "point", name: "Point", min: 0, max: 1, step: 0.01, value: point },
+    { id: "speed", name: "Speed", min: 0, max: 2.4, step: 0.01, value: speed },
+  ];
+  const onChange = (id: Slider["id"], value: number) => {
+    if (id === "petal") setPetalMm(value);
+    else if (id === "petals") setPetals(value);
+    else if (id === "point") setPoint(value);
+    else setSpeed(value);
+  };
+  return (
+    <main>
+      <section className="stage">
+        <Canvas scale={scale} petals={petals} point={point} speed={speed} tint={channels(tint)} />
+        <p className="readout">{spanLabel(petalMm)}</p>
+      </section>
+      <DebugPanel
+        label={spanLabel(petalMm)}
+        scale={scale}
+        petals={petals}
+        point={point}
+        tint={tint}
+        onTint={setTint}
+        rows={rows}
+        onChange={onChange}
+      />
+    </main>
+  );
+}

@@ -1,10 +1,7 @@
-import { tgpu } from 'typegpu';
-import * as d from 'typegpu/data';
-import { struct } from 'typegpu/data';
+      import { tgpu } from 'typegpu';
 
-const root = await tgpu.init();
-const myBuffer = root.createBuffer(d.u32, 2).$name('int buffer');
+      const root = await tgpu.init();
+      const myBuffer = root.createBuffer(d.u32, 2);
 
-const myStruct = struct({ a: u32 }).$name('myStruct');
-
-console.log(myBuffer, myStruct)
+      console.log(myBuffer);
+    

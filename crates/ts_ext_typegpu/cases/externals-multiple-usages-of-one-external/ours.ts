@@ -1,18 +1,17 @@
-const ext = {
-  value: 7,
-  config: {
-    multiplier: 1,
-    zero: 0,
-  }
-};
-const fn = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
-  'use gpu';
-
-  const a = ext.value;
-  const b = ext.config.multiplier;
-  const c = ext.config.zero;
-  const d = ext.config.multiplier;
-}, {
+    const ext = {
+      value: 7,
+      config: {
+        multiplier: 1,
+        zero: 0,
+      }
+    };
+    const fn = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
+      'use gpu';
+      const a = ext.value;
+      const b = ext.config.multiplier;
+      const c = ext.config.zero;
+      const d = ext.config.multiplier;
+    }, {
   v: 2,
   name: "fn",
   ast: {
@@ -25,4 +24,4 @@ const fn = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).se
     "ext.config.zero": () => ext.config.zero
   }
 }) && $.f)({});
-console.log(fn);
+    console.log(fn);

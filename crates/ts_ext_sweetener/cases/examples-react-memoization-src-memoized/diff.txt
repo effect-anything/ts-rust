@@ -1,0 +1,98 @@
+--- theirs.ts
++++ ours.ts
+@@ -1,4 +1,1 @@
+-import { c as _c } from "react/compiler-runtime";
+-import React from "react";
+-import { createRoot } from "react-dom/client";
+ 
+@@ -2,90 +1,1 @@
+-import React from "react";
+-import { createRoot } from "react-dom/client";
+ 
+-const DISPLAY = true;
+-const styles = { a: "first", b: "has-id", c: "second", d: "display-enabled" };
+-
+-function identity(value: string, ..._rest: readonly unknown[]): string {
+-  return value;
+-}
+-
+-interface FixtureProps {
+-  readonly cond?: boolean;
+-  readonly id: number;
+-}
+-
+-function Component(input: FixtureProps) {
+-        const cache = _c(9);
+-        const { cond: conditionInput, id: id_1 } = input;
+-        const condition = (conditionInput === undefined ? false : conditionInput);
+-        let className;
+-        if (cache[0] !== id_1) {
+-          (className = identity(styles.a, id_1 !== null ? styles.b : {}));
+-          (cache[0] = id_1);
+-          (cache[1] = className);
+-        } else {
+-          (className = cache[1]);
+-        }
+-        let firstChild;
+-        if (cache[2] !== className) {
+-          (firstChild = <div className={className} />);
+-          (cache[2] = className);
+-          (cache[3] = firstChild);
+-        } else {
+-          (firstChild = cache[3]);
+-        }
+-        let secondChild;
+-        if (cache[4] !== condition) {
+-          (secondChild = condition === false && (
+-            <div className={identity(styles.c, DISPLAY ? styles.d : {})} />
+-          ));
+-          (cache[4] = condition);
+-          (cache[5] = secondChild);
+-        } else {
+-          (secondChild = cache[5]);
+-        }
+-        let result;
+-        if (cache[6] !== firstChild || cache[7] !== secondChild) {
+-          (result = (
+-            <>
+-            {firstChild}
+-            {secondChild}
+-          </>
+-          ));
+-          (cache[6] = firstChild);
+-          (cache[7] = secondChild);
+-          (cache[8] = result);
+-        } else {
+-          (result = cache[8]);
+-        }
+-        return result;
+-      }
+-
+-function Demo() {
+-  const [id, setId] = React.useState(42);
+-  const [cond, setCond] = React.useState(false);
+-  const [unrelated, setUnrelated] = React.useState(0);
+-  return (
+-    <main>
+-      <h1>Explicit memoized function</h1>
+-      <p>
+-        This is React's <code>repro-separate-scopes-for-divs</code> fixture.
+-        The macro emits the same four reactive scopes and nine cache slots.
+-      </p>
+-      <div className="controls">
+-        <button onClick={() => setId((value) => value + 1)}>
+-          Change ID ({id})
+-        </button>
+-        <button onClick={() => setCond((value) => !value)}>
+-          Toggle condition ({String(cond)})
+-        </button>
+-        <button onClick={() => setUnrelated((value) => value + 1)}>
+-          Unrelated parent render ({unrelated})
+-        </button>
+-      </div>
+-      <Component cond={cond} id={id} />
+-    </main>
+-  );
+-}
+-
+-createRoot(document.getElementById("root")!).render(<Demo />);

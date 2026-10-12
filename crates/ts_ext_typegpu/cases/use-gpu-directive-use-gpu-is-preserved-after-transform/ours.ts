@@ -1,7 +1,6 @@
-const fn1 = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
-  'use gpu';
-
-}, {
+    const fn1 = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
+      'use gpu';
+    }, {
   v: 2,
   name: "fn1",
   ast: {
@@ -10,12 +9,11 @@ const fn1 = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).s
   },
   externals: {}
 }) && $.f)({});
-const fn2 = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
-  'use gpu';
 
-  'worklet';
-
-}, {
+    const fn2 = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
+      'use gpu';
+      'worklet';
+    }, {
   v: 2,
   name: "fn2",
   ast: {
@@ -24,12 +22,11 @@ const fn2 = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).s
   },
   externals: {}
 }) && $.f)({});
-const fn3 = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
-  'worklet';
 
-  'use gpu';
-
-}, {
+    const fn3 = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
+      'worklet';
+      'use gpu';
+    }, {
   v: 2,
   name: "fn3",
   ast: {
@@ -38,4 +35,5 @@ const fn3 = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).s
   },
   externals: {}
 }) && $.f)({});
-console.log(fn1, fn2, fn3);
+
+    console.log(fn1, fn2, fn3);

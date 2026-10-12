@@ -6,8 +6,8 @@
 //! `scripts/sync-cases.py --apply`, then run this.
 //!
 //! `cargo run -q -p ts_ext_typegpu --example capture_ours -- --all`
-//! `cargo run -q -p ts_ext_typegpu --example capture_ours -- --all use-gpu-directive`
-//! limits to ids that start with that prefix.
+//! `cargo run -q -p ts_ext_typegpu --example capture_ours -- use-gpu-directive`
+//! limits to ids that start with that prefix. One id checks one case.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,7 +38,10 @@ fn main() {
         }
         let dir = root.join("cases").join(&id);
         let theirs = dir.join("theirs.ts");
-        let needs = all || dir.join("diff.txt").is_file() || !dir.join("ours.ts").is_file();
+        let needs = all
+            || !prefix.is_empty()
+            || dir.join("diff.txt").is_file()
+            || !dir.join("ours.ts").is_file();
         if !theirs.is_file() || !needs {
             if !theirs.is_file() {
                 skipped += 1;

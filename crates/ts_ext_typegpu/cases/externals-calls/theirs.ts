@@ -1,4 +1,5 @@
 {
-    "ext.comptime": () => ext.comptime,
-    "ext.runtime": () => ext.runtime
+    "ext.value": () => ext.value,
+    "ext.config.multiplier": () => ext.config.multiplier,
+    "ext.config.zero": () => ext.config.zero
   }

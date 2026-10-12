@@ -14,9 +14,13 @@
 use crate::frontend::parser::{ParsedSourceFile, SourceFileParseOptions};
 
 /// Run the internal rewrites. Content mapping has already happened.
+///
+/// Operator overloads are not rewritten here. Check and LSP type the
+/// author's `+` from `Symbol.operatorPlus`. Emit rewrites the calls.
 #[must_use]
-pub fn apply(opts: &SourceFileParseOptions, file: ParsedSourceFile) -> ParsedSourceFile {
-    crate::ext::tsover::rewrite_after_parse(opts, file)
+pub fn apply(_opts: &SourceFileParseOptions, file: ParsedSourceFile) -> ParsedSourceFile {
+    crate::ext::tsover::report_nesting(&file);
+    file
 }
 
 /// Runtime wrappers for emitted JavaScript. Check does not call this.
@@ -26,7 +30,10 @@ pub fn apply(opts: &SourceFileParseOptions, file: ParsedSourceFile) -> ParsedSou
 /// `publish_parsed_files`.
 #[must_use]
 pub fn emit_javascript(filename: &str, code: &str) -> String {
-    crate::ext::typegpu::embed_metadata_js(filename, code)
+    let rewritten = crate::ext::tsover::rewrite_text(filename, code)
+        .map(|rewrite| rewrite.code)
+        .unwrap_or_else(|| code.to_owned());
+    crate::ext::typegpu::embed_metadata_js(filename, &rewritten)
 }
 
 /// Rewrites JavaScript the emit workers already wrote. Source maps and
@@ -53,11 +60,17 @@ pub fn rewrite_emitted_javascript(results: &[crate::emitter::program_emit::EmitR
 
 fn is_javascript_output(path: &str) -> bool {
     let path = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    if path.ends_with(".map") || path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
+    if path.ends_with(".map")
+        || path.ends_with(".d.ts")
+        || path.ends_with(".d.mts")
+        || path.ends_with(".d.cts")
     {
         return false;
     }
-    path.ends_with(".js") || path.ends_with(".jsx") || path.ends_with(".mjs") || path.ends_with(".cjs")
+    path.ends_with(".js")
+        || path.ends_with(".jsx")
+        || path.ends_with(".mjs")
+        || path.ends_with(".cjs")
 }
 
 /// True when this compiler still emits JavaScript for the file.
