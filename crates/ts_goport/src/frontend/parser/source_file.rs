@@ -316,6 +316,21 @@ impl ParsedSourceFile {
         CONTENT_MAPPER_LINKS.with(|m| m.borrow_mut().insert(self.root.file_index(), links));
     }
 
+    /// Point this supplemental file's `Rc` link at `canonical`.
+    ///
+    /// `set_content_mapper_info` stores that link as a `Weak` of the `Rc`
+    /// it was given. `parse_result` then publishes the canonical file as a
+    /// new `Rc` (`precheck::apply` returns another `ParsedSourceFile`), and
+    /// the first `Weak` dies with the `Rc` that `parse_result` drops. The
+    /// node-side link is the SourceFile node and is not changed here.
+    pub fn set_canonical_source_file(&self, canonical: &Rc<ParsedSourceFile>) {
+        CONTENT_MAPPER_LINKS.with(|m| {
+            if let Some(links) = m.borrow_mut().get_mut(&self.root.file_index()) {
+                links.canonical_source_file = Rc::downgrade(canonical);
+            }
+        });
+    }
+
     // Go: ast/ast.go:2646 DiagnosticDirectives
     #[must_use]
     pub fn diagnostic_directives(&self) -> &'static [MappedDiagnosticDirective] {

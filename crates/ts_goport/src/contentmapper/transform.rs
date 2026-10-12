@@ -248,11 +248,21 @@ fn parse_result_with(
         });
     }
     // Internal rewrites after the mapper map is attached.
+    // `precheck::apply` returns another `ParsedSourceFile` in a new `Rc`.
+    // The supplemental files already point at `source_file` with a `Weak`,
+    // so that link is dead once this function drops `source_file`. Point it
+    // at the `Rc` that is published instead. The node-side canonical link
+    // stays the original SourceFile node: `apply` keeps that node when it
+    // does not rewrite the file.
     if let Some(canonical) = files.canonical.clone() {
-        files.canonical = Some(Rc::new(crate::ext::precheck::apply(
+        let published = Rc::new(crate::ext::precheck::apply(
             &parse_options,
             (*canonical).clone(),
-        )));
+        ));
+        for file in &files.supplemental {
+            file.set_canonical_source_file(&published);
+        }
+        files.canonical = Some(published);
     }
     Ok(files)
 }
