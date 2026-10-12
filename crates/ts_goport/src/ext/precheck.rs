@@ -26,13 +26,16 @@ pub fn apply(_opts: &SourceFileParseOptions, file: ParsedSourceFile) -> ParsedSo
 /// Runtime wrappers for emitted JavaScript. Check does not call this.
 ///
 /// The caller is the loading thread, after the emit workers have returned.
-/// Parsing here is the same as the parse cache: one thread, then
-/// `publish_parsed_files`.
+/// Each file is parsed into a store that the transform drops. Nothing is
+/// written to the process parse store.
 #[must_use]
 pub fn emit_javascript(filename: &str, code: &str) -> String {
-    let rewritten = crate::ext::tsover::rewrite_text(filename, code)
-        .map(|rewrite| rewrite.code)
-        .unwrap_or_else(|| code.to_owned());
+    // The operator parse and the metadata parse each take this thread's
+    // one detached store, so the rewrite ends before the wrap parses.
+    let rewritten = {
+        let rewrite = crate::ext::tsover::rewrite_text(filename, code);
+        rewrite.map_or_else(|| code.to_owned(), |rewrite| rewrite.code)
+    };
     crate::ext::typegpu::embed_metadata_js(filename, &rewritten)
 }
 

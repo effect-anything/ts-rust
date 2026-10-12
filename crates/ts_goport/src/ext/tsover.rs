@@ -106,8 +106,12 @@ pub fn rewrite_text(filename: &str, code: &str) -> Option<Rewrite> {
         ScriptKind::TS
     };
     let leaked: &'static str = Box::leak(code.to_owned().into_boxed_str());
-    let file = parse_source_file_unexpanded(&opts, leaked, kind);
-    let (virtual_code, segments, nesting) = walk_file(&file, code)?;
+    // The same owned store as the metadata pass. `parse_source_file` would
+    // take a process file id and leave the parse where the next transform
+    // can read it.
+    let _owned = crate::ext::typegpu::parse_for_transform(&opts, leaked, kind);
+    let file = _owned.file();
+    let (virtual_code, segments, nesting) = walk_file(file, code)?;
     Some(Rewrite {
         code: virtual_code,
         segments,

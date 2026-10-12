@@ -4186,6 +4186,30 @@ pub fn new_detached_file_store(
     id
 }
 
+/// Puts `detached` back as the detached store of this thread, so node
+/// reads find it again (`take_detached_file_store` is what removed it).
+/// A transform that parsed off to the side uses it: the store then lives
+/// only while the transform reads it, and it never takes a process file
+/// id. Panics when this thread already has a detached store, or when
+/// `detached` is not self-contained.
+pub fn restore_detached_file_store(detached: DetachedStore) {
+    assert!(
+        detached.is_self_contained(),
+        "cannot restore a store that names other stores"
+    );
+    assert!(
+        DETACHED.get().is_none(),
+        "this thread already has a detached store"
+    );
+    let DetachedStore { id, store } = detached;
+    let cell = SPARE_CELL
+        .take()
+        .unwrap_or_else(|| Box::leak(Box::default()));
+    *cell.borrow_mut() = store;
+    DETACHED.set(Some((id, cell)));
+    ACTIVE.set(Some((id, cell)));
+}
+
 /// Removes the detached store of this thread, if any.
 pub fn take_detached_file_store() -> Option<DetachedStore> {
     let (id, cell) = DETACHED.take()?;

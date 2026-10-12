@@ -8,9 +8,9 @@ use ts_ext_typegpu::TypegpuSession;
 /// the operator call, the wrapper's arrow parameter, the payload's trailing
 /// commas, and the export of a hoisted marked function.
 ///
-/// The build path publishes parsed files in the compiler's shared store, so
-/// these tests hold a lock: the store refuses two threads that publish at
-/// once.
+/// The operator rewrite and the metadata wrap parse one file at a time,
+/// and a publish of the compiler's own files refuses two threads at once.
+/// The parses themselves are not shared: see `transforms_do_not_share_a_parse`.
 static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn build(code: &str) -> String {
@@ -199,4 +199,27 @@ fn assert_refused(code: &str, message: &str) {
         out.diagnostics
     );
     assert!(out.code.contains("body: [0, []]"), "{}", out.code);
+}
+
+/// Two builds in one process. The first parse used to be published into
+/// the process parse store, so a later transform could read it. Each build
+/// now keeps its parse in a store that it drops, and the second file is
+/// not the first file's text.
+#[test]
+fn transforms_do_not_share_a_parse() {
+    let _guard = BUILD.lock().unwrap_or_else(|error| error.into_inner());
+    let first = "function add(a, b) { \"use gpu\"; return a + b }";
+    let second = "function mul(a, b) { \"use gpu\"; return a * b }";
+    let published_before = ts_goport::ast::unpublished_file_ids();
+    let left = TypegpuSession::build().transform("left.ts", first).code;
+    let right = TypegpuSession::build().transform("right.ts", second).code;
+    assert!(left.contains("__tsover_add"), "{left}");
+    assert!(!left.contains("__tsover_mul"), "{left}");
+    assert!(right.contains("__tsover_mul"), "{right}");
+    assert!(!right.contains("__tsover_add"), "{right}");
+    assert_eq!(
+        ts_goport::ast::unpublished_file_ids(),
+        published_before,
+        "a transform left a file in the process parse store"
+    );
 }

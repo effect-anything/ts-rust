@@ -96,9 +96,13 @@ impl TypegpuSession {
 
 fn build(path: &str, code: &str, auto_naming: bool) -> Transformed {
     // Operators are rewritten once. `embed_metadata` parses that text and
-    // slices the calls; it does not rewrite a second time.
-    let rewritten =
-        tsover::rewrite_text(path, code).map_or_else(|| code.to_owned(), |rewrite| rewrite.code);
+    // slices the calls; it does not rewrite a second time. The two parses
+    // each take this thread's one detached store, so the rewrite finishes
+    // and drops its store before the metadata parse starts.
+    let rewritten = {
+        let rewrite = tsover::rewrite_text(path, code);
+        rewrite.map_or_else(|| code.to_owned(), |rewrite| rewrite.code)
+    };
     let (embedded, unsupported) = typegpu::embed_metadata_reports(path, &rewritten, auto_naming);
     let end = u32::try_from(code.len()).unwrap_or(u32::MAX);
     Transformed {

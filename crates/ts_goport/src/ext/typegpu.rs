@@ -98,13 +98,14 @@ pub fn embed_metadata_reports(
     } else {
         ScriptKind::TS
     };
-    // The caller is the loading thread, after emit workers have finished,
-    // the same place the parse cache publishes. One parse of the printed
-    // JavaScript. Whitespace is not part of the comparison.
+    // The caller is the loading thread, after emit workers have finished.
+    // One parse of the printed JavaScript, in a store this call owns. A
+    // publish would give the file a process file id and leave it in the
+    // process parse store, where the next transform or an LSP session
+    // could read it. Whitespace is not part of the comparison.
     let leaked: &'static str = Box::leak(code.to_owned().into_boxed_str());
-    let file = std::rc::Rc::new(parse_without_rewrite(&opts, leaked, kind));
-    crate::program::note_parsed_source_file(&file);
-    crate::program::publish_parsed_files("/");
+    let _owned = parse_for_transform(&opts, leaked, kind);
+    let file = _owned.file();
     let mut aliases = std::collections::BTreeSet::new();
     gather_aliases(file.root, &mut aliases);
     if std::env::var("DBG").is_ok() {
@@ -122,6 +123,51 @@ pub fn embed_metadata_reports(
         return (code.to_owned(), unsupported);
     }
     (apply_wraps(leaked, edits), unsupported)
+}
+
+/// The parse of one transform call.
+///
+/// The file is parsed into the detached store of this thread, the same
+/// store a parse worker uses, and the store stays installed until this
+/// drops. It never takes a process file id and it is never published, so
+/// a later transform or an LSP session cannot read it. Two calls on one
+/// thread cannot overlap: a thread has one detached store.
+pub(crate) struct TransformParse {
+    file: std::rc::Rc<ParsedSourceFile>,
+}
+
+impl TransformParse {
+    /// Parse `text` without publishing it. Panics when this thread already
+    /// holds a detached store (a parse worker, or another transform).
+    fn parse(opts: &SourceFileParseOptions, text: &'static str, kind: ScriptKind) -> Self {
+        let parsed = crate::frontend::parser::parse_source_file_detached(0, opts, text, kind);
+        let crate::frontend::parser::DetachedParse { file, store, .. } = parsed;
+        crate::ast::restore_detached_file_store(store);
+        Self {
+            file: std::rc::Rc::new(file),
+        }
+    }
+
+    pub(crate) fn file(&self) -> &ParsedSourceFile {
+        &self.file
+    }
+}
+
+/// [`TransformParse::parse`] for the other transforms in this module.
+pub(crate) fn parse_for_transform(
+    opts: &SourceFileParseOptions,
+    text: &'static str,
+    kind: ScriptKind,
+) -> TransformParse {
+    TransformParse::parse(opts, text, kind)
+}
+
+impl Drop for TransformParse {
+    fn drop(&mut self) {
+        // The store holds the nodes this parse walks. Take it only after
+        // the walk, and drop it here: it is not in the process registry.
+        drop(crate::ast::take_detached_file_store());
+    }
 }
 
 /// Compiler emit hook. One call. Declaration files are not runtime JS.
