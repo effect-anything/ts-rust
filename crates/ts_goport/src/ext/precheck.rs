@@ -26,10 +26,13 @@ pub fn apply(_opts: &SourceFileParseOptions, file: ParsedSourceFile) -> ParsedSo
 /// Runtime wrappers for emitted JavaScript. Check does not call this.
 ///
 /// The caller is the loading thread, after the emit workers have returned.
-/// Parsing here is the same as the parse cache: one thread, then
-/// `publish_parsed_files`.
+/// Each file is parsed into a store that the transform drops. Nothing is
+/// written to the process parse store.
 #[must_use]
 pub fn emit_javascript(filename: &str, code: &str) -> String {
+    // `emit_output` runs the operator rewrite to completion before the
+    // metadata wrap. Each of those parses takes this thread's one detached
+    // store, so the first has to be dropped before the second starts.
     emit_output(filename, code).code
 }
 
@@ -46,22 +49,102 @@ struct EmittedOutput {
 }
 
 fn emit_output(filename: &str, code: &str) -> EmittedOutput {
-    let Some(rewrite) = crate::ext::tsover::rewrite_text(filename, code) else {
+    // The rewrite owns this thread's detached store until it returns, so
+    // its text and segments are taken out before the metadata parse, which
+    // needs that same store.
+    let Some((rewritten, segments)) = crate::ext::tsover::rewrite_text(filename, code)
+        .map(|rewrite| (rewrite.code, rewrite.segments))
+    else {
         return EmittedOutput {
             code: code.to_owned(),
             segments: Vec::new(),
         };
     };
-    // The operator rewrite is the only emit change that records positions.
-    // TypeGPU metadata is inserted without a span map, so it cannot move
-    // these segments.
-    let code = crate::ext::typegpu::embed_metadata_js(filename, &rewrite.code);
-    let segments = if code == rewrite.code {
-        rewrite.segments
-    } else {
-        Vec::new()
-    };
+    // The metadata wrapper inserts text around the rewritten calls. The
+    // operator segments still name the author, but only after each one is
+    // shifted to where its text landed in the wrapped file. A call the
+    // wrapper reprints (it is no longer the same bytes) cannot be shifted,
+    // and that file keeps no map rather than a map that names the wrong
+    // column.
+    let code = crate::ext::typegpu::embed_metadata_js(filename, &rewritten);
+    let segments = shift_segments_through_wrap(&rewritten, &code, segments);
     EmittedOutput { code, segments }
+}
+
+/// Move `segments` from `before` into `after`.
+///
+/// Each segment's virtual text has to occur in `after` in order. The gap
+/// before it is the wrapper the metadata pass inserted, and that gap has no
+/// author position. `None` of the segments are kept when a segment's text
+/// was reprinted, because a shift would then point at different bytes.
+fn shift_segments_through_wrap(
+    before: &str,
+    after: &str,
+    segments: Vec<crate::spanmap::Segment>,
+) -> Vec<crate::spanmap::Segment> {
+    if before == after {
+        return segments;
+    }
+    // The wrapper reprints the function, so a search for each slice finds
+    // the wrong copy (`a` in the parameter list). The rewritten calls are
+    // the bytes it keeps. Each call anchors the segments of that call, and
+    // the text outside every call is not given a column it no longer has.
+    let mut anchors = Vec::new();
+    let mut search = 0usize;
+    let mut from = 0usize;
+    while let Some(at) = before[from..].find("__tsover_") {
+        let call = from + at;
+        let Some(end) = call_end(before, call) else {
+            break;
+        };
+        let text = &before[call..end];
+        let Some(found) = after[search..].find(text) else {
+            return Vec::new();
+        };
+        anchors.push((call, end, search + found));
+        search += found + text.len();
+        from = end;
+    }
+    if anchors.is_empty() {
+        return Vec::new();
+    }
+    let mut shifted = Vec::with_capacity(segments.len());
+    for segment in segments {
+        let start = usize::try_from(segment.virtual_start).unwrap_or(0);
+        let end = usize::try_from(segment.virtual_end).unwrap_or(0);
+        let Some((call, call_end, moved)) = anchors
+            .iter()
+            .find(|(call, call_end, _)| start >= *call && end <= *call_end)
+        else {
+            continue;
+        };
+        let delta = *moved as i32 - *call as i32;
+        let mut segment = segment;
+        segment.virtual_start = segment.virtual_start.wrapping_add(delta);
+        segment.virtual_end = segment.virtual_end.wrapping_add(delta);
+        shifted.push(segment);
+    }
+    shifted
+}
+
+/// The byte after the call that starts at `at`, including the calls nested
+/// in its arguments. `None` when the parentheses do not balance.
+fn call_end(text: &str, at: usize) -> Option<usize> {
+    let open = text[at..].find('(')? + at;
+    let mut depth = 0i32;
+    for (index, ch) in text[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Rewrites JavaScript the emit workers already wrote, then composes each
@@ -171,7 +254,14 @@ fn compose_source_map(
         let Some(moved) = original_offset_to_rewritten(segments, generated) else {
             continue;
         };
+        let moved = operator_point(segments, moved);
         if moved < last_position {
+            continue;
+        }
+        // Adjacent atoms (the call name and the comma) share a generated
+        // column. The generator rejects a second mapping there, and the
+        // first one already names the author token.
+        if moved == last_position {
             continue;
         }
         last_position = moved;
@@ -243,18 +333,50 @@ fn compose_source_map(
 /// its end, is the start of the atom: the rewritten call. The segments are
 /// not ordered by original offset (an atom's original range is only the
 /// operator), so this walks them instead of using the span map's index.
+/// A source-map point that lands inside one operator's generated pieces
+/// is reported at the first of those pieces: the call name.
+///
+/// A verbatim slice is not an operator, so its column stays. The span map
+/// itself still names each operand for a position query.
+fn operator_point(segments: &[crate::spanmap::Segment], generated: i32) -> i32 {
+    let Some(index) = segments
+        .iter()
+        .position(|segment| generated >= segment.virtual_start && generated < segment.virtual_end)
+    else {
+        return generated;
+    };
+    if segments[index].kind != crate::spanmap::Kind::ATOM {
+        return generated;
+    }
+    let mut start = index;
+    while start > 0
+        && segments[start - 1].kind == crate::spanmap::Kind::ATOM
+        && segments[start - 1].virtual_end == segments[start].virtual_start
+        && segments[start - 1].original_start == segments[start].original_start
+    {
+        start -= 1;
+    }
+    segments[start].virtual_start
+}
+
 fn original_offset_to_rewritten(segments: &[crate::spanmap::Segment], offset: i32) -> Option<i32> {
     let mut fallback = None;
+    let mut inside = None;
     for segment in segments {
+        let covers = offset >= segment.original_start && offset < segment.original_end;
+        let boundary = offset == segment.original_end;
         if segment.kind == crate::spanmap::Kind::VERBATIM {
-            if offset >= segment.original_start && offset <= segment.original_end {
-                return Some(segment.virtual_start + (offset - segment.original_start));
+            if covers || (boundary && fallback.is_none() && inside.is_none()) {
+                inside = Some(segment.virtual_start + (offset - segment.original_start));
             }
-        } else if offset >= segment.original_start && offset <= segment.original_end {
+        } else if covers && fallback.is_none() {
+            // The first piece of this operator is the call name. A later
+            // piece (the comma, the closing parenthesis) names the same
+            // token and must not take the source-map point.
             fallback = Some(segment.virtual_start);
         }
     }
-    fallback
+    fallback.or(inside)
 }
 
 /// A generated mapping is a line and a UTF-16 column. The span map is a
@@ -331,7 +453,8 @@ mod tests {
     #[test]
     fn rewritten_javascript_map_keeps_the_author_column() {
         let javascript = "\"use tsover\";\nexport const value = a + b;\n";
-        let rewritten = emit_javascript("a.js", javascript);
+        let output = emit_output("a.js", javascript);
+        let rewritten = &output.code;
         let call = rewritten.find("__tsover_add(").expect("rewritten call");
         let plus = javascript.find(" + ").unwrap() + 1;
         let tail = javascript.rfind(';').unwrap();
@@ -378,18 +501,55 @@ mod tests {
             (export_line, export_column),
             "text before the call does not move"
         );
-        let (call_line, call_column) = line_column_of(&rewritten, call);
+        let (call_line, call_column) = line_column_of(rewritten, call);
         assert_eq!(
             generated_at(&mappings, 1, 22),
             (call_line, call_column),
             "the author's + is the start of __tsover_add, map {map}"
         );
-        let (tail_line, tail_column) = line_column_of(&rewritten, rewritten.rfind(';').unwrap());
+        let (tail_line, tail_column) = line_column_of(rewritten, rewritten.rfind(';').unwrap());
         assert_eq!(
             generated_at(&mappings, 1, 30),
             (tail_line, tail_column),
             "the tail shifts by the inserted call, map {map}"
         );
+    }
+
+    /// A marked function is wrapped after the operator rewrite. The wrapper
+    /// is inserted text, so the author's `+` and its operands move. They
+    /// still name the same author columns: the call is not the wrapper, and
+    /// `b` is not the `+`.
+    #[test]
+    fn wrapped_call_keeps_the_operand_columns() {
+        let javascript = "function add(a, b) {\n  \"use gpu\";\n  return a + b;\n}\n";
+        let output = emit_output("a.js", javascript);
+        let call = output.code.rfind("__tsover_add(").expect(&output.code);
+        let left = call + "__tsover_add(".len();
+        let right = output.code[call..].find(", b)").expect(&output.code) + call + 2;
+        let plus = javascript.find('+').unwrap();
+        let author_left = javascript.rfind("a +").unwrap();
+        let author_right = javascript.rfind("b;").unwrap();
+        assert_eq!(
+            original_of(&output.segments, call),
+            plus as i32,
+            "wrapper moved the operator off its token\n{}",
+            output.code
+        );
+        assert_eq!(original_of(&output.segments, left), author_left as i32);
+        assert_eq!(original_of(&output.segments, right), author_right as i32);
+    }
+
+    fn original_of(segments: &[crate::spanmap::Segment], generated: usize) -> i32 {
+        let offset = i32::try_from(generated).unwrap_or(0);
+        let segment = segments
+            .iter()
+            .find(|segment| offset >= segment.virtual_start && offset < segment.virtual_end)
+            .unwrap_or_else(|| panic!("no segment at {generated}"));
+        if segment.kind == crate::spanmap::Kind::VERBATIM {
+            segment.original_start + (offset - segment.virtual_start)
+        } else {
+            segment.original_start
+        }
     }
 
     fn generated_at(

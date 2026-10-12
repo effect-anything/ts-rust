@@ -14,15 +14,15 @@
 //! `.ts` / `.tsx` file before its own pipeline.
 
 use crate::ast::{
-    get_source_file_of_node, is_function_like_declaration, is_prologue_directive,
-    new_external_diagnostic, source_file_text, ContentMapperSourceFileInfo, TextRange,
+    ContentMapperSourceFileInfo, TextRange, get_source_file_of_node, is_function_like_declaration,
+    is_prologue_directive, new_external_diagnostic, source_file_text,
 };
 use crate::astdata::SyntaxKind;
 use crate::core::Node;
 use crate::diagnostics::Category;
 use crate::flags::ScriptKind;
 use crate::frontend::parser::{
-    parse_source_file, set_source_file_diagnostics, ParsedSourceFile, SourceFileParseOptions,
+    ParsedSourceFile, SourceFileParseOptions, parse_source_file, set_source_file_diagnostics,
 };
 use crate::scanner_util::skip_trivia;
 use crate::spanmap::{self, Feature, Kind, Segment};
@@ -102,27 +102,19 @@ pub fn embed_metadata_reports(
     // One parse of the printed JavaScript, in a store this call owns. A
     // publish would give the file a process file id and leave it in the
     // process parse store, where the next transform or an LSP session
-    // could read it. Whitespace is not part of the comparison.
-    let leaked: &'static str = Box::leak(code.to_owned().into_boxed_str());
-    let _owned = parse_for_transform(&opts, leaked, kind);
+    // could read it. The text is shared with that store and dropped with
+    // it. Whitespace is not part of the comparison.
+    let text = crate::ast::FileText::Shared(std::sync::Arc::from(code.to_owned()));
+    let _owned = parse_for_transform(&opts, text, kind);
     let file = _owned.file();
     let mut aliases = std::collections::BTreeSet::new();
     gather_aliases(file.root, &mut aliases);
-    if std::env::var("DBG").is_ok() {
-        eprintln!("ALIASES {aliases:?}");
-    }
     let mut edits = Vec::new();
-    let unsupported = collect_wraps(file.root, leaked, &aliases, auto_name, &mut edits);
-    if std::env::var("DBG").is_ok() {
-        eprintln!("EDITS {}", edits.len());
-        for edit in &edits {
-            eprintln!("  {}..{} -> {}", edit.remove_start, edit.remove_end, edit.text.chars().take(80).collect::<String>());
-        }
-    }
+    let unsupported = collect_wraps(file.root, code, &aliases, auto_name, &mut edits);
     if edits.is_empty() {
         return (code.to_owned(), unsupported);
     }
-    (apply_wraps(leaked, edits), unsupported)
+    (apply_wraps(code, edits), unsupported)
 }
 
 /// The parse of one transform call.
@@ -139,7 +131,7 @@ pub(crate) struct TransformParse {
 impl TransformParse {
     /// Parse `text` without publishing it. Panics when this thread already
     /// holds a detached store (a parse worker, or another transform).
-    fn parse(opts: &SourceFileParseOptions, text: &'static str, kind: ScriptKind) -> Self {
+    fn parse(opts: &SourceFileParseOptions, text: crate::ast::FileText, kind: ScriptKind) -> Self {
         let parsed = crate::frontend::parser::parse_source_file_detached(0, opts, text, kind);
         let crate::frontend::parser::DetachedParse { file, store, .. } = parsed;
         crate::ast::restore_detached_file_store(store);
@@ -156,10 +148,10 @@ impl TransformParse {
 /// [`TransformParse::parse`] for the other transforms in this module.
 pub(crate) fn parse_for_transform(
     opts: &SourceFileParseOptions,
-    text: &'static str,
+    text: impl Into<crate::ast::FileText>,
     kind: ScriptKind,
 ) -> TransformParse {
-    TransformParse::parse(opts, text, kind)
+    TransformParse::parse(opts, text.into(), kind)
 }
 
 impl Drop for TransformParse {
@@ -173,8 +165,7 @@ impl Drop for TransformParse {
 /// Compiler emit hook. One call. Declaration files are not runtime JS.
 #[must_use]
 pub fn embed_metadata_js(filename: &str, code: &str) -> String {
-    if filename.ends_with(".d.ts") || filename.ends_with(".d.mts") || filename.ends_with(".d.cts")
-    {
+    if filename.ends_with(".d.ts") || filename.ends_with(".d.mts") || filename.ends_with(".d.cts") {
         return code.to_owned();
     }
     embed_metadata(filename, code)
@@ -242,7 +233,9 @@ fn walk_wraps(node: Node, work: &mut Build, edits: &mut Vec<WrapEdit>) {
     if node.kind() == SyntaxKind::CallExpression {
         for arg in node.arguments().iter() {
             let arg = unwrap_parens(arg);
-            if is_function_like_declaration(arg) && function_marked(arg) && !already_wrapped(arg)
+            if is_function_like_declaration(arg)
+                && function_marked(arg)
+                && !already_wrapped(arg)
                 && let Some(edit) = edit_for_function(arg, work, true)
             {
                 edits.push(edit);
@@ -280,7 +273,10 @@ fn walk_wraps(node: Node, work: &mut Build, edits: &mut Vec<WrapEdit>) {
 }
 
 fn edit_for_function(node: Node, work: &mut Build, marked: bool) -> Option<WrapEdit> {
-    let mut start = byte_at(work.code.as_str(), skip_trivia(work.code.as_str(), node.pos()))?;
+    let mut start = byte_at(
+        work.code.as_str(),
+        skip_trivia(work.code.as_str(), node.pos()),
+    )?;
     let end = byte_at(work.code.as_str(), node.end())?;
     let parent = node.parent();
     if parent.kind() == SyntaxKind::ExportAssignment {
@@ -323,8 +319,11 @@ fn edit_for_function(node: Node, work: &mut Build, marked: bool) -> Option<WrapE
         insert_at: start,
         text: {
             let column = if parent.kind() == SyntaxKind::ExportAssignment {
-                byte_at(work.code.as_str(), skip_trivia(work.code.as_str(), parent.pos()))
-                    .unwrap_or(start)
+                byte_at(
+                    work.code.as_str(),
+                    skip_trivia(work.code.as_str(), parent.pos()),
+                )
+                .unwrap_or(start)
             } else {
                 let line = work.code[..start].rfind('\n').map(|at| at + 1).unwrap_or(0);
                 line
@@ -357,12 +356,19 @@ fn hoist_edit(
 ) -> Option<WrapEdit> {
     let name = node.name().text();
     let comments = leading_comments(work.code.as_str(), node.pos());
-    let comment_start = comments.first().map(|span| span.0).unwrap_or(start).min(start);
+    let comment_start = comments
+        .first()
+        .map(|span| span.0)
+        .unwrap_or(start)
+        .min(start);
     let comment_text = if comment_start < start {
         let raw = &work.code[comment_start..start];
         // Keep the indent of the comment's own line. The slice starts at the
         // comment token, so the spaces before it are on the previous line.
-        let line = work.code[..comment_start].rfind('\n').map(|at| at + 1).unwrap_or(0);
+        let line = work.code[..comment_start]
+            .rfind('\n')
+            .map(|at| at + 1)
+            .unwrap_or(0);
         let indent = &work.code[line..comment_start];
         let text = if indent.chars().all(|ch| ch == ' ') {
             format!("{indent}{raw}")
@@ -387,7 +393,8 @@ fn hoist_edit(
         && !node
             .modifier_flags()
             .intersects(crate::flags::ModifierFlags::DEFAULT);
-    let export_assignment = parent.kind() == SyntaxKind::ExportAssignment && !parent.is_export_equals();
+    let export_assignment =
+        parent.kind() == SyntaxKind::ExportAssignment && !parent.is_export_equals();
     // `export default function name` is the declaration itself. Upstream
     // hoists the `const` to the top of the scope like a named export and
     // leaves `export default name;` where the declaration was. One edit
@@ -399,8 +406,11 @@ fn hoist_edit(
             .intersects(crate::flags::ModifierFlags::DEFAULT);
     let default_export = export_assignment || default_modifier;
     let remove_start = if named_export || export_assignment {
-        byte_at(work.code.as_str(), skip_trivia(work.code.as_str(), parent.pos()))?
-            .min(comment_start)
+        byte_at(
+            work.code.as_str(),
+            skip_trivia(work.code.as_str(), parent.pos()),
+        )?
+        .min(comment_start)
     } else {
         comment_start
     };
@@ -413,7 +423,10 @@ fn hoist_edit(
     let column = if insert_at == 0 {
         0
     } else {
-        let brace_line = work.code[..insert_at].rfind('\n').map(|at| at + 1).unwrap_or(0);
+        let brace_line = work.code[..insert_at]
+            .rfind('\n')
+            .map(|at| at + 1)
+            .unwrap_or(0);
         column_at(work.code.as_str(), brace_line) + 2
     };
     let wrapper = indent_continuations(wrapper, column);
@@ -438,7 +451,10 @@ fn hoist_edit(
         text
     };
     let text = if insert_at != remove_start {
-        let next = work.code[end..].find(|ch: char| !ch.is_whitespace()).map(|at| end + at).unwrap_or(end);
+        let next = work.code[end..]
+            .find(|ch: char| !ch.is_whitespace())
+            .map(|at| end + at)
+            .unwrap_or(end);
         let line = work.code[..next].rfind('\n').map(|at| at + 1).unwrap_or(0);
         let indent = &work.code[line..next];
         if indent.chars().all(|ch| ch == ' ') && !indent.is_empty() {
@@ -474,9 +490,16 @@ fn scope_top(node: Node, code: &str) -> Option<usize> {
     }
     let open = usize::try_from(scope.pos().max(0)).ok()?;
     let brace = code.get(open..)?.find('{')? + open + 1;
-    let body_end = usize::try_from(scope.end().max(0)).unwrap_or(code.len()).min(code.len());
+    let body_end = usize::try_from(scope.end().max(0))
+        .unwrap_or(code.len())
+        .min(code.len());
     let mut at = brace;
-    while at < body_end && code.as_bytes().get(at).is_some_and(|b| b.is_ascii_whitespace()) {
+    while at < body_end
+        && code
+            .as_bytes()
+            .get(at)
+            .is_some_and(|b| b.is_ascii_whitespace())
+    {
         at += 1;
     }
     Some(at)
@@ -492,15 +515,32 @@ fn printed_wrapper(node: Node, work: &mut Build, marked: bool) -> Option<String>
     } else {
         slice_node(work.code.as_str(), body)
     };
-    let printed = printed
-        .replacen("{ __tgpu_body__; }", &author, 1)
-        .replacen("__tgpu_body__", &author, 1);
+    let printed =
+        printed
+            .replacen("{ __tgpu_body__; }", &author, 1)
+            .replacen("__tgpu_body__", &author, 1);
     // The payload comparison keeps only lines that contain `() =>`. The
     // wrapper's arrow has to stay on the same line as the pure comment, and
     // an empty arrow must not break before the metadata that follows.
-    Some(printed.replace("/*#__PURE__*/
-($ =>", "/*#__PURE__*/($ =>").replace("/*#__PURE__*/
-($=>", "/*#__PURE__*/($ =>").replace("() =>\n", "() => ").replace("() =>\r\n", "() => ").replace("() => { }", "() => {}").replace("( /*#__PURE__*/", "(/*#__PURE__*/").replace(")( /*#__PURE__*/", ")(/*#__PURE__*/").replace("() => ({ ", "() => ({\n"))
+    Some(
+        printed
+            .replace(
+                "/*#__PURE__*/
+($ =>",
+                "/*#__PURE__*/($ =>",
+            )
+            .replace(
+                "/*#__PURE__*/
+($=>",
+                "/*#__PURE__*/($ =>",
+            )
+            .replace("() =>\n", "() => ")
+            .replace("() =>\r\n", "() => ")
+            .replace("() => { }", "() => {}")
+            .replace("( /*#__PURE__*/", "(/*#__PURE__*/")
+            .replace(")( /*#__PURE__*/", ")(/*#__PURE__*/")
+            .replace("() => ({ ", "() => ({\n"),
+    )
 }
 
 fn print_expression(emit: &std::rc::Rc<crate::printer::EmitContext>, node: Node) -> String {
@@ -535,14 +575,16 @@ fn print_expression(emit: &std::rc::Rc<crate::printer::EmitContext>, node: Node)
 }
 
 fn edit_for_autoname(expression: Node, name: &str, work: &mut Build) -> Option<WrapEdit> {
-    let start = byte_at(work.code.as_str(), skip_trivia(work.code.as_str(), expression.pos()))?;
+    let start = byte_at(
+        work.code.as_str(),
+        skip_trivia(work.code.as_str(), expression.pos()),
+    )?;
     let end = byte_at(work.code.as_str(), expression.end())?;
     // The expression stays the author's text. Printing the original node
     // asks the printer for a file it does not have.
     let inner = work.code[start..end].trim();
-    let text = format!(
-        "/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))({inner}, \"{name}\")"
-    );
+    let text =
+        format!("/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))({inner}, \"{name}\")");
     Some(WrapEdit {
         remove_start: start,
         remove_end: end,
@@ -663,9 +705,6 @@ fn compose_nested_edits(code: &str, edits: &mut Vec<WrapEdit>) {
             .nth(1)
             .unwrap_or("")
             .to_owned();
-        if std::env::var("DBG").is_ok() {
-            eprintln!("INNER {:?}", inner_text);
-        }
         edits[outer].text = format!(
             "/*#__PURE__*/(globalThis.__TYPEGPU_AUTONAME__ ?? (a => a))({inner_text}, \"{name}\")"
         );
@@ -701,14 +740,19 @@ fn apply_wraps(code: &str, mut edits: Vec<WrapEdit>) -> String {
         if edit.remove_end > code.len() || edit.remove_start > edit.remove_end {
             continue;
         }
-        for byte in covered.iter_mut().take(edit.remove_end).skip(edit.remove_start) {
+        for byte in covered
+            .iter_mut()
+            .take(edit.remove_end)
+            .skip(edit.remove_start)
+        {
             *byte = true;
         }
         inserts.push((edit.insert_at, edit.text.clone()));
     }
     // Same insert point: the last function is above the earlier one.
     inserts.sort_by(|left, right| right.0.cmp(&left.0).then(right.1.len().cmp(&left.1.len())));
-    let mut at_insert: std::collections::BTreeMap<usize, Vec<String>> = std::collections::BTreeMap::new();
+    let mut at_insert: std::collections::BTreeMap<usize, Vec<String>> =
+        std::collections::BTreeMap::new();
     for (at, text) in inserts {
         at_insert.entry(at).or_default().push(text);
     }
@@ -740,18 +784,16 @@ fn apply_wraps(code: &str, mut edits: Vec<WrapEdit>) -> String {
     while out.ends_with("\n\n") {
         out.pop();
     }
-    if std::env::var("DBG").is_ok() {
-        eprintln!("TAIL {:?}", &out[out.len().saturating_sub(30)..]);
-    }
     let lines = out.lines().map(|line| line.trim_end()).collect::<Vec<_>>();
     let mut kept = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let prev = kept.last().map(|prev: &String| prev.trim().to_owned());
-        if std::env::var("DBG").is_ok() && index + 3 >= lines.len() {
-            eprintln!("L{index} {:?} next {:?}", line, lines.get(index + 1));
-        }
         let blank = line.trim().is_empty();
-        let before_close = blank && lines[index + 1..].iter().find(|next| !next.trim().is_empty()).is_some_and(|next| next.trim() == "}");
+        let before_close = blank
+            && lines[index + 1..]
+                .iter()
+                .find(|next| !next.trim().is_empty())
+                .is_some_and(|next| next.trim() == "}");
         let after_open = blank && prev.as_deref().is_some_and(|prev| prev.ends_with('{'));
         if after_open {
             continue;
@@ -794,7 +836,10 @@ fn join_export_default(text: &str) -> String {
             let above = head[..line].trim_end();
             let open = above.rfind("({").map(|at| at + 1);
             if let Some(open) = open {
-                let object = above[open..].chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+                let object = above[open..]
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .collect::<String>();
                 flat.push_str(&above[..open]);
                 flat.push_str(&object);
                 flat.push_str(marker);
@@ -806,14 +851,8 @@ fn join_export_default(text: &str) -> String {
         rest = &rest[at + marker.len()..];
     }
     flat.push_str(rest);
-    if std::env::var("DBG").is_ok() {
-        eprintln!("FLAT TAIL {:?}", flat.lines().rev().take(8).collect::<Vec<_>>());
-    }
     let text = flat;
-    let mut lines = text
-        .lines()
-        .map(|line| line.to_owned())
-        .collect::<Vec<_>>();
+    let mut lines = text.lines().map(|line| line.to_owned()).collect::<Vec<_>>();
     let mut index = 0;
     while index + 1 < lines.len() {
         let trimmed = lines[index].trim_end();
@@ -829,7 +868,11 @@ fn join_export_default(text: &str) -> String {
             || trimmed.ends_with('(');
         if join {
             let indent = lines[index].chars().take_while(|c| *c == ' ').count();
-            let head = if export_default { "export default" } else { trimmed.trim() };
+            let head = if export_default {
+                "export default"
+            } else {
+                trimmed.trim()
+            };
             lines[index] = format!("{}{head} {next}", " ".repeat(indent));
             lines.remove(index + 1);
             continue;
@@ -912,8 +955,13 @@ fn print_rebuilt(
     } else {
         format!("/{file_name}")
     };
-    let absolute: &'static str = Box::leak(absolute.into_boxed_str());
-    let root = factory.new_source_file(absolute, absolute, "", statements, eof);
+    let root = factory.new_source_file(
+        crate::core::Name::from(absolute.as_str()).as_str(),
+        &absolute,
+        "",
+        statements,
+        eof,
+    );
     let mut printer = crate::printer::new_printer(
         crate::printer::PrinterOptions {
             target: crate::flags::ScriptTarget::ES_NEXT,
@@ -941,7 +989,11 @@ fn join_payload_lines(text: &str) -> String {
             || (trimmed.ends_with('(') && next.starts_with("/*#__PURE__*/"));
         if join {
             let indent = lines[index].chars().take_while(|ch| *ch == ' ').count();
-            let gap = if next.starts_with("/*#__PURE__*/") { "" } else { " " };
+            let gap = if next.starts_with("/*#__PURE__*/") {
+                ""
+            } else {
+                " "
+            };
             lines[index] = format!("{}{trimmed}{gap}{next}", " ".repeat(indent));
             lines.remove(index + 1);
             continue;
@@ -957,7 +1009,11 @@ fn babel_indent(text: &str) -> String {
     for line in text.lines() {
         let spaces = line.chars().take_while(|c| *c == ' ').count();
         let trimmed = spaces / 4 * 2 + spaces % 4;
-        lines.push(format!("{}{}", " ".repeat(trimmed), line[spaces..].trim_end()));
+        lines.push(format!(
+            "{}{}",
+            " ".repeat(trimmed),
+            line[spaces..].trim_end()
+        ));
     }
     compact_metadata(&mut lines);
     // Babel leaves a blank line between a prologue directive and the next statement.
@@ -969,13 +1025,19 @@ fn babel_indent(text: &str) -> String {
             || trimmed == "\"use gpu\";"
             || trimmed == "'worklet';"
             || trimmed == "\"worklet\";";
-        if directive && lines.get(index + 1).is_some_and(|next| !next.trim().is_empty()) {
+        if directive
+            && lines
+                .get(index + 1)
+                .is_some_and(|next| !next.trim().is_empty())
+        {
             spaced.push(String::new());
         }
     }
     let mut out = spaced.join("\n");
     // The printer writes a space after a synthetic comment. Babel does not.
-    out = out.replace("/*#__PURE__*/ ", "/*#__PURE__*/").replace("( /*#__PURE__*/", "(/*#__PURE__*/");
+    out = out
+        .replace("/*#__PURE__*/ ", "/*#__PURE__*/")
+        .replace("( /*#__PURE__*/", "(/*#__PURE__*/");
     if !out.is_empty() {
         out.push('\n');
     }
@@ -998,10 +1060,7 @@ fn compact_metadata(lines: &mut Vec<String>) {
         {
             let indent = lines[index].chars().take_while(|c| *c == ' ').count();
             let comma = if close.ends_with(',') { "," } else { "" };
-            lines[index] = format!(
-                "{}{{ {key1} {key2} }}{comma}",
-                " ".repeat(indent)
-            );
+            lines[index] = format!("{}{{ {key1} {key2} }}{comma}", " ".repeat(indent));
             lines.drain(index + 1..index + 4);
             continue;
         }
@@ -1029,7 +1088,11 @@ fn compact_metadata(lines: &mut Vec<String>) {
         let indent = " ".repeat(lines[index].chars().take_while(|c| *c == ' ').count());
         let mut replacement = vec![format!("{indent}params: [{{")];
         for (at, object) in objects.iter().enumerate() {
-            let body = object.trim_start_matches('{').trim().trim_end_matches('}').trim();
+            let body = object
+                .trim_start_matches('{')
+                .trim()
+                .trim_end_matches('}')
+                .trim();
             let mut keys = body.split(", ").filter(|part| !part.is_empty());
             let first = keys.next().unwrap_or("");
             let second = keys.next().unwrap_or("");
@@ -1073,7 +1136,10 @@ enum Rebuilt {
 }
 
 fn rebuild_statement(node: Node, work: &mut Build) -> Rebuilt {
-    if node.kind() == SyntaxKind::FunctionDeclaration && function_marked(node) && !already_wrapped(node) {
+    if node.kind() == SyntaxKind::FunctionDeclaration
+        && function_marked(node)
+        && !already_wrapped(node)
+    {
         // Same missing name as `function_expression`: do not read it.
         let name = if function_names_itself(node, work) {
             node.name()
@@ -1135,7 +1201,9 @@ fn place_wrapped(node: Node, wrapped: Node, work: &mut Build) -> Node {
     if parent.kind() == SyntaxKind::ExportAssignment && !parent.is_export_equals() {
         return export_default(work, wrapped);
     }
-    if parent.kind() == SyntaxKind::VariableDeclaration && parent.name().kind() == SyntaxKind::Identifier {
+    if parent.kind() == SyntaxKind::VariableDeclaration
+        && parent.name().kind() == SyntaxKind::Identifier
+    {
         let statement = parent.parent().parent();
         if is_named_export(statement.parent()) {
             return keep_export_const(statement, parent.name().text(), wrapped, work);
@@ -1159,16 +1227,12 @@ fn keep_export_const(statement: Node, name: &str, init: Node, work: &mut Build) 
 }
 
 fn const_of(work: &Build, name: &str, init: Node) -> Node {
-    let declarator = work.factory.new_variable_declaration(
-        work.id(name),
-        Node::NIL,
-        Node::NIL,
-        init,
-    );
-    let list = work.factory.new_variable_declaration_list(
-        work.list(&[declarator]),
-        crate::flags::NodeFlags::CONST,
-    );
+    let declarator =
+        work.factory
+            .new_variable_declaration(work.id(name), Node::NIL, Node::NIL, init);
+    let list = work
+        .factory
+        .new_variable_declaration_list(work.list(&[declarator]), crate::flags::NodeFlags::CONST);
     work.factory
         .new_variable_statement(crate::ast::ModifierList::NIL, list)
 }
@@ -1188,16 +1252,14 @@ fn export_name(work: &Build, name: &str) -> Node {
 }
 
 fn export_default(work: &Build, expression: Node) -> Node {
-    work.factory.new_export_assignment(
-        crate::ast::ModifierList::NIL,
-        false,
-        Node::NIL,
-        expression,
-    )
+    work.factory
+        .new_export_assignment(crate::ast::ModifierList::NIL, false, Node::NIL, expression)
 }
 
 fn is_named_export(node: Node) -> bool {
-    !node.is_nil() && node.kind() == SyntaxKind::ExportDeclaration && !node.is_export_equals()
+    !node.is_nil()
+        && node.kind() == SyntaxKind::ExportDeclaration
+        && !node.is_export_equals()
         && node.module_specifier().is_nil()
         && node.export_clause().kind() != SyntaxKind::NamedExports
 }
@@ -1271,7 +1333,9 @@ fn function_expression(node: Node, work: &mut Build) -> Node {
     // body rewrites `+`. The placeholder is replaced with the author's text
     // after the wrapper is printed.
     // The printer reads a block's statement list. An identifier has none.
-    let placeholder = work.factory.new_expression_statement(work.id("__tgpu_body__"));
+    let placeholder = work
+        .factory
+        .new_expression_statement(work.id("__tgpu_body__"));
     let body = work.factory.new_block(work.list(&[placeholder]), false);
     let params = rebuild_params(node, work);
     match node.kind() {
@@ -1325,7 +1389,7 @@ fn rebuild_params(node: Node, work: &Build) -> crate::ast::NodeList {
             let id = if name.kind() == SyntaxKind::Identifier {
                 work.id(name.text())
             } else {
-                work.id("_" )
+                work.id("_")
             };
             let type_node = if param.type_().is_nil() {
                 Node::NIL
@@ -1358,9 +1422,6 @@ fn rebuild_body(body: Node, work: &mut Build) -> Node {
     let mut statements = Vec::new();
     let mut hoisted = Vec::new();
     for statement in body.statements().iter() {
-        if std::env::var("DBG").is_ok() {
-            eprintln!("stmt {:?}", statement.kind());
-        }
         if is_directive(statement) {
             statements.push(clone_statement(statement, work));
             continue;
@@ -1390,11 +1451,6 @@ fn clone_statement(node: Node, work: &mut Build) -> Node {
         }
         SyntaxKind::ReturnStatement => {
             let expr = node.expression();
-            if std::env::var("DBG").is_ok() {
-                let p = node.pos();
-                let t = skip_trivia(work.code.as_str(), p);
-                eprintln!("pos {p} trivia {t} slice {:?}", &work.code[p.max(0) as usize..t.max(0) as usize]);
-            }
             let comment = comment_line_before(work.code.as_str(), node.pos());
             let cloned = if expr.is_nil() {
                 work.factory.new_return_statement(Node::NIL)
@@ -1482,7 +1538,8 @@ fn clone_statement(node: Node, work: &mut Build) -> Node {
             };
             let body = node.statement();
             let statement = clone_statement(body, work);
-            work.factory.new_for_statement(init, condition, incrementor, statement)
+            work.factory
+                .new_for_statement(init, condition, incrementor, statement)
         }
         SyntaxKind::Block => rebuild_body(node, work),
         SyntaxKind::EmptyStatement => work.factory.new_empty_statement(),
@@ -1514,12 +1571,8 @@ fn clone_declaration_list(list: Node, work: &mut Build) -> Node {
     let decls = built
         .into_iter()
         .map(|(name, init)| {
-            work.factory.new_variable_declaration(
-                work.id(&name),
-                Node::NIL,
-                Node::NIL,
-                init,
-            )
+            work.factory
+                .new_variable_declaration(work.id(&name), Node::NIL, Node::NIL, init)
         })
         .collect::<Vec<_>>();
     work.factory
@@ -1537,9 +1590,9 @@ fn type_from_slice(work: &Build, text: &str) -> Node {
     if parts.len() > 1 {
         let mut node = type_atom(work, parts[0]);
         for part in &parts[1..] {
-            node = work.factory.new_union_type_node(
-                work.list(&[node, type_atom(work, part)]),
-            );
+            node = work
+                .factory
+                .new_union_type_node(work.list(&[node, type_atom(work, part)]));
         }
         return node;
     }
@@ -1560,10 +1613,9 @@ fn type_atom(work: &Build, text: &str) -> Node {
         "object" => SyntaxKind::ObjectKeyword,
         "symbol" => SyntaxKind::SymbolKeyword,
         _ => {
-            return work.factory.new_type_reference_node(
-                work.id(text),
-                crate::ast::NodeList::NIL,
-            );
+            return work
+                .factory
+                .new_type_reference_node(work.id(text), crate::ast::NodeList::NIL);
         }
     };
     work.factory.new_keyword_type_node(kind)
@@ -1584,7 +1636,6 @@ fn clone_expr(node: Node, work: &mut Build) -> Node {
     // `as` is a type assertion. The runtime text and the tinyest AST both
     // drop it, which is what the `as type` case prints.
     if node.kind() == SyntaxKind::AsExpression {
-        if std::env::var("DBG").is_ok() { eprintln!("strip as"); }
         return clone_expr(node.expression(), work);
     }
     if let Some(rebuilt) = rebuild_expr(node, work) {
@@ -1593,9 +1644,10 @@ fn clone_expr(node: Node, work: &mut Build) -> Node {
     let node = unwrap_parens(node);
     match node.kind() {
         SyntaxKind::Identifier => work.id(node.text()),
-        SyntaxKind::NumericLiteral => work
-            .factory
-            .new_numeric_literal(slice_node(work.code.as_str(), node), crate::flags::TokenFlags::NONE),
+        SyntaxKind::NumericLiteral => work.factory.new_numeric_literal(
+            slice_node(work.code.as_str(), node),
+            crate::flags::TokenFlags::NONE,
+        ),
         SyntaxKind::StringLiteral => {
             let raw = slice_node(work.code.as_str(), node);
             let flags = if raw.starts_with('\'') {
@@ -1606,16 +1658,15 @@ fn clone_expr(node: Node, work: &mut Build) -> Node {
             work.factory.new_string_literal(node.text(), flags)
         }
         SyntaxKind::TrueKeyword => work.factory.new_keyword_expression(SyntaxKind::TrueKeyword),
-        SyntaxKind::FalseKeyword => work.factory.new_keyword_expression(SyntaxKind::FalseKeyword),
+        SyntaxKind::FalseKeyword => work
+            .factory
+            .new_keyword_expression(SyntaxKind::FalseKeyword),
         SyntaxKind::NullKeyword => work.factory.new_keyword_expression(SyntaxKind::NullKeyword),
         SyntaxKind::ThisKeyword => work.factory.new_keyword_expression(SyntaxKind::ThisKeyword),
         SyntaxKind::BinaryExpression => {
             let op = node.operator_token().kind();
             let left_node = node.left();
             let right_node = node.right();
-            if std::env::var("DBG").is_ok() && node.operator_token().kind() == SyntaxKind::PlusToken {
-                eprintln!("bin right {:?}", right_node.kind());
-            }
             let left = clone_expr(left_node, work);
             let right = clone_expr(right_node, work);
             work.factory.new_binary_expression(
@@ -1749,9 +1800,8 @@ fn rebuild_children(node: Node, work: &mut Build) -> Option<Node> {
         SyntaxKind::Block | SyntaxKind::ModuleBlock | SyntaxKind::CaseBlock => {
             Some(rebuild_body(node, work))
         }
-        SyntaxKind::ExpressionStatement => rebuild_expr(node.expression(), work).map(|expr| {
-            work.factory.new_expression_statement(expr)
-        }),
+        SyntaxKind::ExpressionStatement => rebuild_expr(node.expression(), work)
+            .map(|expr| work.factory.new_expression_statement(expr)),
         SyntaxKind::ReturnStatement => {
             let expr = node.expression();
             if expr.is_nil() {
@@ -1794,7 +1844,9 @@ fn rebuild_children(node: Node, work: &mut Build) -> Option<Node> {
                 Some(work.factory.new_if_statement(test, then, else_))
             }
         }
-        SyntaxKind::ExportDeclaration if node.export_clause().kind() != SyntaxKind::NamedExports => {
+        SyntaxKind::ExportDeclaration
+            if node.export_clause().kind() != SyntaxKind::NamedExports =>
+        {
             let inner = node.export_clause();
             match rebuild_statement(inner, work) {
                 Rebuilt::Hoist { .. } => None,
@@ -1873,11 +1925,9 @@ fn pure_wrapper(work: &Build, function: Node, metadata: Node) -> Node {
     let dollar = work.id("$");
     let global = work.id("globalThis");
     let meta_name = work.id("__TYPEGPU_META__");
-    let map = work.factory.new_new_expression(
-        work.id("WeakMap"),
-        work.nil_list(),
-        work.empty(),
-    );
+    let map = work
+        .factory
+        .new_new_expression(work.id("WeakMap"), work.nil_list(), work.empty());
     let access = work.factory.new_property_access_expression(
         global,
         Node::NIL,
@@ -1951,7 +2001,9 @@ fn pure_wrapper(work: &Build, function: Node, metadata: Node) -> Node {
         arrow,
         Node::NIL,
         work.nil_list(),
-        work.list(&[work.factory.new_object_literal_expression(work.empty(), false)]),
+        work.list(&[work
+            .factory
+            .new_object_literal_expression(work.empty(), false)]),
         crate::flags::NodeFlags::NONE,
     );
     mark_pure(work, call);
@@ -1976,7 +2028,12 @@ fn metadata_node(work: &Build, name: &str, ast: &Tinyest) -> Node {
             .new_string_literal(name, crate::flags::TokenFlags::NONE)
     };
     let props = [
-        prop(work, "v", work.factory.new_numeric_literal("2", crate::flags::TokenFlags::NONE)),
+        prop(
+            work,
+            "v",
+            work.factory
+                .new_numeric_literal("2", crate::flags::TokenFlags::NONE),
+        ),
         prop(work, "name", name_node),
         prop(work, "ast", ast_node(work, ast)),
         prop(work, "externals", externals_node(work, ast)),
@@ -2021,7 +2078,15 @@ fn ast_node(work: &Build, ast: &Tinyest) -> Node {
         .collect::<Vec<_>>();
     let body = json_to_node(work, &ast.body);
     work.factory.new_object_literal_expression(
-        work.list(&[prop(work, "params", work.factory.new_array_literal_expression(work.list(&params), !params.is_empty())), prop(work, "body", body)]),
+        work.list(&[
+            prop(
+                work,
+                "params",
+                work.factory
+                    .new_array_literal_expression(work.list(&params), !params.is_empty()),
+            ),
+            prop(work, "body", body),
+        ]),
         true,
     )
 }
@@ -2084,7 +2149,10 @@ fn external_access(work: &Build, name: &str) -> Node {
 fn json_to_node(work: &Build, text: &str) -> Node {
     // Tinyest body is a JSON-like array already built as text. Parse the
     // small subset the numeric cases emit: arrays, strings, numbers, null.
-    let mut parser = JsonNodes { work, rest: text.trim() };
+    let mut parser = JsonNodes {
+        work,
+        rest: text.trim(),
+    };
     parser.value()
 }
 
@@ -2201,8 +2269,14 @@ impl<'a> JsonNodes<'a> {
 
 fn comment_line_before(code: &str, pos: i32) -> Option<String> {
     let start = usize::try_from(pos.max(0)).unwrap_or(0).min(code.len());
-    let token = usize::try_from(skip_trivia(code, pos).max(0)).unwrap_or(start).min(code.len());
-    let trivia = if token > start { &code[start..token] } else { "" };
+    let token = usize::try_from(skip_trivia(code, pos).max(0))
+        .unwrap_or(start)
+        .min(code.len());
+    let trivia = if token > start {
+        &code[start..token]
+    } else {
+        ""
+    };
     for line in trivia.lines() {
         if let Some(body) = line.trim().strip_prefix("//") {
             return Some(format!(" {}", body.strip_prefix(' ').unwrap_or(body)));
@@ -2210,16 +2284,17 @@ fn comment_line_before(code: &str, pos: i32) -> Option<String> {
     }
     let before = code[..start].trim_end();
     let line = before.rsplit_once('\n').map(|(_, line)| line.trim())?;
-    line.strip_prefix("//").map(|body| {
-        format!(" {}", body.strip_prefix(' ').unwrap_or(body))
-    })
+    line.strip_prefix("//")
+        .map(|body| format!(" {}", body.strip_prefix(' ').unwrap_or(body)))
 }
 
 fn copy_leading(work: &Build, from: Node, to: Node) {
     // The comment sits in trivia before the token. Scanning at `pos` misses
     // it when `pos` is already the token, so walk back over whitespace first.
     let code = work.code.as_str();
-    let token = usize::try_from(from.pos().max(0)).unwrap_or(0).min(code.len());
+    let token = usize::try_from(from.pos().max(0))
+        .unwrap_or(0)
+        .min(code.len());
     let before = code[..token].trim_end();
     if let Some(line) = before.rsplit_once('\n').map(|(_, line)| line.trim())
         && let Some(body) = line.strip_prefix("//")
@@ -2259,11 +2334,35 @@ fn copy_leading(work: &Build, from: Node, to: Node) {
 }
 
 const RESOURCE_CONSTRUCTORS: &[&str] = &[
-    "bindGroupLayout", "vertexLayout", "privateVar", "workgroupVar", "immediateVar", "const",
-    "slot", "accessor", "mutableAccessor", "comptime", "fn", "vertexFn", "fragmentFn", "computeFn",
-    "createBuffer", "createMutable", "createReadonly", "createUniform", "createQuerySet",
-    "createPipeline", "createComputePipeline", "createGuardedComputePipeline", "createRenderPipeline",
-    "createTexture", "createSampler", "createComparisonSampler", "struct", "unstruct", "createView",
+    "bindGroupLayout",
+    "vertexLayout",
+    "privateVar",
+    "workgroupVar",
+    "immediateVar",
+    "const",
+    "slot",
+    "accessor",
+    "mutableAccessor",
+    "comptime",
+    "fn",
+    "vertexFn",
+    "fragmentFn",
+    "computeFn",
+    "createBuffer",
+    "createMutable",
+    "createReadonly",
+    "createUniform",
+    "createQuerySet",
+    "createPipeline",
+    "createComputePipeline",
+    "createGuardedComputePipeline",
+    "createRenderPipeline",
+    "createTexture",
+    "createSampler",
+    "createComparisonSampler",
+    "struct",
+    "unstruct",
+    "createView",
 ];
 
 fn auto_name(node: Node, work: &mut Build) -> Option<Node> {
@@ -2275,7 +2374,11 @@ fn auto_name(node: Node, work: &mut Build) -> Option<Node> {
         return None;
     }
     work.changed = true;
-    Some(replace_labelled(node, wrap_auto_name(work, expression, &label), work))
+    Some(replace_labelled(
+        node,
+        wrap_auto_name(work, expression, &label),
+        work,
+    ))
 }
 
 fn labelled(node: Node) -> Option<(String, Node)> {
@@ -2350,7 +2453,8 @@ fn contains_resource(node: Node, work: &Build) -> bool {
 
 fn already_autonamed(node: Node) -> bool {
     let parent = node.parent();
-    parent.kind() == SyntaxKind::CallExpression && slice_node_raw(parent).contains("__TYPEGPU_AUTONAME__")
+    parent.kind() == SyntaxKind::CallExpression
+        && slice_node_raw(parent).contains("__TYPEGPU_AUTONAME__")
 }
 
 fn wrap_auto_name(work: &Build, expression: Node, name: &str) -> Node {
@@ -2449,11 +2553,12 @@ fn gather_aliases(node: Node, aliases: &mut std::collections::BTreeSet<String>) 
                         if local.is_nil() {
                             continue;
                         }
-                        let imported = if !imported.is_nil() && imported.kind() == SyntaxKind::Identifier {
-                            imported.text()
-                        } else {
-                            local.text()
-                        };
+                        let imported =
+                            if !imported.is_nil() && imported.kind() == SyntaxKind::Identifier {
+                                imported.text()
+                            } else {
+                                local.text()
+                            };
                         if imported == "tgpu" {
                             aliases.insert(local.text().to_owned());
                         }
@@ -2567,7 +2672,10 @@ fn function_names_itself(node: Node, work: &Build) -> bool {
     if node.kind() == SyntaxKind::ArrowFunction {
         return false;
     }
-    let Some(start) = byte_at(work.code.as_str(), skip_trivia(work.code.as_str(), node.pos())) else {
+    let Some(start) = byte_at(
+        work.code.as_str(),
+        skip_trivia(work.code.as_str(), node.pos()),
+    ) else {
         return false;
     };
     let Some(end) = byte_at(work.code.as_str(), node.end()) else {
@@ -2586,7 +2694,9 @@ fn function_name(node: Node, work: &Build) -> String {
     }
     let parent = node.parent();
     match parent.kind() {
-        SyntaxKind::VariableDeclaration | SyntaxKind::PropertyAssignment | SyntaxKind::BindingElement => {
+        SyntaxKind::VariableDeclaration
+        | SyntaxKind::PropertyAssignment
+        | SyntaxKind::BindingElement => {
             let name = parent.name();
             if name.kind() == SyntaxKind::Identifier {
                 return name.text().to_owned();
@@ -2647,9 +2757,7 @@ impl Tinyest {
                 "[{}]",
                 self.params
                     .iter()
-                    .map(|name| format!(
-                        "{{\n      type: \"i\",\n      name: \"{name}\"\n    }}"
-                    ))
+                    .map(|name| format!("{{\n      type: \"i\",\n      name: \"{name}\"\n    }}"))
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -2794,7 +2902,10 @@ fn transpile_statement(node: Node, code: &str, ctx: &mut TinyCtx) -> Option<Stri
             Some(if else_.is_nil() {
                 format!("[11, {test}, {then}]")
             } else {
-                format!("[11, {test}, {then}, {}]", statement_or_block(else_, code, ctx))
+                format!(
+                    "[11, {test}, {then}, {}]",
+                    statement_or_block(else_, code, ctx)
+                )
             })
         }
         SyntaxKind::WhileStatement => Some(format!(
@@ -2905,9 +3016,9 @@ fn transpile_statement(node: Node, code: &str, ctx: &mut TinyCtx) -> Option<Stri
 fn unsupported_message(kind: SyntaxKind) -> String {
     match kind {
         SyntaxKind::ArrowFunction => "Arrow functions are not supported inside TGSL.".to_owned(),
-        SyntaxKind::SpreadElement | SyntaxKind::SpreadAssignment | SyntaxKind::OmittedExpression => {
-            "Spread elements are not supported in TGSL.".to_owned()
-        }
+        SyntaxKind::SpreadElement
+        | SyntaxKind::SpreadAssignment
+        | SyntaxKind::OmittedExpression => "Spread elements are not supported in TGSL.".to_owned(),
         SyntaxKind::MethodDeclaration | SyntaxKind::GetAccessor | SyntaxKind::SetAccessor => {
             "Object method elements are not supported in TGSL.".to_owned()
         }
@@ -2956,7 +3067,12 @@ fn transpile_block(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
 
 fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
     let mut node = unwrap_parens(node);
-    if matches!(node.kind(), SyntaxKind::AsExpression | SyntaxKind::SatisfiesExpression | SyntaxKind::TypeAssertionExpression) {
+    if matches!(
+        node.kind(),
+        SyntaxKind::AsExpression
+            | SyntaxKind::SatisfiesExpression
+            | SyntaxKind::TypeAssertionExpression
+    ) {
         node = node.expression();
     }
     if let Some(chain) = external_chain(node, ctx) {
@@ -2969,7 +3085,8 @@ fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
     // member of the external, and it is not a second external of its own.
     if node.kind() == SyntaxKind::PropertyAccessExpression {
         let property = node.name();
-        if property.kind() == SyntaxKind::Identifier && property.text() == "$"
+        if property.kind() == SyntaxKind::Identifier
+            && property.text() == "$"
             && let Some(chain) = external_chain(unwrap_parens(node.expression()), ctx)
         {
             if !ctx.externals.contains(&chain) {
@@ -3111,7 +3228,10 @@ fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
                     } else {
                         slice_node(code, name)
                     };
-                    Some(format!("{key}: {}", transpile_expr(prop.initializer(), code, ctx)))
+                    Some(format!(
+                        "{key}: {}",
+                        transpile_expr(prop.initializer(), code, ctx)
+                    ))
                 })
                 .collect::<Vec<_>>();
             format!("[104, {{ {} }}]", props.join(", "))
@@ -3363,7 +3483,6 @@ fn js_number_text(value: f64) -> String {
     format!("{value}")
 }
 
-
 fn slice_node(code: &str, node: Node) -> String {
     let start = usize::try_from(skip_trivia(code, node.pos()).max(0)).unwrap_or(0);
     let end = usize::try_from(node.end().max(0)).unwrap_or(code.len());
@@ -3371,8 +3490,3 @@ fn slice_node(code: &str, node: Node) -> String {
     let start = start.min(end);
     code[start..end].to_owned()
 }
-
-
-
-
-

@@ -105,11 +105,11 @@ pub fn rewrite_text(filename: &str, code: &str) -> Option<Rewrite> {
     } else {
         ScriptKind::TS
     };
-    let leaked: &'static str = Box::leak(code.to_owned().into_boxed_str());
     // The same owned store as the metadata pass. `parse_source_file` would
     // take a process file id and leave the parse where the next transform
-    // can read it.
-    let _owned = crate::ext::typegpu::parse_for_transform(&opts, leaked, kind);
+    // can read it. The text is shared with that store, not leaked.
+    let text = crate::ast::FileText::Shared(std::sync::Arc::from(code.to_owned()));
+    let _owned = crate::ext::typegpu::parse_for_transform(&opts, text, kind);
     let file = _owned.file();
     let (virtual_code, segments, nesting) = walk_file(file, code)?;
     Some(Rewrite {
@@ -359,12 +359,16 @@ struct Walk {
     nesting: Vec<(u32, u32)>,
 }
 
+#[derive(Clone)]
 struct Edit {
     start: i32,
     end: i32,
     text: String,
     op_start: i32,
     op_end: i32,
+    /// Empty for an edit rebuilt inside a copied operand. The outer edit
+    /// carries the pieces that name each original token.
+    pieces: Vec<Piece>,
 }
 
 impl Walk {
@@ -447,14 +451,98 @@ impl Walk {
             format!("{name}({left}, {right})")
         };
         let file_text = source_file_text(get_source_file_of_node(node));
+        let source = file_text.as_ref();
+        let start = skip_trivia(source, node.pos());
+        let left_start = skip_trivia(source, node.left().pos());
+        let left_end = node.left().end();
+        let right_start = skip_trivia(source, node.right().pos());
+        let right_end = node.right().end();
+        let op_start = skip_trivia(source, op.pos());
+        // Pieces of the replacement that were copied from the operands keep
+        // those original bytes. The call name and the parentheses are an
+        // atom on the operator: a diagnostic on the call names that token.
+        let mut pieces = Vec::new();
+        if assign {
+            push_piece(&mut pieces, &left, left_start, left_end, &nested);
+            pieces.push(Piece::Atom {
+                text: format!(" = {name}("),
+                original_start: op_start,
+                original_end: op.end(),
+            });
+            push_piece(&mut pieces, &left, left_start, left_end, &nested);
+            pieces.push(Piece::Atom {
+                text: ", ".to_owned(),
+                original_start: op_start,
+                original_end: op.end(),
+            });
+            push_piece(&mut pieces, &right, right_start, right_end, &nested);
+            pieces.push(Piece::Atom {
+                text: ")".to_owned(),
+                original_start: op_start,
+                original_end: op.end(),
+            });
+        } else {
+            pieces.push(Piece::Atom {
+                text: format!("{name}("),
+                original_start: op_start,
+                original_end: op.end(),
+            });
+            push_piece(&mut pieces, &left, left_start, left_end, &nested);
+            pieces.push(Piece::Atom {
+                text: ", ".to_owned(),
+                original_start: op_start,
+                original_end: op.end(),
+            });
+            push_piece(&mut pieces, &right, right_start, right_end, &nested);
+            pieces.push(Piece::Atom {
+                text: ")".to_owned(),
+                original_start: op_start,
+                original_end: op.end(),
+            });
+        }
         self.edits.push(Edit {
-            start: skip_trivia(file_text.as_ref(), node.pos()),
+            start,
             end: node.end(),
             text,
-            op_start: skip_trivia(file_text.as_ref(), op.pos()),
+            op_start,
             op_end: op.end(),
+            pieces,
         });
     }
+}
+
+/// One slice of a rewritten call.
+///
+/// `Copied` is author text. Its original range is the operand it came from,
+/// and nested edits inside that operand are already applied to `text`.
+/// `Atom` is generated (`__tsover_add(`, `, `, `)`). It maps to the operator.
+#[derive(Clone)]
+enum Piece {
+    Copied {
+        text: String,
+        original_start: i32,
+        original_end: i32,
+        nested: Vec<Edit>,
+    },
+    Atom {
+        text: String,
+        original_start: i32,
+        original_end: i32,
+    },
+}
+
+fn push_piece(pieces: &mut Vec<Piece>, text: &str, start: i32, end: i32, nested: &[Edit]) {
+    let local = nested
+        .iter()
+        .filter(|edit| edit.start >= start && edit.end <= end)
+        .cloned()
+        .collect::<Vec<_>>();
+    pieces.push(Piece::Copied {
+        text: text.to_owned(),
+        original_start: start,
+        original_end: end,
+        nested: local,
+    });
 }
 
 pub(crate) fn overload(kind: SyntaxKind) -> Option<(&'static str, bool)> {
@@ -472,18 +560,22 @@ fn apply_edits(original: &str, edits: &[Edit]) -> (String, Vec<Segment>) {
             continue;
         }
         push_verbatim(&mut code, &mut segments, original, cursor, edit.start);
-        let v0 = i32::try_from(code.len()).unwrap_or(i32::MAX);
-        code.push_str(&edit.text);
-        let v1 = i32::try_from(code.len()).unwrap_or(i32::MAX);
-        if v1 > v0 {
-            segments.push(Segment {
-                virtual_start: v0,
-                virtual_end: v1,
-                original_start: edit.op_start,
-                original_end: edit.op_end,
-                kind: Kind::ATOM,
-                features: Feature::ALL,
-            });
+        if edit.pieces.is_empty() {
+            let v0 = i32::try_from(code.len()).unwrap_or(i32::MAX);
+            code.push_str(&edit.text);
+            let v1 = i32::try_from(code.len()).unwrap_or(i32::MAX);
+            if v1 > v0 {
+                segments.push(Segment {
+                    virtual_start: v0,
+                    virtual_end: v1,
+                    original_start: edit.op_start,
+                    original_end: edit.op_end,
+                    kind: Kind::ATOM,
+                    features: Feature::ALL,
+                });
+            }
+        } else {
+            push_pieces(&mut code, &mut segments, &edit.pieces);
         }
         cursor = edit.end;
     }
@@ -495,6 +587,85 @@ fn apply_edits(original: &str, edits: &[Edit]) -> (String, Vec<Segment>) {
         i32::try_from(original.len()).unwrap_or(i32::MAX),
     );
     (code, segments)
+}
+
+fn pieces_text(nested: &[Edit]) -> String {
+    let mut out = String::new();
+    for edit in nested {
+        out.push_str(&edit.text);
+    }
+    out
+}
+
+fn push_pieces(code: &mut String, segments: &mut Vec<Segment>, pieces: &[Piece]) {
+    for piece in pieces {
+        match piece {
+            Piece::Atom {
+                text,
+                original_start,
+                original_end,
+            } => {
+                let v0 = i32::try_from(code.len()).unwrap_or(i32::MAX);
+                code.push_str(text);
+                let v1 = i32::try_from(code.len()).unwrap_or(i32::MAX);
+                if v1 > v0 {
+                    segments.push(Segment {
+                        virtual_start: v0,
+                        virtual_end: v1,
+                        original_start: *original_start,
+                        original_end: *original_end,
+                        kind: Kind::ATOM,
+                        features: Feature::ALL,
+                    });
+                }
+            }
+            Piece::Copied {
+                text,
+                original_start,
+                original_end,
+                nested,
+            } => {
+                if nested.is_empty() {
+                    let v0 = i32::try_from(code.len()).unwrap_or(i32::MAX);
+                    code.push_str(text);
+                    let v1 = i32::try_from(code.len()).unwrap_or(i32::MAX);
+                    if v1 > v0 {
+                        segments.push(Segment {
+                            virtual_start: v0,
+                            virtual_end: v1,
+                            original_start: *original_start,
+                            original_end: *original_end,
+                            kind: Kind::VERBATIM,
+                            features: Feature::ALL,
+                        });
+                    }
+                } else if pieces_text(nested) == *text {
+                    // `text` already contains the nested calls. Its pieces
+                    // name the author bytes, so they are emitted as they are.
+                    // An assignment copies the left operand twice, and each
+                    // copy carries the same pieces.
+                    for edit in nested {
+                        push_pieces(code, segments, &edit.pieces);
+                    }
+                    let _ = (original_start, original_end);
+                } else {
+                    let v0 = i32::try_from(code.len()).unwrap_or(i32::MAX);
+                    code.push_str(text);
+                    let v1 = i32::try_from(code.len()).unwrap_or(i32::MAX);
+                    if v1 > v0 {
+                        segments.push(Segment {
+                            virtual_start: v0,
+                            virtual_end: v1,
+                            original_start: *original_start,
+                            original_end: *original_end,
+                            kind: Kind::ATOM,
+                            features: Feature::ALL,
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn push_verbatim(
@@ -550,6 +721,7 @@ fn rewritten_slice(owner: Node, node: Node, nested: &[Edit]) -> String {
             text: edit.text.clone(),
             op_start: edit.op_start,
             op_end: edit.op_end,
+            pieces: edit.pieces.clone(),
         })
         .collect::<Vec<_>>();
     if local.is_empty() {

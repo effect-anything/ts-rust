@@ -223,3 +223,206 @@ fn transforms_do_not_share_a_parse() {
         "a transform left a file in the process parse store"
     );
 }
+
+/// Every captured case. `cases.jsonl` names the directory, the auto-naming
+/// flag and the status. A case matches when the build and `theirs.ts` are
+/// the same program (`structure::same`), which is what `capture_ours` writes
+/// `ours.ts` against. Externals-only snapshots compare the `externals` object.
+#[test]
+fn captured_cases_match_their_structure() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest = std::fs::read_to_string(root.join("cases.jsonl")).expect("cases.jsonl");
+    let mut ran = 0u32;
+    let mut failures = Vec::new();
+    for line in manifest.lines().filter(|line| !line.trim().is_empty()) {
+        let id = json_string(line, "id");
+        let status = json_string(line, "status");
+        assert_eq!(status, "captured", "{id} status {status}");
+        let dir = root.join("cases").join(&id);
+        let input = std::fs::read_to_string(dir.join("input.ts"))
+            .unwrap_or_else(|err| panic!("{id} input.ts: {err}"));
+        let theirs = std::fs::read_to_string(dir.join("theirs.ts"))
+            .unwrap_or_else(|err| panic!("{id} theirs.ts: {err}"));
+        let auto_naming = line.contains("\"autoNaming\":true");
+        let built = {
+            let _guard = BUILD.lock().unwrap_or_else(|error| error.into_inner());
+            TypegpuSession::build_with_auto_naming(auto_naming)
+                .transform(&format!("{id}.ts"), &input)
+                .code
+        };
+        let externals_only = id.starts_with("externals-")
+            && theirs.trim_start().starts_with('{')
+            && theirs.contains(": () =>")
+            && !theirs.contains("function")
+            && !theirs.contains("__TYPEGPU_META__");
+        let (left, right) = if externals_only {
+            (
+                theirs.trim().to_owned(),
+                externals_object(&built).to_owned(),
+            )
+        } else {
+            (theirs, built)
+        };
+        let pure = left.matches("#__PURE__").count() == right.matches("#__PURE__").count();
+        if left != right && !(pure && ts_ext_typegpu::structure::same(&left, &right, false)) {
+            failures.push(id);
+        }
+        ran += 1;
+    }
+    assert_eq!(ran, 62, "the manifest no longer has 62 cases");
+    assert!(
+        failures.is_empty(),
+        "{} cases differ: {}",
+        failures.len(),
+        failures.join(", ")
+    );
+}
+
+fn json_string(line: &str, key: &str) -> String {
+    let needle = format!("\"{key}\":\"");
+    let start = line
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no {key} in {line}"))
+        + needle.len();
+    line[start..].split('"').next().unwrap_or("").to_owned()
+}
+
+fn externals_object(text: &str) -> &str {
+    let Some(at) = text.find("externals:") else {
+        return text;
+    };
+    let Some(open) = text[at..].find('{') else {
+        return text;
+    };
+    let start = at + open;
+    let mut depth = 0i32;
+    for (index, ch) in text[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &text[start..start + index + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    text
+}
+
+/// Generated columns of a TypeGPU rewrite, mapped back to the author's
+/// line and column. Lines are 0-based. Columns are UTF-16 units, which is
+/// what a source map records.
+#[test]
+fn source_map_names_the_author_operator_and_its_operands() {
+    let input = "function add(a, b) {\n  \"use gpu\";\n  return a + b;\n}\n";
+    let out = rewrite_mapped(input);
+    let call = out.code.find("__tsover_add").expect("call");
+    assert_eq!(
+        original_line_col(&out, input, call),
+        line_col(input, input.find('+').unwrap()),
+        "the call name is the author's +"
+    );
+    let args = out.code.find("__tsover_add(a, b)").expect("arguments");
+    let arg_a = args + "__tsover_add(".len();
+    assert_eq!(
+        original_line_col(&out, input, arg_a),
+        line_col(input, input.rfind("a +").unwrap()),
+        "the left operand keeps its column"
+    );
+    let arg_b = out.code[args..].find(", b)").expect("right") + args + 2;
+    assert_eq!(
+        original_line_col(&out, input, arg_b),
+        line_col(input, input.rfind("b;").unwrap()),
+        "the right operand keeps its column"
+    );
+}
+
+#[test]
+fn source_map_names_each_operator_of_a_nested_call() {
+    let input = "function f(a, b) {\n  \"use gpu\";\n  return a + b * c;\n}\n";
+    let out = rewrite_mapped(input);
+    let add = out.code.find("__tsover_add").expect("add");
+    let mul = out.code.find("__tsover_mul").expect("mul");
+    assert_eq!(
+        original_line_col(&out, input, add),
+        line_col(input, input.find('+').unwrap())
+    );
+    assert_eq!(
+        original_line_col(&out, input, mul),
+        line_col(input, input.find('*').unwrap())
+    );
+    let c = out.code.find(", c)").expect("operand c") + 2;
+    assert_eq!(
+        original_line_col(&out, input, c),
+        line_col(input, input.find("* c").unwrap() + 2),
+        "a nested operand is not collapsed onto the outer operator"
+    );
+}
+
+#[test]
+fn source_map_names_both_sides_of_an_assignment() {
+    let input = "function f(a, b) {\n  \"use gpu\";\n  a += b;\n}\n";
+    let out = rewrite_mapped(input);
+    assert!(out.code.contains("a = __tsover_add(a, b)"), "{}", out.code);
+    let author_a = line_col(input, input.rfind("a +=").unwrap());
+    let mut found = 0;
+    let mut search = out.code.as_str();
+    let mut base = 0usize;
+    while let Some(at) = search.find("a") {
+        let pos = base + at;
+        if original_line_col(&out, input, pos) == author_a {
+            found += 1;
+        }
+        search = &search[at + 1..];
+        base = pos + 1;
+    }
+    assert!(
+        found >= 2,
+        "both copies of `a` map to the author assignment, found {found} in {}",
+        out.code
+    );
+}
+
+struct Mapped {
+    code: String,
+    segments: Vec<ts_goport::spanmap::Segment>,
+}
+
+fn rewrite_mapped(input: &str) -> Mapped {
+    let _guard = BUILD.lock().unwrap_or_else(|error| error.into_inner());
+    let rewritten = ts_goport::ext::tsover::rewrite_text("a.ts", input).expect("rewrite");
+    Mapped {
+        code: rewritten.code,
+        segments: rewritten.segments,
+    }
+}
+
+fn original_line_col(mapped: &Mapped, input: &str, generated: usize) -> (i32, i32) {
+    let offset = i32::try_from(generated).unwrap_or(0);
+    let segment = mapped
+        .segments
+        .iter()
+        .find(|segment| offset >= segment.virtual_start && offset < segment.virtual_end)
+        .unwrap_or_else(|| panic!("no segment at {generated} in {}", mapped.code));
+    let original = if segment.kind == ts_goport::spanmap::Kind::VERBATIM {
+        segment.original_start + (offset - segment.virtual_start)
+    } else {
+        segment.original_start
+    };
+    line_col(input, usize::try_from(original.max(0)).unwrap_or(0))
+}
+
+fn line_col(text: &str, offset: usize) -> (i32, i32) {
+    let offset = offset.min(text.len());
+    let line = text[..offset].bytes().filter(|byte| *byte == b'\n').count() as i32;
+    let start = text[..offset]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    (
+        line,
+        ts_goport::scanner_util::utf16_len(&text[start..offset]),
+    )
+}
