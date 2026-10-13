@@ -52,27 +52,6 @@ fn try_expand_fixture_scoped(
     // key on the export name, so dispatch on a copy whose head is that name.
     let aliased = aliased_nodes(file, nodes, index);
     let nodes = aliased.as_deref().unwrap_or(nodes);
-    if let Some(item) = match_do_steps(source, nodes, index) {
-        let steps: Vec<DoStep<'_>> = item
-            .steps
-            .iter()
-            .map(|(name, source)| DoStep { name, source })
-            .collect();
-        let end = node_end(
-            nodes
-                .get(item.next.saturating_sub(1))
-                .unwrap_or(&nodes[index]),
-        );
-        return Some(FixtureRewrite {
-            start: node_start(&nodes[index]),
-            end,
-            next: item.next + usize::from(operator_is(nodes.get(item.next), ";")),
-            // A `bind` name shadows an outer const. The captured file keeps
-            // that spelling; it does not print `left_1`.
-            text: expand_do_steps_hygiene(item.monad, &steps, &item.result),
-            binds: Vec::new(),
-        });
-    }
     if let Some(control) = match_jsx_block(source, nodes, index) {
         return Some(control);
     }
@@ -129,7 +108,6 @@ fn try_expand_fixture_scoped(
 const HANDWRITTEN_FORMS: &[(&str, &str)] = &[
     ("match", "match"),
     ("data", "data"),
-    ("doSteps", "doSteps"),
     ("when", "when"),
     ("each", "each"),
     ("effect", "effect"),
@@ -1110,53 +1088,6 @@ fn rename_param_nodes(
     }
 }
 
-/// `do-notation`: `export rec syntax doSteps` plus `syntax class Bind`.
-///
-/// A `Bind` step is `$name <- $source`. Each step becomes
-/// `$monad.flatMap($source, ($name) => ...)`, and a trailing `return $result`
-/// becomes `$monad.of($result)`. Nested `doSteps` calls are this function
-/// again, not text left for a later pass.
-#[cfg(test)]
-pub fn expand_do_steps(monad: &str, steps: &[DoStep<'_>], result: &str) -> String {
-    expand_do_steps_hygiene(monad, steps, result)
-}
-
-/// A step binder that the file already has (`const left`) is printed
-/// `left_1` in that arrow only. A free name stays.
-fn expand_do_steps_hygiene(monad: &str, steps: &[DoStep<'_>], result: &str) -> String {
-    let mut names = Vec::new();
-    for step in steps {
-        names.push((step.name, user_binder(step.name)));
-    }
-    let renamed_result = rename_params(result, &names);
-    let mut out = format!("{monad}.of({renamed_result})");
-    // The last flatMap callback keeps a trailing comma. An inner callback
-    // does not. Hygiene renames do not change that comma.
-    let count = steps.len();
-    for (nth, step) in steps.iter().rev().enumerate() {
-        let printed = names
-            .iter()
-            .find(|(name, _)| *name == step.name)
-            .map(|(_, printed)| printed.as_str())
-            .unwrap_or(step.name);
-        // Reverse order wraps the inner call first. The comma belongs on
-        // the outer call, which is the last wrap.
-        let comma = if nth + 1 == count { "," } else { "" };
-        out = format!(
-            "{monad}.flatMap({}, ({printed}) => {out}{comma})",
-            step.source
-        );
-    }
-    out
-}
-
-/// One `$name <- $source` step inside `doSteps`.
-#[derive(Clone, Copy, Debug)]
-pub struct DoStep<'a> {
-    pub name: &'a str,
-    pub source: &'a str,
-}
-
 /// `threading`: `export rec syntax (->)` / `(->>)`.
 ///
 /// Thread-first inserts the value as the first argument and recurses:
@@ -1224,37 +1155,6 @@ pub fn match_channel_stmt(source: &str, nodes: &[Syntax], index: usize) -> Optio
 pub struct ChannelStmt {
     pub op: String,
     pub left: String,
-}
-
-/// Split a `doSteps(monad) { steps; return result }` expression.
-pub fn match_do_steps<'a>(
-    source: &'a str,
-    nodes: &[Syntax],
-    index: usize,
-) -> Option<DoStepsItem<'a>> {
-    if !token_is(nodes.get(index), "doSteps") {
-        return None;
-    }
-    let args = group_children(nodes.get(index + 1), Delimiter::Paren)?;
-    let monad = args
-        .first()
-        .map(|node| sweetener_reader::slice(source, node).trim())
-        .filter(|text| !text.is_empty())?;
-    let body = group_interior(source, nodes.get(index + 2)?, Delimiter::Brace)?;
-    let (steps, result) = split_do_body(body)?;
-    Some(DoStepsItem {
-        monad,
-        steps,
-        result,
-        next: index + 3,
-    })
-}
-
-pub struct DoStepsItem<'a> {
-    pub monad: &'a str,
-    pub steps: Vec<(String, String)>,
-    pub result: String,
-    pub next: usize,
 }
 
 fn match_signal_read(
@@ -1630,26 +1530,6 @@ fn thread_calls(value: &str, steps: &[ThreadStep<'_>], first: bool) -> String {
     current
 }
 
-fn split_do_body(body: &str) -> Option<(Vec<(String, String)>, String)> {
-    let mut steps = Vec::new();
-    for line in body.lines() {
-        let line = line.trim().trim_end_matches(';').trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(result) = line.strip_prefix("return ") {
-            return Some((steps, result.trim().to_owned()));
-        }
-        let (name, source) = line.split_once("<-")?;
-        // `value <-;` is not a bind. The expression after `<-` is missing.
-        if source.trim().is_empty() {
-            return None;
-        }
-        steps.push((name.trim().to_owned(), source.trim().to_owned()));
-    }
-    None
-}
-
 fn upper_first(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
@@ -1761,42 +1641,6 @@ mod tests {
 
     #[test]
     fn channel_do_thread_and_jsx() {
-        let done = expand_do_steps(
-            "box",
-            &[
-                DoStep {
-                    name: "left",
-                    source: "box.of(2)",
-                },
-                DoStep {
-                    name: "right",
-                    source: "box.of(3)",
-                },
-            ],
-            "left + right",
-        );
-        assert_eq!(
-            crate::sweetener_hygiene::assign(&done, &mut [], false),
-            "box.flatMap(box.of(2), (left) => box.flatMap(box.of(3), (right) => box.of(left + right)),)"
-        );
-        let renamed = expand_do_steps_hygiene(
-            "box",
-            &[
-                DoStep {
-                    name: "left",
-                    source: "box.of(4)",
-                },
-                DoStep {
-                    name: "source",
-                    source: "box.of(6)",
-                },
-            ],
-            "left + source",
-        );
-        assert_eq!(
-            crate::sweetener_hygiene::assign(&renamed, &mut [], false),
-            "box.flatMap(box.of(4), (left) => box.flatMap(box.of(6), (source) => box.of(left + source)),)"
-        );
         assert_eq!(
             expand_thread_first(
                 "[1, 2, 3]",

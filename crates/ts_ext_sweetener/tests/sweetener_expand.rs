@@ -706,8 +706,8 @@ bind [c, d] = list;\n\
 ",
     );
     for piece in [
-        "class Point { x = 1;move(dx: number) { this.x += dx; } }",
-        "interface Size { width: number;height?: number; }",
+        "class Point { x = 1; move(dx: number) { this.x += dx; } }",
+        "interface Size { width: number; height?: number; }",
         "const { a, b } = pair;",
         "const [c, d] = list;",
     ] {
@@ -1292,4 +1292,41 @@ fn macro_module_import_diagnostics() {
         ["SWR5005"]
     );
     fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `doSteps` is an ordinary declarative macro now: the `tt` repetition keeps
+/// each step's `;`, the template joins steps the way the source did, and a
+/// use that ends on its brace body inside an object literal is finished
+/// even with the property's comma after it.
+#[test]
+fn do_steps_expand_through_the_generic_rules() {
+    let code = r#"syntax class Bind {
+  fields { name: binding; source: expr; }
+  rule { $name:binding <- $source:expr; }
+}
+rec syntax doSteps:expr {
+  rule { doSteps($monad:expr) { return $result:expr; } } => { $monad.of($result) }
+  rule { doSteps($monad:expr) { $step:Bind $($rest:tt)+ } }
+  bind $step.name in $rest as lexical value
+  => { $monad.flatMap($step.source, ($step.name) => doSteps($monad) { $($rest)+ }) }
+}
+const o = {
+  nested: doSteps(box) {
+    left <- box.of(4);
+    right <- box.of(6);
+    return left + right;
+  },
+};
+"#;
+    let out = expand(ExpandRequest {
+        filename: "do.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    let flat: String = out.code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("nested: box.flatMap(box.of(4), (left) => box.flatMap(box.of(6), (right) => box.of(left + right))),"),
+        "{flat}"
+    );
 }

@@ -1753,10 +1753,12 @@ impl<'a> Printer<'a> {
                 let finished_call = call_shaped
                     && matched.next > 0
                     && nodes.get(matched.next - 1).is_some_and(|node| {
+                        // `doSteps(box) { ... }` ends on its brace body, so
+                        // the comma after it is the enclosing list's.
                         matches!(
                             node,
                             Syntax::Group {
-                                delimiter: Delimiter::Paren,
+                                delimiter: Delimiter::Paren | Delimiter::Brace,
                                 ..
                             }
                         )
@@ -2107,10 +2109,11 @@ impl<'a> Printer<'a> {
         sep: Option<&str>,
         captures: &HashMap<String, Capture>,
     ) {
+        let inferred = sep.is_none();
         let (inner, sep) = rep_layout(inner, sep);
         let (path, rows) = rep_rows_for(&inner, captures);
         for (index, row) in rows.iter().enumerate() {
-            push_sep(out, index, sep.as_deref());
+            push_row_sep(out, index, row, inferred, sep.as_deref());
             let scoped = with_rep_index(rep_row_scope(captures, &path, row), index);
             self.render_core(out, &inner, &scoped);
         }
@@ -8015,6 +8018,7 @@ fn match_pats_cont(
                 }
                 let mut many = Vec::new();
                 let saved_start = *cursor;
+                let mut row_end: Option<usize> = None;
                 // A nested `$($parameter ...),*` reuses the head's hole names.
                 // Matching into the outer map overwrites `parameter`, so the
                 // last segment is the only one left. Each iteration matches
@@ -8069,6 +8073,31 @@ fn match_pats_cont(
                             if let Capture::Text(text) = value {
                                 *text = text.trim().trim_end_matches(',').trim().to_owned();
                             }
+                        }
+                    }
+                    if sep.is_none() {
+                        // The source between two separator-less steps
+                        // (`map(f), filter(g)` or `return x` `;`) is how the
+                        // template joins them again.
+                        let mut first = saved;
+                        skip_comments(nodes, &mut first);
+                        if let (Some(prev), Some(node)) = (row_end, nodes.get(first)) {
+                            if *cursor > first {
+                                one.push((
+                                    REP_GAP.to_owned(),
+                                    Capture::Text(
+                                        sweetener_reader::slice_range(
+                                            source,
+                                            prev,
+                                            node_start(node),
+                                        )
+                                        .to_owned(),
+                                    ),
+                                ));
+                            }
+                        }
+                        if *cursor > first {
+                            row_end = Some(node_end(&nodes[*cursor - 1]));
                         }
                     }
                     many.push(one);
@@ -8543,7 +8572,9 @@ fn take_hole(
             // whole call; a standalone `$marker:token` is exactly one token
             // and must not swallow the `/` after it.
             if in_rep {
-                take_token_tree(source, nodes, index).or_else(|| take_ident(nodes, index))
+                take_token_tree(source, nodes, index)
+                    .or_else(|| take_ident(nodes, index))
+                    .or_else(|| take_semicolon(nodes, index))
             } else {
                 take_ident(nodes, index).or_else(|| take_one_token(source, nodes, index))
             }
@@ -8842,6 +8873,16 @@ fn take_token_tree(
     }
     let end = node_end(&nodes[end_index - 1]);
     Some((source[start..end].to_owned(), end, end_index))
+}
+
+/// `;` as one token tree. Upstream `tt` reads any single token, so the
+/// statements after a `doSteps` step (`$($rest:tt)+`) keep their
+/// semicolons; the greedy step reader stops in front of one.
+fn take_semicolon(nodes: &[Syntax], cursor: usize) -> Option<(String, usize, usize)> {
+    let mut index = cursor;
+    skip_comments(nodes, &mut index);
+    let node = nodes.get(index)?;
+    operator_is(Some(node), ";").then(|| (";".to_owned(), node_end(node), index + 1))
 }
 
 /// One token or group, whatever its kind. A standalone `token` hole uses
@@ -10707,6 +10748,7 @@ fn render_keeping_rep(
     sep: Option<&str>,
     captures: &HashMap<String, Capture>,
 ) {
+    let sep_was_inferred = sep.is_none();
     let (inner, sep) = rep_layout(inner, sep);
     let (path, rows) = rep_rows_for(&inner, captures);
     if rows.is_empty() {
@@ -10720,7 +10762,7 @@ fn render_keeping_rep(
         return;
     }
     for (index, row) in rows.iter().enumerate() {
-        push_sep(out, index, sep.as_deref());
+        push_row_sep(out, index, row, sep_was_inferred, sep.as_deref());
         let scoped = with_rep_index(rep_row_scope(captures, &path, row), index);
         render_keeping_holes(out, &inner, &scoped);
     }
@@ -11080,14 +11122,19 @@ fn render_rep(
     classes: &[SyntaxClass],
     protected: &mut Vec<(usize, usize)>,
 ) {
+    let inferred = sep.is_none();
     let (inner, sep) = rep_layout(inner, sep);
     let (path, rows) = rep_rows_for(&inner, captures);
     for (index, row) in rows.iter().enumerate() {
-        push_sep(out, index, sep.as_deref());
+        push_row_sep(out, index, row, inferred, sep.as_deref());
         let scoped = with_rep_index(rep_row_scope(captures, &path, row), index);
         render(out, &inner, &scoped, classes, protected);
     }
 }
+
+/// Row key holding the source text between a separator-less repetition
+/// step and the one before it.
+const REP_GAP: &str = "\u{1}gap";
 
 /// `$($rest:tt,)+` writes the comma inside the repetition. Rendering it
 /// there glues `), ,` onto the next step. The comma is the separator.
@@ -11108,6 +11155,32 @@ fn rep_layout(inner: &[Tpl], sep: Option<&str>) -> (Vec<Tpl>, Option<String>) {
         (inner[..inner.len() - 1].to_vec(), Some(",".to_owned()))
     } else {
         (inner.to_vec(), sep.map(str::to_owned))
+    }
+}
+
+/// The separator in front of repetition row `index`. A template that wrote
+/// no separator joins steps the way the source did: a comma stays a comma,
+/// whitespace stays a space, and adjacent tokens (`x` `;`) stay adjacent.
+fn push_row_sep(
+    out: &mut String,
+    index: usize,
+    row: &[(String, Capture)],
+    inferred: bool,
+    sep: Option<&str>,
+) {
+    let gap = row.iter().find_map(|(name, capture)| match capture {
+        Capture::Text(text) if name == REP_GAP => Some(text.as_str()),
+        _ => None,
+    });
+    match gap {
+        Some(gap) if index > 0 && inferred => {
+            if gap.contains(',') {
+                out.push_str(", ");
+            } else if !gap.is_empty() {
+                out.push(' ');
+            }
+        }
+        _ => push_sep(out, index, sep),
     }
 }
 
