@@ -87,33 +87,51 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     let budget = super::sweetener_budget::configured();
     let stack = super::sweetener_budget::stack_bytes(&budget);
     let code = request.code;
-    std::thread::scope(|scope| {
+    let (filename, phase) = (request.filename, request.phase);
+    if let Some(hit) = super::sweetener_cache::lookup_file(filename, code, phase, &budget) {
+        return hit;
+    }
+    let cache_budget = budget.clone();
+    let joined = std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("sweetener-expand".to_owned())
             .stack_size(stack)
             .spawn_scoped(scope, move || {
-                super::sweetener_budget::with_budget(budget, || {
+                super::sweetener_cache::take_probes();
+                let caught = super::sweetener_budget::with_budget(budget, || {
                     // Catch inside this thread. Its invocation stack is a
                     // thread local, so the span has to be read before the
                     // thread (and that local) goes away, and another
                     // expansion running concurrently cannot see it.
-                    std::panic::catch_unwind(|| expand_here(request)).unwrap_or_else(|panic| {
+                    std::panic::catch_unwind(|| expand_here(request)).map_err(|panic| {
                         let at = take_panicked_invocation();
                         internal_error(code, panic.as_ref(), at)
                     })
-                })
+                });
+                (caught, super::sweetener_cache::take_probes())
             })
             .ok()
             .map(|handle| handle.join())
-    })
-    .map_or_else(
-        || crate::unchanged(code),
-        |joined| {
-            // Only a panic outside the catch above lands here, which is
-            // before any invocation was entered.
-            joined.unwrap_or_else(|panic| internal_error(code, panic.as_ref(), (0, 0)))
-        },
-    )
+    });
+    match joined {
+        None => crate::unchanged(code),
+        // Only a panic outside the catch above lands here, which is
+        // before any invocation was entered.
+        Some(Err(panic)) => internal_error(code, panic.as_ref(), (0, 0)),
+        // A caught expander panic is reported but never cached.
+        Some(Ok((Err(internal), _))) => internal,
+        Some(Ok((Ok(expansion), probes))) => {
+            super::sweetener_cache::store_file(
+                filename,
+                code,
+                phase,
+                &cache_budget,
+                &expansion,
+                probes,
+            );
+            expansion
+        }
+    }
 }
 
 /// An expander bug must not pass the file through silently: the author
@@ -148,7 +166,7 @@ fn clamp_invocation(code: &str, (start, end): (u32, u32)) -> (u32, u32) {
     (start, end)
 }
 
-fn expand_here(request: ExpandRequest<'_>) -> Expansion {
+pub(crate) fn expand_here(request: ExpandRequest<'_>) -> Expansion {
     OWNER_FILTER.with(|filter| filter.borrow_mut().take());
     let first = expand_pass(&request, None);
     // Runtime imports belong to the module that needs them. Upstream prints
@@ -1202,7 +1220,10 @@ impl<'a> Printer<'a> {
 
     /// `${... |> callee}` is still an operator use. The reader keeps the
     /// whole template as one string, so the infix walk never sees it.
-    fn expand_template_literal(&mut self, raw: &str) -> Option<String> {
+    /// The result carries pieces: the template text and every capture a
+    /// hole's expansion prints map back to their own bytes of `raw`, which
+    /// starts at `base` in this printer's source.
+    fn expand_template_literal(&mut self, raw: &str, base: u32) -> Option<(String, Vec<Piece>)> {
         if !raw.starts_with('`') || !raw.contains("${") {
             return None;
         }
@@ -1210,45 +1231,61 @@ impl<'a> Printer<'a> {
             return None;
         }
         let mut out = String::new();
+        let mut pieces: Vec<Piece> = Vec::new();
+        let copy = |out: &mut String, pieces: &mut Vec<Piece>, from: usize, to: usize| {
+            if from < to {
+                pieces.push((out.len(), out.len() + (to - from), base + u32_at(from)));
+                out.push_str(&raw[from..to]);
+            }
+        };
         let bytes = raw.as_bytes();
         let mut index = 0;
+        let mut plain = 0;
         let mut changed = false;
-        while index < bytes.len() {
-            if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'{') {
+        while index < raw.len() {
+            if raw[index..].starts_with("${") {
                 let start = index;
                 index += 2;
                 let mut depth = 1i32;
                 let body_at = index;
-                while index < bytes.len() && depth > 0 {
-                    match bytes[index] {
-                        b'{' => depth += 1,
-                        b'}' => depth -= 1,
+                while index < raw.len() && depth > 0 {
+                    let ch = raw[index..].chars().next().unwrap_or('\0');
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
                         _ => {}
                     }
-                    index += 1;
+                    index += ch.len_utf8();
                 }
                 if depth != 0 {
-                    out.push_str(&raw[start..]);
+                    index = bytes.len();
                     break;
                 }
-                let body = &raw[body_at..index - 1];
+                let body = &raw[body_at..index - '}'.len_utf8()];
                 if body.contains("|>") || self.replacement_needs_expand(body) {
-                    let expanded = self.expand_fragment(body);
+                    let mark = TRACES.with(|traces| traces.borrow().len());
+                    let (expanded, inner) = self.expand_fragment(body);
+                    let at = base + u32_at(body_at);
+                    self.lift_traces(mark, &[(0, body.len(), at)], at, at + u32_at(body.len()));
                     if expanded != body {
                         changed = true;
                     }
-                    out.push_str("${");
+                    copy(&mut out, &mut pieces, plain, start + 2);
+                    let offset = out.len();
+                    pieces.extend(
+                        inner
+                            .into_iter()
+                            .map(|(from, to, source)| (offset + from, offset + to, at + source)),
+                    );
                     out.push_str(&expanded);
-                    out.push('}');
-                } else {
-                    out.push_str(&raw[start..index]);
+                    plain = index - 1;
                 }
                 continue;
             }
-            out.push(bytes[index] as char);
-            index += 1;
+            index += raw[index..].chars().next().map_or(1, char::len_utf8);
         }
-        changed.then_some(out)
+        copy(&mut out, &mut pieces, plain, index.min(bytes.len()));
+        changed.then_some((out, pieces))
     }
 
     /// Every definition of `name` is an `:item` macro.
@@ -1314,12 +1351,15 @@ impl<'a> Printer<'a> {
             }
             Syntax::String { span, raw } => {
                 self.copy_until(span.start as usize);
-                let rewritten = self
-                    .expand_template_literal(raw)
-                    .unwrap_or_else(|| rewrite_specifier(raw));
+                let (rewritten, pieces) =
+                    self.expand_template_literal(raw, span.start).map_or_else(
+                        || (rewrite_specifier(raw), None),
+                        |(text, pieces)| (text, Some(pieces)),
+                    );
                 if rewritten == *raw {
                     self.copy_until(span.end as usize);
                 } else {
+                    self.pending_pieces = pieces;
                     self.emit(span.start, span.end, &rewritten, SegmentKind::Atom);
                     self.last_original = span.end as usize;
                 }
@@ -1453,7 +1493,8 @@ impl<'a> Printer<'a> {
         next: usize,
         name: &str,
         expanded: &str,
-    ) -> Option<(String, usize, usize)> {
+        pieces: &[Piece],
+    ) -> Option<(String, usize, usize, Vec<Piece>)> {
         if self.infix_associativity(name) != Associativity::Left
             || operator_spelling(nodes.get(next)?) != Some(name)
         {
@@ -1467,9 +1508,23 @@ impl<'a> Printer<'a> {
             stop += 1;
         }
         let end = node_end(&nodes[stop - 1]);
-        let rest = sweetener_reader::slice_range(self.source, node_start(&nodes[next]), end);
+        let rest_at = node_start(&nodes[next]);
+        let rest = sweetener_reader::slice_range(self.source, rest_at, end);
         let combined = format!("{expanded} {rest}");
-        Some((self.expand_replacement(&combined), end, stop))
+        // The combined operand copies the expansion so far (through its
+        // own pieces) and the rest of the chain as written.
+        let mut copied = pieces.to_vec();
+        copied.push((expanded.len() + 1, combined.len(), u32_at(rest_at)));
+        let mark = TRACES.with(|traces| traces.borrow().len());
+        let (folded, inner) = self.expand_replacement_mapped(&combined);
+        let start = copied
+            .iter()
+            .map(|piece| piece.2)
+            .min()
+            .unwrap_or(u32_at(rest_at));
+        self.lift_traces(mark, &copied, start, u32_at(end));
+        let pieces = super::sweetener_origins::compose(&inner, &copied);
+        Some((folded, end, stop, pieces))
     }
 
     /// Upstream's first two ways to read a macro operator's right operand
@@ -1661,15 +1716,13 @@ impl<'a> Printer<'a> {
                     let mut next = matched.next;
                     // `a |> f() |> g()` is left-associative: the expansion
                     // of `a |> f()` is the left operand of the next `|>`.
-                    if let Some((folded, chain_end, resume)) =
-                        self.fold_left_chain(nodes, next, &name, &expanded)
+                    if let Some((folded, chain_end, resume, folded_pieces)) =
+                        self.fold_left_chain(nodes, next, &name, &expanded, &pieces)
                     {
-                        // The chain re-expanded this text as an operand;
-                        // its copies are not tracked through that.
                         expanded = folded;
                         end = chain_end;
                         next = resume;
-                        pieces.clear();
+                        pieces = folded_pieces;
                     }
                     self.copy_until(start as usize);
                     self.pending_pieces = Some(pieces);
@@ -1728,13 +1781,13 @@ impl<'a> Printer<'a> {
                 // A specially read right operand stopped at the next use of
                 // the operator; the chain continues from this expansion.
                 if read_specially
-                    && let Some((folded, chain_end, chain_next)) =
-                        self.fold_left_chain(nodes, resume, &name, &expanded)
+                    && let Some((folded, chain_end, chain_next, folded_pieces)) =
+                        self.fold_left_chain(nodes, resume, &name, &expanded, &expanded_pieces)
                 {
                     expanded = folded;
                     emit_end = chain_end;
                     resume = chain_next;
-                    expanded_pieces.clear();
+                    expanded_pieces = folded_pieces;
                 }
                 self.pending_pieces = Some(expanded_pieces);
                 self.emit(start, u32_at(emit_end), &expanded, SegmentKind::Atom);
@@ -2132,7 +2185,7 @@ impl<'a> Printer<'a> {
         }
     }
 
-    fn expand_fragment(&mut self, fragment: &str) -> String {
+    fn expand_fragment(&mut self, fragment: &str) -> (String, Vec<Piece>) {
         let owned = fragment.to_owned();
         let read = sweetener_reader::read_syntax(&owned);
         let mut nested = Printer {
@@ -2171,7 +2224,8 @@ impl<'a> Printer<'a> {
         if nested.failed {
             self.failed = true;
         }
-        nested.out
+        let pieces = nested.copy_pieces();
+        (nested.out, pieces)
     }
 
     /// A node `try_form` might rewrite. Ordinary identifiers, strings, and
@@ -2421,12 +2475,6 @@ impl<'a> Printer<'a> {
             let scoped = with_rep_index(rep_row_scope(captures, &path, row), index);
             self.render_core(out, &inner, &scoped, pieces);
         }
-    }
-
-    /// Expand the macros a rendered template still contains, then give
-    /// each `#parameterize` region its parameter, innermost first.
-    fn expand_replacement(&mut self, replacement: &str) -> String {
-        self.expand_replacement_mapped(replacement).0
     }
 
     /// The replacement with the macros in it expanded, and the ranges of
@@ -2886,7 +2934,20 @@ impl<'a> Printer<'a> {
         // Curried `function` prints ordinary overloads. An expression
         // `function(...)` is the same macro. Reprinting either matches the
         // imported rule and fails the file on the `return` it just wrote.
-        let mut expanded = self.expand_replacement(&rewritten.text);
+        // A procedural form builds its text from the invocation's own
+        // tokens. Their order survives, so the rewrite's token diff against
+        // the invocation says which output tokens copy which input tokens.
+        let invocation = sweetener_reader::slice_range(self.source, rewritten.start, rewritten.end);
+        let own = super::sweetener_origins::carry(
+            invocation,
+            &rewritten.text,
+            &[(0, invocation.len(), u32_at(rewritten.start))],
+        );
+        let mark = TRACES.with(|traces| traces.borrow().len());
+        let (mut expanded, inner) = self.expand_replacement_mapped(&rewritten.text);
+        self.lift_traces(mark, &own, u32_at(rewritten.start), u32_at(rewritten.end));
+        let mut pieces = super::sweetener_origins::compose(&inner, &own);
+        let before = expanded.clone();
         // Channel operators name `put` and `take`. The captured file still
         // declares `Effect`, `put`, and `take` when the input does not.
         // The hygiene input is that case. Do not invent them twice.
@@ -2908,6 +2969,10 @@ impl<'a> Printer<'a> {
         if expanded.contains("type Effect =\n  |") {
             expanded = expanded.replace("type Effect =\n  |", "type Effect =\n ");
         }
+        if expanded != before {
+            pieces = super::sweetener_origins::carry(&before, &expanded, &pieces);
+        }
+        self.pending_pieces = Some(pieces);
         self.emit(
             u32_at(rewritten.start),
             u32_at(rewritten.end),
@@ -3813,8 +3878,7 @@ fn load_macros(
     }
     for import in imports {
         TOP_IMPORT.with(|top| top.set(Some(import.span)));
-        let canonical = Path::new(filename)
-            .canonicalize()
+        let canonical = super::sweetener_cache::canonicalize(Path::new(filename))
             .unwrap_or_else(|_| PathBuf::from(filename));
         LOAD_STACK.with(|stack| *stack.borrow_mut() = vec![canonical]);
         load_syntax_module(
@@ -3849,7 +3913,7 @@ fn load_syntax_module(
         return;
     };
     let path = from_dir.join(body);
-    let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let key = super::sweetener_cache::canonicalize(&path).unwrap_or_else(|_| path.clone());
     // SWR5005: a module that imports itself, through any chain.
     let cycle = LOAD_STACK.with(|stack| {
         let stack = stack.borrow();
@@ -3941,15 +4005,14 @@ fn load_syntax_module_body(
     path: PathBuf,
     body: &str,
 ) {
-    let text = std::fs::read_to_string(&path).ok();
+    let text = super::sweetener_cache::read_file(&path);
     let Some(text) = text else {
         if !report {
             return;
         }
         // Upstream reports once per import, at its first binding, naming
         // the importer by its absolute path.
-        let importer_name = importer
-            .canonicalize()
+        let importer_name = super::sweetener_cache::canonicalize(importer)
             .unwrap_or_else(|_| importer.to_path_buf());
         let mut start = import.span.start;
         let mut end = import.span.end;
@@ -3986,12 +4049,12 @@ fn load_syntax_module_body(
         });
         return;
     };
-    if let Ok(canonical) = path.canonicalize() {
-        loaded.dependencies.push(canonical.display().to_string());
-    } else {
-        loaded.dependencies.push(path.display().to_string());
-    }
-    let read = sweetener_reader::read_syntax(&text);
+    let dependency = super::sweetener_cache::canonicalize(&path).map_or_else(
+        |_| path.display().to_string(),
+        |canonical| canonical.display().to_string(),
+    );
+    loaded.dependencies.push(dependency.clone());
+    let read = super::sweetener_cache::read_module(&text);
     let mut found = HashMap::<String, Macro>::new();
     collect_macros(&text, &read.children, &mut found);
     let owner: Rc<str> = Rc::from(path.display().to_string());
@@ -5552,45 +5615,50 @@ fn expression_form(text: &str) -> Option<&'static str> {
         "await" => return Some("await"),
         _ => {}
     }
-    let bytes = text.as_bytes();
     let mut depth = 0i32;
-    let mut quote: Option<u8> = None;
+    let mut quote: Option<char> = None;
     let mut question = false;
     let mut index = 0;
-    while index < bytes.len() {
-        let ch = bytes[index];
+    while index < text.len() {
+        let ch = text[index..].chars().next().unwrap_or('\0');
         if let Some(q) = quote {
-            if ch == b'\\' {
-                index += 1;
+            index += ch.len_utf8();
+            if ch == '\\' {
+                if let Some(escaped) = text[index..].chars().next() {
+                    index += escaped.len_utf8();
+                }
             } else if ch == q {
                 quote = None;
             }
-            index += 1;
             continue;
         }
+        let next = text[index + ch.len_utf8()..].chars().next();
         match ch {
-            b'"' | b'\'' | b'`' => quote = Some(ch),
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => depth -= 1,
+            '"' | '\'' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
             _ if depth != 0 => {}
-            b'=' => {
-                let next = bytes.get(index + 1).copied();
-                let prev = index.checked_sub(1).map(|i| bytes[i]);
-                if next == Some(b'>') {
+            '=' => {
+                if next == Some('>') {
                     return Some("arrow");
                 }
-                if next == Some(b'=') {
-                    index += 2;
-                    while bytes.get(index) == Some(&b'=') {
-                        index += 1;
+                if next == Some('=') {
+                    index += ch.len_utf8() + next.map_or(0, char::len_utf8);
+                    while text[index..].starts_with('=') {
+                        index += '='.len_utf8();
                     }
                     continue;
                 }
-                if matches!(prev, Some(b'!' | b'<' | b'>' | b'=')) {
+                let prev = text[..index].chars().next_back();
+                if matches!(prev, Some('!' | '<' | '>' | '=')) {
                     // `!=`, `<=`, `>=`: comparisons, unless `<<=`/`>>=`.
-                    let compound = index >= 2 && bytes[index - 2] == prev.unwrap_or(0);
+                    let compound = text[..index]
+                        .chars()
+                        .rev()
+                        .nth(1)
+                        .is_some_and(|earlier| earlier == prev.unwrap_or('\0'));
                     if !compound {
-                        index += 1;
+                        index += ch.len_utf8();
                         continue;
                     }
                 }
@@ -5598,26 +5666,27 @@ fn expression_form(text: &str) -> Option<&'static str> {
                     return Some("assignment");
                 }
             }
-            b'?' => {
-                let next = bytes.get(index + 1).copied();
-                if next == Some(b'?') {
-                    index += 2;
+            '?' => {
+                if next == Some('?') {
+                    index += ch.len_utf8() + next.map_or(0, char::len_utf8);
                     continue;
                 }
-                if next == Some(b'.') && !bytes.get(index + 2).is_some_and(u8::is_ascii_digit) {
-                    index += 2;
+                let after = text[index + ch.len_utf8() + next.map_or(0, char::len_utf8)..]
+                    .chars()
+                    .next();
+                if next == Some('.') && !after.is_some_and(|ch| ch.is_ascii_digit()) {
+                    index += ch.len_utf8() + next.map_or(0, char::len_utf8);
                     continue;
                 }
                 question = true;
             }
-            b':' if question => return Some("conditional"),
+            ':' if question => return Some("conditional"),
             _ => {}
         }
-        index += 1;
+        index += ch.len_utf8();
     }
     None
 }
-
 fn refine_spellings(captures: &HashMap<String, Capture>, field: &str) -> Vec<String> {
     let Some(value) = captures.get(field) else {
         return Vec::new();
@@ -6635,17 +6704,15 @@ fn directive_inside_template(source: &str, cursor: usize, at: usize) -> bool {
     }
     let before = &source[cursor..at];
     let mut ticks = 0usize;
-    let bytes = before.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            index += 2;
+    let mut chars = before.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let _ = chars.next();
             continue;
         }
-        if bytes[index] == b'`' {
+        if ch == '`' {
             ticks += 1;
         }
-        index += 1;
     }
     ticks % 2 == 1
 }
@@ -7468,12 +7535,11 @@ fn each_line_after(source: &str, at: usize) -> Option<Span> {
     let nl = rest.find('\n')?;
     let line_start = at + nl + 1;
     let mut end = line_start;
-    while source
-        .as_bytes()
-        .get(end)
-        .is_some_and(|byte| *byte != b'\n')
-    {
-        end += 1;
+    while let Some(ch) = source[end..].chars().next() {
+        if ch == '\n' {
+            break;
+        }
+        end += ch.len_utf8();
     }
     // The missing brace is the end of that line. A span on `<` is the
     // element, not the failure.
@@ -12283,12 +12349,11 @@ fn substitute_nodes(
 
 fn substitute_template_literal(raw: &str, captures: &HashMap<String, Capture>) -> String {
     let mut out = String::new();
-    let bytes = raw.as_bytes();
     let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'#' && raw[index..].starts_with("#text") {
+    while index < raw.len() {
+        if raw[index..].starts_with("#text") {
             let after = index + "#text".len();
-            if bytes.get(after) == Some(&b'(') {
+            if raw[after..].starts_with('(') {
                 if let Some(end) = matching_paren(&raw[after + 1..]) {
                     let body = raw[after + 1..after + 1 + end].trim();
                     let name = body.strip_prefix('$').unwrap_or(body);
@@ -12300,7 +12365,7 @@ fn substitute_template_literal(raw: &str, captures: &HashMap<String, Capture>) -
                 }
             }
         }
-        if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'(') {
+        if raw[index..].starts_with("$(") {
             if let Some(end) = matching_paren(&raw[index + 2..]) {
                 let body = &raw[index + 2..index + 2 + end];
                 let after = index + 2 + end + 1;
@@ -12313,7 +12378,7 @@ fn substitute_template_literal(raw: &str, captures: &HashMap<String, Capture>) -
                 }
             }
         }
-        if bytes[index] == b'$' {
+        if raw[index..].starts_with('$') {
             let rest = &raw[index + 1..];
             let name: String = rest
                 .chars()
@@ -13050,10 +13115,9 @@ fn rename_template_literal(
     base: usize,
 ) -> String {
     let mut out = String::new();
-    let bytes = raw.as_bytes();
     let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'{') {
+    while index < raw.len() {
+        if raw[index..].starts_with("${") {
             let start = index + 2;
             if let Some(end) = matching_brace(&raw[start..]) {
                 let body = &raw[start..start + end];
@@ -13068,8 +13132,9 @@ fn rename_template_literal(
                 continue;
             }
         }
-        out.push(bytes[index] as char);
-        index += 1;
+        let ch = raw[index..].chars().next().unwrap_or('\u{FFFD}');
+        out.push(ch);
+        index += ch.len_utf8();
     }
     out
 }
@@ -13348,17 +13413,16 @@ fn collect_free_idents(template: &[Tpl], names: &mut std::collections::HashSet<S
 }
 
 fn idents_in_text(text: &str, names: &mut std::collections::HashSet<String>) {
-    let bytes = text.as_bytes();
     let mut index = 0;
-    while index < bytes.len() {
-        let ch = bytes[index] as char;
+    while index < text.len() {
+        let ch = text[index..].chars().next().unwrap_or('\0');
         if ch == '_' || ch.is_ascii_alphabetic() {
             let start = index;
-            index += 1;
-            while index < bytes.len() {
-                let next = bytes[index] as char;
+            index += ch.len_utf8();
+            while index < text.len() {
+                let next = text[index..].chars().next().unwrap_or('\0');
                 if next == '_' || next.is_ascii_alphanumeric() {
-                    index += 1;
+                    index += next.len_utf8();
                 } else {
                     break;
                 }
@@ -13369,7 +13433,7 @@ fn idents_in_text(text: &str, names: &mut std::collections::HashSet<String>) {
             }
             continue;
         }
-        index += 1;
+        index += ch.len_utf8();
     }
 }
 

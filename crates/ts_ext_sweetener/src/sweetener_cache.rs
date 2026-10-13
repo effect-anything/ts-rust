@@ -10,8 +10,9 @@
 //! - **Whole files.** An expansion is memoized by (filename, phase,
 //!   budget, code) and reused only while every macro module it read still
 //!   has the content it had then. An expansion that failed to resolve a
-//!   module (`SWR5002`) or listed a dependency it did not read is not
-//!   stored, since a file appearing later could change it.
+//!   module is validated the same way: every read and `canonicalize` it
+//!   made, misses included, must observe the same result again, so a
+//!   created, removed or retargeted file invalidates it.
 //!
 //! Hits return exactly what a fresh expansion returns; the cache tests
 //! compare them field by field.
@@ -39,17 +40,73 @@ fn modules() -> &'static Mutex<HashMap<ModuleKey, Arc<ReadSyntax>>> {
     MODULES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// One filesystem observation an expansion depended on. Misses count: a
+/// file that did not exist then and does now changes resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// `read_to_string(path)`: hash of the text, `None` when it failed.
+    Read(std::path::PathBuf, Option<u64>),
+    /// `canonicalize(path)`: the target, `None` when it failed.
+    Canonical(std::path::PathBuf, Option<std::path::PathBuf>),
+}
+
+impl Probe {
+    fn observe_read(path: &std::path::Path) -> (Self, Option<String>) {
+        let text = std::fs::read_to_string(path).ok();
+        (
+            Self::Read(path.to_path_buf(), text.as_deref().map(hash_text)),
+            text,
+        )
+    }
+
+    fn observe_canonical(path: &std::path::Path) -> Self {
+        Self::Canonical(path.to_path_buf(), path.canonicalize().ok())
+    }
+
+    fn still_holds(&self) -> bool {
+        match self {
+            Self::Read(path, _) => Self::observe_read(path).0 == *self,
+            Self::Canonical(path, _) => Self::observe_canonical(path) == *self,
+        }
+    }
+}
+
 thread_local! {
-    /// Content hashes of the modules this thread's expansion read.
-    static READ_HASHES: std::cell::RefCell<Vec<(String, u64)>> =
+    /// Filesystem observations this thread's expansion made.
+    static PROBES: std::cell::RefCell<Vec<Probe>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+fn record(probe: Probe) {
+    PROBES.with(|probes| {
+        let mut probes = probes.borrow_mut();
+        if !probes.contains(&probe) {
+            probes.push(probe);
+        }
+    });
+}
+
+/// `std::fs::read_to_string`, recorded (hit or miss) for memo validation.
+pub fn read_file(path: &std::path::Path) -> Option<String> {
+    let (probe, text) = Probe::observe_read(path);
+    record(probe);
+    text
+}
+
+/// `Path::canonicalize`, recorded for memo validation: a symlink retarget
+/// changes cycle keys, dependency names and messages.
+pub fn canonicalize(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let probe = Probe::observe_canonical(path);
+    record(probe.clone());
+    match probe {
+        Probe::Canonical(_, Some(target)) => Ok(target),
+        _ => path.canonicalize(),
+    }
+}
+
 /// Read a macro module at `path`, reusing an earlier read of the same text
-/// under the same operator spellings. Records the content hash so a file
-/// memo can be validated later.
-pub fn read_module(path: &str, text: &str) -> Arc<ReadSyntax> {
-    READ_HASHES.with(|read| read.borrow_mut().push((path.to_owned(), hash_text(text))));
+/// under the same operator spellings.
+pub fn read_module(text: &str) -> Arc<ReadSyntax> {
     let key = (text.to_owned(), sweetener_reader::extra_operators());
     if let Some(hit) = modules().lock().ok().and_then(|map| map.get(&key).cloned()) {
         return hit;
@@ -64,9 +121,9 @@ pub fn read_module(path: &str, text: &str) -> Arc<ReadSyntax> {
     read
 }
 
-/// Clear this thread's record of modules read, returning it.
-pub fn take_read_hashes() -> Vec<(String, u64)> {
-    READ_HASHES.with(|read| std::mem::take(&mut *read.borrow_mut()))
+/// Clear this thread's recorded filesystem observations, returning them.
+pub fn take_probes() -> Vec<Probe> {
+    PROBES.with(|probes| std::mem::take(&mut *probes.borrow_mut()))
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -79,7 +136,7 @@ struct FileKey {
 
 struct FileEntry {
     expansion: Expansion,
-    modules: Vec<(String, u64)>,
+    probes: Vec<Probe>,
 }
 
 fn files() -> &'static Mutex<HashMap<FileKey, FileEntry>> {
@@ -96,10 +153,8 @@ fn file_key(filename: &str, code: &str, phase: Phase, budget: &ResourceBudget) -
     }
 }
 
-fn still_current(modules: &[(String, u64)]) -> bool {
-    modules.iter().all(|(path, hash)| {
-        std::fs::read_to_string(path).is_ok_and(|text| hash_text(&text) == *hash)
-    })
+fn still_current(probes: &[Probe]) -> bool {
+    probes.iter().all(Probe::still_holds)
 }
 
 /// A memoized expansion of this file, if every module it read is unchanged.
@@ -112,36 +167,22 @@ pub fn lookup_file(
     let key = file_key(filename, code, phase, budget);
     let mut map = files().lock().ok()?;
     let entry = map.get(&key)?;
-    if still_current(&entry.modules) {
+    if still_current(&entry.probes) {
         return Some(entry.expansion.clone());
     }
     map.remove(&key);
     None
 }
 
-/// Memoize `expansion`, given the modules (and their hashes) it read.
+/// Memoize `expansion`, given every filesystem observation it made.
 pub fn store_file(
     filename: &str,
     code: &str,
     phase: Phase,
     budget: &ResourceBudget,
     expansion: &Expansion,
-    modules: Vec<(String, u64)>,
+    probes: Vec<Probe>,
 ) {
-    if expansion
-        .diagnostics
-        .iter()
-        .any(|d| d.message.starts_with("SWR5002"))
-    {
-        return;
-    }
-    let read_all = expansion
-        .dependencies
-        .iter()
-        .all(|dependency| modules.iter().any(|(path, _)| path == dependency));
-    if !read_all {
-        return;
-    }
     let Ok(mut map) = files().lock() else {
         return;
     };
@@ -152,7 +193,7 @@ pub fn store_file(
         file_key(filename, code, phase, budget),
         FileEntry {
             expansion: expansion.clone(),
-            modules,
+            probes,
         },
     );
 }
@@ -164,11 +205,10 @@ mod tests {
     #[test]
     fn module_reads_are_shared_per_text_and_operator_spellings() {
         let text = "export syntax one:expr {\n  rule { one() } => { 1 @@ 2 }\n}\n";
-        let first = read_module("/m.sts", text);
-        let again = read_module("/m.sts", text);
+        let first = read_module(text);
+        let again = read_module(text);
         assert!(Arc::ptr_eq(&first, &again));
-        let with_op =
-            sweetener_reader::with_operators(&["@@".to_owned()], || read_module("/m.sts", text));
+        let with_op = sweetener_reader::with_operators(&["@@".to_owned()], || read_module(text));
         assert!(!Arc::ptr_eq(&first, &with_op));
         assert_eq!(
             *with_op,
@@ -177,8 +217,6 @@ mod tests {
             })
         );
         assert_eq!(*first, sweetener_reader::read_syntax(text));
-        let hashes = take_read_hashes();
-        assert_eq!(hashes.len(), 3);
-        assert!(take_read_hashes().is_empty());
+        assert!(take_probes().is_empty());
     }
 }
