@@ -1374,3 +1374,47 @@ effect run { 1 }
     );
     assert!(flat.contains("export const run = () => [1, 1];"), "{flat}");
 }
+
+/// `data` and `match` run on their declared rules: a generic type such as
+/// `Tree<T>` is one type hole, an empty repetition (`None()`) binds an empty
+/// sequence that refinements accept and repeated fields render as nothing, a
+/// separated repetition gives its last row back to a wildcard arm, and a
+/// statement macro that expands to nothing leaves the empty statement.
+#[test]
+fn data_and_match_through_generic_rules() {
+    let code = r#"syntax class Field { fields { name: binding; kind: type; } rule { $name:binding: $kind:type } }
+syntax class Ctor { fields { name: ident; fields: Field*; } rule { $name:ident($($fields:Field),*) } }
+syntax data:item {
+  rule { data $name:binding<$t:binding> = $($ctor:Ctor)|+; } => {
+    $(const $ctor.name = <$t>($($ctor.fields.name: $ctor.fields.kind),*) => ({ tag: #text($ctor.name) $(, $ctor.fields.name)* });)*
+  }
+}
+syntax class Pat { fields { name: ident; binders: binding*; } rule { $name:ident($($binders:binding),*) } refine $binders spelling starts-with-lowercase }
+syntax skip:stmt { rule { skip; } => { } }
+syntax pick:expr {
+  rule { pick { $($arm:Pat => $body:expr),+ , _ => $fallback:expr } } => { [$($body),+, $fallback] }
+}
+data Tree<T> = Leaf() | Node(left: Tree<T>, value: T);
+const p = pick { Leaf() => 0, Node(l, v) => v, _ => 9 };
+skip;
+"#;
+    let out = expand(ExpandRequest {
+        filename: "adt.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    let flat: String = out.code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains(r#"const Leaf = <T>() => ({ tag: "Leaf" });"#),
+        "{flat}"
+    );
+    assert!(
+        flat.contains(
+            r#"const Node = <T>(left: Tree<T>, value: T) => ({ tag: "Node" , left, value });"#
+        ),
+        "{flat}"
+    );
+    assert!(flat.contains("const p = [0, v, 9];"), "{flat}");
+    assert!(flat.ends_with(";"), "{flat}");
+}

@@ -1823,7 +1823,7 @@ impl<'a> Printer<'a> {
                 // rule just inserted. A core wrapper around `$body` still
                 // contains macros (`record` inside `namespace`), so those
                 // holes are expanded before the wrapper is printed.
-                let expanded = if template_is_core(&rule.template) {
+                let mut expanded = if template_is_core(&rule.template) {
                     // `record` inside `#core` is already rendered. Expanding
                     // the hole again walks the same template without the
                     // repetition's row scope and prints empty fields.
@@ -1848,6 +1848,16 @@ impl<'a> Printer<'a> {
                 // An outer `const self` still requires `self_1` in this method.
                 self.printing_core = was_core;
                 self.check_expansion_category(name, head_span, &expanded, rule.origin);
+                // A statement macro that expands to nothing is still a
+                // statement: upstream prints the empty statement `;`.
+                if expanded.trim().is_empty()
+                    && self
+                        .macros
+                        .iter()
+                        .any(|macro_| macro_.name == name && macro_.category == "stmt")
+                {
+                    expanded = ";".to_owned();
+                }
                 self.emit(
                     head_span.start,
                     u32_at(matched.end),
@@ -4982,10 +4992,10 @@ fn refine_one(refine: &Refine, captures: &HashMap<String, Capture>) -> bool {
         Refine::SpellingIn { field, spellings } => every_token(captures, field, |token| {
             spellings.iter().any(|s| s == token)
         }),
-        Refine::StartsLower { field } => {
-            let names = refine_spellings(captures, field);
-            !names.is_empty() && names.iter().all(|name| starts_lower(name))
-        }
+        // Upstream `everyToken`: an empty repetition (`None()`) passes.
+        Refine::StartsLower { field } => every_token(captures, field, |token| {
+            token.chars().next().is_some_and(char::is_lowercase)
+        }),
         Refine::StartsUpper { field } => every_token(captures, field, |token| {
             token.chars().next().is_some_and(|ch| ch.is_uppercase())
         }),
@@ -5208,10 +5218,6 @@ fn expression_form(text: &str) -> Option<&'static str> {
         index += 1;
     }
     None
-}
-
-fn starts_lower(name: &str) -> bool {
-    name.chars().next().is_some_and(|ch| ch.is_lowercase())
 }
 
 fn refine_spellings(captures: &HashMap<String, Capture>, field: &str) -> Vec<String> {
@@ -8087,6 +8093,7 @@ fn match_pats_cont(
                 let saved_start = *cursor;
                 let mut row_end: Option<usize> = None;
                 let mut row_starts: Vec<usize> = Vec::new();
+                let mut resume_next = saved_start;
                 // A nested `$($parameter ...),*` reuses the head's hole names.
                 // Matching into the outer map overwrites `parameter`, so the
                 // last segment is the only one left. Each iteration matches
@@ -8127,7 +8134,18 @@ fn match_pats_cont(
                     )
                     .is_none()
                     {
-                        *cursor = saved;
+                        // A separator with no step after it belongs to what
+                        // follows the repetition (`$($arm),+ , _ => ...`).
+                        // A trailing separator the rest of the pattern does
+                        // not need stays consumed.
+                        *cursor = if sep.is_some()
+                            && !many.is_empty()
+                            && !cont_ok(source, nodes, saved, captures, classes, &after_rep)
+                        {
+                            resume_next
+                        } else {
+                            saved
+                        };
                         break;
                     }
                     for key in before {
@@ -8168,7 +8186,7 @@ fn match_pats_cont(
                             row_end = Some(node_end(&nodes[*cursor - 1]));
                         }
                     }
-                    row_starts.push(saved);
+                    row_starts.push(if sep.is_some() { resume_next } else { saved });
                     many.push(one);
                     if *kind == RepKind::Optional {
                         break;
@@ -8180,6 +8198,7 @@ fn match_pats_cont(
                             .get(*cursor)
                             .is_some_and(|node| node_is_lit(node, sep))
                         {
+                            resume_next = saved;
                             *cursor += 1;
                             continue;
                         }
@@ -8187,12 +8206,11 @@ fn match_pats_cont(
                         break;
                     }
                 }
-                // A greedy separator-less repetition gives steps back when
+                // A greedy repetition gives steps back when
                 // the rest of the pattern cannot match after it, as upstream's
                 // backtracking matcher does: `$($statements:stmt)*
                 // $result:expr` leaves the last expression to `$result`.
-                if sep.is_none() && !(pat_index + 1 == pattern.len() && matches!(cont, Cont::Free))
-                {
+                if !(pat_index + 1 == pattern.len() && matches!(cont, Cont::Free)) {
                     let rest = Cont::Seq(&pattern[pat_index + 1..], cont);
                     while !many.is_empty()
                         && !cont_ok(source, nodes, *cursor, captures, classes, &rest)
@@ -8203,6 +8221,18 @@ fn match_pats_cont(
                 }
                 if *kind == RepKind::OneOrMore && many.is_empty() {
                     return None;
+                }
+                // A repetition that matched nothing still binds its holes, to
+                // an empty sequence (upstream). `refine $binders ...` on
+                // `None()` is then vacuously true, not a missing capture.
+                if many.is_empty() {
+                    let mut holes = Vec::new();
+                    pattern_holes(inner, &mut holes);
+                    for (name, _) in holes {
+                        captures
+                            .entry(name)
+                            .or_insert_with(|| Capture::Many(Vec::new()));
+                    }
                 }
                 // A repetition's captures are stored under each inner name.
                 let mut grouped: HashMap<String, Vec<Vec<(String, Capture)>>> = HashMap::new();
@@ -8401,6 +8431,11 @@ fn take_class(
         let mut fields = HashMap::new();
         for field in &class_.fields {
             let Some(value) = raw.remove(&field.name) else {
+                // A repeated field that matched nothing is an empty
+                // sequence, not a missing one: `None()` has no `fields`.
+                if field.repeated {
+                    fields.insert(field.name.clone(), Capture::Many(Vec::new()));
+                }
                 continue;
             };
             if field.repeated {
@@ -8865,11 +8900,33 @@ fn take_type(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, u
     let start = node_start(start_node);
     let mut end = node_end(start_node);
     index += 1;
+    // `Tree<T>` and `Map<K, V>`: a `>` that closes an argument list this
+    // type opened, and the commas inside it, are part of the type.
+    let mut angles = 0usize;
     loop {
         skip_comments(nodes, &mut index);
         let Some(node) = nodes.get(index) else {
             break;
         };
+        if let Syntax::Operator { raw, .. } = node {
+            if raw.chars().all(|ch| ch == '<') {
+                angles += raw.len();
+                end = node_end(node);
+                index += 1;
+                continue;
+            }
+            if angles > 0 && raw.chars().all(|ch| ch == '>') && raw.len() <= angles {
+                angles -= raw.len();
+                end = node_end(node);
+                index += 1;
+                continue;
+            }
+            if angles > 0 && raw == "," {
+                end = node_end(node);
+                index += 1;
+                continue;
+            }
+        }
         if matches!(
             node,
             Syntax::Group {
@@ -11324,6 +11381,9 @@ fn rep_rows_for(
                 rows = found;
                 break;
             }
+            // `None()` has an empty `fields` sequence. Its rows are none;
+            // walking up to `constructor` would repeat the outer rows.
+            return (path, Vec::new());
         }
         path = path
             .rsplit_once('.')
@@ -12127,6 +12187,13 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
         .iter()
         .find(|(key, value)| {
             (key == leaf || key == path) && matches!(value, Capture::Record { .. })
+        })
+        .or_else(|| {
+            // `$body` beside `$arm:Pat` in one row is the body's own text,
+            // not the arm record next to it.
+            (!path.contains('.'))
+                .then(|| row.iter().find(|(key, _)| key == path))
+                .flatten()
         })
         .or_else(|| {
             // `state.name` is text, but the same row still holds the state
