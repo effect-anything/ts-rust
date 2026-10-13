@@ -1020,7 +1020,10 @@ impl<'a> Printer<'a> {
                 if raw == "function" || raw == "export" {
                     return true;
                 }
-                if FORM_HEADS.contains(&raw.as_str()) {
+                if FORM_HEADS.contains(&raw.as_str())
+                    || super::sweetener_forms::aliased_handwritten_head(self.file_nodes, raw)
+                        .is_some()
+                {
                     return super::sweetener_forms::handwritten_form_in_scope(
                         self.file_nodes,
                         nodes,

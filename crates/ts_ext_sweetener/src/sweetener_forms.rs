@@ -36,6 +36,10 @@ pub fn try_expand_fixture(
     if !handwritten_form_authorized(file, nodes, index) {
         return None;
     }
+    // `import { match as mymatch } ... for syntax`: the handwritten rules
+    // key on the export name, so dispatch on a copy whose head is that name.
+    let aliased = aliased_nodes(file, nodes, index);
+    let nodes = aliased.as_deref().unwrap_or(nodes);
     if let Some(item) = match_method_item(source, &nodes[index..]) {
         let end = if item.requests.is_empty() {
             method_item_end(nodes, index)
@@ -255,7 +259,9 @@ const HANDWRITTEN_FORMS: &[(&str, &str)] = &[
 /// True when the node at `index` is a core form, or a handwritten library
 /// form whose spelling this file imported `for syntax`.
 ///
-/// The import may be nested (`function body() { import { match } ... }`).
+/// Only top-level imports count, as upstream. A word head is matched by its
+/// local binding and authorized by the export it names, so a renamed import
+/// (`match as mymatch`) authorizes `mymatch` and not `match`.
 /// A local `export syntax` is not an import and does not authorize the form.
 /// Callers that already proved a use (`form_signals`, `form_methods`) pass
 /// that proof in `active`.
@@ -268,14 +274,49 @@ pub fn handwritten_form_in_scope(
     if active {
         return true;
     }
+    let imports = imported_syntax_bindings(file);
+    if let Some(raw) = token_raw(nodes.get(index)) {
+        if raw != "function" && raw != "export" {
+            if let Some((_, export)) = imports
+                .iter()
+                .find(|(local, _)| local.as_str() == AsRef::<str>::as_ref(&raw))
+            {
+                return is_handwritten_export(export)
+                    || handwritten_spelling(nodes, index).is_none();
+            }
+        }
+    }
     let Some(spelling) = handwritten_spelling(nodes, index) else {
         // Not a library form this pass owns. Leave it for the core printer.
         return true;
     };
-    // The use may sit inside a function. The import is anywhere in the file.
-    imported_syntax_names(file)
+    imports
         .iter()
-        .any(|name| name == spelling)
+        .any(|(local, export)| local == spelling && export == spelling)
+}
+
+fn is_handwritten_export(name: &str) -> bool {
+    HANDWRITTEN_FORMS.iter().any(|(_, export)| *export == name)
+}
+
+/// The handwritten export a renamed top-level `for syntax` import binds to
+/// `local`, when `local` is not already that export's own spelling.
+pub fn aliased_handwritten_head(file: &[Syntax], local: &str) -> Option<String> {
+    imported_syntax_bindings(file)
+        .into_iter()
+        .find(|(name, _)| name == local)
+        .map(|(_, export)| export)
+        .filter(|export| export != local && is_handwritten_export(export))
+}
+
+fn aliased_nodes(file: &[Syntax], nodes: &[Syntax], index: usize) -> Option<Vec<Syntax>> {
+    let local = token_raw(nodes.get(index))?;
+    let export = aliased_handwritten_head(file, AsRef::<str>::as_ref(&local))?;
+    let mut copy = nodes.to_vec();
+    if let Some(Syntax::Token { raw, .. }) = copy.get_mut(index) {
+        *raw = export;
+    }
+    Some(copy)
 }
 
 fn handwritten_form_authorized(file: &[Syntax], nodes: &[Syntax], index: usize) -> bool {
@@ -349,19 +390,18 @@ fn thread_spelling(children: Option<&[Syntax]>) -> Option<&'static str> {
 /// `->>`, written beside the constant so a replacement cannot drop a `>`.
 const THREAD_LAST: &str = "->>";
 
-/// Names a `for syntax` import binds in this list or inside a nested group.
-fn imported_syntax_names(nodes: &[Syntax]) -> Vec<String> {
+/// `(local, export)` pairs bound by top-level `for syntax` imports.
+/// Imports nested in a function or block do not count (upstream reads module
+/// imports only).
+fn imported_syntax_bindings(nodes: &[Syntax]) -> Vec<(String, String)> {
     let mut names = Vec::new();
     collect_imported_syntax_names(nodes, &mut names);
     names
 }
 
-fn collect_imported_syntax_names(nodes: &[Syntax], names: &mut Vec<String>) {
+fn collect_imported_syntax_names(nodes: &[Syntax], names: &mut Vec<(String, String)>) {
     let mut index = 0;
     while index < nodes.len() {
-        if let Some(Syntax::Group { children, .. }) = nodes.get(index) {
-            collect_imported_syntax_names(children, names);
-        }
         if syntax_import_here(nodes, index) {
             if let Some(Syntax::Group {
                 children,
@@ -387,19 +427,19 @@ fn syntax_import_here(nodes: &[Syntax], index: usize) -> bool {
         .any(|node| token_is(Some(node), "syntax"))
 }
 
-fn collect_import_binding_names(children: &[Syntax], names: &mut Vec<String>) {
+fn collect_import_binding_names(children: &[Syntax], names: &mut Vec<(String, String)>) {
     let mut child = 0;
     while child < children.len() {
         if let Syntax::Token { raw, .. } = &children[child] {
             if is_word(raw) && raw != "as" {
                 if token_is(children.get(child + 1), "as") {
                     if let Some(Syntax::Token { raw: local, .. }) = children.get(child + 2) {
-                        names.push(local.clone());
+                        names.push((local.clone(), raw.clone()));
                         child += 3;
                         continue;
                     }
                 }
-                names.push(raw.clone());
+                names.push((raw.clone(), raw.clone()));
             }
         }
         if let Syntax::Group {
@@ -416,7 +456,7 @@ fn collect_import_binding_names(children: &[Syntax], names: &mut Vec<String>) {
                 })
                 .collect::<String>();
             if !name.is_empty() {
-                names.push(name);
+                names.push((name.clone(), name));
             }
         }
         child += 1;
@@ -3439,13 +3479,34 @@ mod tests {
             phase: crate::Phase::Build,
         });
         assert!(
-            !expanded.code.contains("match (1)"),
-            "nested import did not authorize match:\n{}",
+            expanded.code.contains("match (1)"),
+            "nested import authorized match:\n{}",
             expanded.code
         );
+
         assert!(
             expanded.code.contains("#[1, 2]"),
             "unimported vector was rewritten:\n{}",
+            expanded.code
+        );
+
+        // A renamed import authorizes its local name, not the export name.
+        let renamed_path = dir.join("renamed.sts");
+        let renamed = "import { match as mymatch } from \"./macros.sts\" for syntax;\nconst a = mymatch (1) { 1 => 2, _ => 3 };\nconst b = match (2) { 1 => 2, _ => 3 };\n";
+        let renamed_name = renamed_path.display().to_string();
+        let expanded = crate::expand(crate::ExpandRequest {
+            filename: &renamed_name,
+            code: renamed,
+            phase: crate::Phase::Build,
+        });
+        assert!(
+            !expanded.code.contains("mymatch (1)"),
+            "renamed match stayed: {}",
+            expanded.code
+        );
+        assert!(
+            expanded.code.contains("match (2)"),
+            "export name expanded without its binding: {}",
             expanded.code
         );
 
