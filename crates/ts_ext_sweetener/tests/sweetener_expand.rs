@@ -1047,3 +1047,29 @@ handle report { work(); }\nconst f = function () { return 1; };\n",
         "{code}"
     );
 }
+
+#[test]
+fn expansion_cycles_and_depth_are_budgeted() {
+    for (code, expected, kept) in [
+        (
+            "export syntax loop:expr {\n  rule { loop($x:expr) } => { loop($x) }\n}\nconst a = loop(1);\n",
+            "SWR4014: Macro loop expanded to itself",
+            "const a = loop(1);",
+        ),
+        (
+            "export syntax grow:expr {\n  rule { grow($x:expr) } => { grow([$x]) }\n}\nconst a = grow(1);\n",
+            "SWR4015: Expanding grow reached the nesting-depth limit.",
+            "const a = grow(1);",
+        ),
+    ] {
+        let out = expand(ExpandRequest {
+            filename: "budget.sts",
+            code,
+            phase: Phase::Check,
+        });
+        assert_eq!(out.diagnostics.len(), 1, "{:?}", out.diagnostics);
+        assert!(out.diagnostics[0].message.starts_with(expected));
+        let at = out.diagnostics[0].start as usize;
+        assert!(code[at..].starts_with(&kept[10..]), "{at}");
+    }
+}

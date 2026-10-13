@@ -168,6 +168,8 @@ fn expand_pass(
         *set.borrow_mut() = syntax_parameters(&read.children).into_iter().collect();
     });
     super::sweetener_scoped::clear_unused();
+    BUDGET.with(|budget| budget.borrow_mut().take());
+    ACTIVE_EXPANSIONS.with(|active| active.borrow_mut().clear());
     let imports = syntax_imports(&read.children);
     let names_again = names.clone();
     let user_names = names.unwrap_or_else(|| user_spellings(&read.children));
@@ -1910,7 +1912,7 @@ impl<'a> Printer<'a> {
     }
 
     fn expand_replacement_macros(&mut self, replacement: &str) -> String {
-        if self.depth > 8 || !self.replacement_needs_expand(replacement) {
+        if !self.replacement_needs_expand(replacement) {
             return replacement.to_owned();
         }
         let owned = replacement.to_owned();
@@ -1921,8 +1923,52 @@ impl<'a> Printer<'a> {
         if !self.tree_needs_walk(&read.children) {
             return owned;
         }
+        // Budgets: a replacement that is already being expanded further up
+        // is a cycle (SWR4014); nesting past the depth bound is SWR4015.
+        // Both are reported at the file-level invocation by `emit`.
+        let fingerprint: String = owned.split_whitespace().collect();
+        let name = self.first_macro_in(&owned);
+        if ACTIVE_EXPANSIONS.with(|active| active.borrow().contains(&fingerprint)) {
+            note_budget(format!(
+                "SWR4014: Macro {name} expanded to itself and would not terminate. A rule has to reduce its input, so one of them must match without reaching this macro again."
+            ));
+            return owned;
+        }
+        if usize::from(self.depth) >= MAX_NESTING_DEPTH {
+            note_budget(format!(
+                "SWR4015: Expanding {name} reached the nesting-depth limit. No further macros in it were expanded."
+            ));
+            return owned;
+        }
+        ACTIVE_EXPANSIONS.with(|active| active.borrow_mut().push(fingerprint));
+        let expanded = self.expand_nested_replacement(&owned, &read);
+        ACTIVE_EXPANSIONS.with(|active| {
+            active.borrow_mut().pop();
+        });
+        expanded
+    }
+
+    /// The macro name a replacement mentions first, for budget diagnostics.
+    fn first_macro_in(&self, text: &str) -> String {
+        self.macros
+            .iter()
+            .filter_map(|macro_| {
+                text.match_indices(macro_.name.as_str())
+                    .map(|(at, _)| at)
+                    .next()
+                    .map(|at| (at, macro_.name.clone()))
+            })
+            .min()
+            .map_or_else(|| "this file".to_owned(), |(_, name)| name)
+    }
+
+    fn expand_nested_replacement(
+        &mut self,
+        owned: &str,
+        read: &sweetener_reader::ReadSyntax,
+    ) -> String {
         let mut nested = Printer {
-            source: &owned,
+            source: owned,
             out: String::new(),
             segments: Vec::new(),
             diagnostics: Vec::new(),
@@ -1947,7 +1993,7 @@ impl<'a> Printer<'a> {
         // A form that already rewrote `function (...)` is TypeScript. Matching
         // it again as the function macro fails the file on the `return` the
         // form just inserted. Other macros in the replacement still expand.
-        if replacement.trim_start().starts_with("function") {
+        if owned.trim_start().starts_with("function") {
             nested
                 .macros_mut()
                 .retain(|macro_| macro_.name != "function");
@@ -2466,6 +2512,25 @@ impl<'a> Printer<'a> {
     }
 
     fn emit(&mut self, original_start: u32, original_end: u32, text: &str, kind: SegmentKind) {
+        let source = self.source;
+        let mut text = text;
+        if self.depth == 0
+            && let Some(message) = BUDGET.with(|budget| budget.borrow_mut().take())
+        {
+            text = source
+                .get(original_start as usize..original_end as usize)
+                .unwrap_or(text);
+            // The invocation stays as written, like upstream's aborted
+            // expansion; nothing of the runaway replacement is printed.
+            self.diagnostics.push(Diagnostic {
+                message,
+                start: original_start,
+                end: original_end,
+                severity: Severity::Error,
+                ..Default::default()
+            });
+            self.failed = true;
+        }
         if self.depth == 0 {
             // `#parameterize(required % = ...)` around a body that never
             // uses `%`. The body is inside this expansion.
@@ -10125,6 +10190,25 @@ fn render_fold(
 }
 
 /// One identifier, literal, or closed group: safe to splice anywhere.
+/// Upstream's `maxNestingDepth` is 1024 syntax levels; a nested printer is
+/// far heavier than one level, so ours bounds replacement re-expansion.
+const MAX_NESTING_DEPTH: usize = 64;
+
+thread_local! {
+    /// Fingerprints of the replacements being expanded, outermost first.
+    static ACTIVE_EXPANSIONS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// The first budget diagnostic of the current file-level invocation.
+    static BUDGET: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn note_budget(message: String) {
+    BUDGET.with(|budget| {
+        budget.borrow_mut().get_or_insert(message);
+    });
+}
+
 fn is_primary_text(text: &str) -> bool {
     let read = sweetener_reader::read_syntax(text);
     match read.children.as_slice() {
