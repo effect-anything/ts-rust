@@ -170,7 +170,7 @@ fn expand_pass(
     super::sweetener_scoped::clear_unused();
     BUDGET.with(|budget| budget.borrow_mut().take());
     ACTIVE_EXPANSIONS.with(|active| active.borrow_mut().clear());
-    let imports = syntax_imports(&read.children);
+    let imports = syntax_imports(source, &read.children);
     let names_again = names.clone();
     let user_names = names.unwrap_or_else(|| user_spellings(&read.children));
     let mut loaded = load_macros(request.filename, source, &imports, &user_names);
@@ -196,7 +196,31 @@ fn expand_pass(
     if !spellings.is_empty() {
         return sweetener_reader::with_operators(&spellings, || expand_pass(request, names_again));
     }
+    // A rule from another module points into that module's text.
+    for macro_ in &mut loaded.macros {
+        for rule in &mut macro_.rules {
+            rule.origin = None;
+        }
+    }
     let local_names: Vec<String> = local.keys().cloned().collect();
+    let mut in_scope: std::collections::HashSet<String> =
+        syntax_parameters(&read.children).into_iter().collect();
+    in_scope.extend(
+        imports
+            .iter()
+            .flat_map(|import| import.names.iter().cloned()),
+    );
+    let unknown = super::sweetener_validate::unknown_parameterizations(&read.children, &in_scope);
+    UNKNOWN_PARAMETERIZED.with(|cell| *cell.borrow_mut() = unknown);
+    LOCAL_HEADS.with(|heads| {
+        let mut heads = heads.borrow_mut();
+        heads.clear();
+        for (name, macro_) in &local {
+            if !loaded.macros.iter().any(|imported| imported.name == *name) {
+                heads.insert(name.clone(), macro_.head.start);
+            }
+        }
+    });
     let mut local: Vec<Macro> = local.into_values().collect();
     local.sort_by_key(|macro_| macro_.head.start);
     for macro_ in local {
@@ -238,6 +262,12 @@ fn expand_pass(
     let (invalid_definitions, unbound) =
         super::sweetener_validate::validate(&read.children, &known);
     loaded.diagnostics.extend(invalid_definitions);
+    loaded
+        .diagnostics
+        .extend(super::sweetener_validate::malformed_syntax_imports(
+            source,
+            &read.children,
+        ));
     if !unbound.is_empty() {
         let local_names: std::collections::HashSet<&str> =
             local_names.iter().map(String::as_str).collect();
@@ -301,7 +331,14 @@ fn expand_pass(
         &printer.segments,
         &printer.diagnostics,
     );
-    printer.diagnostics.extend(unread);
+    // The scanner already said why the item does not read.
+    if !printer
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.starts_with("SWR1001"))
+    {
+        printer.diagnostics.extend(unread);
+    }
     let hoisted = super::sweetener_scoped::hoist(
         &printer.out,
         &mut printer.segments,
@@ -936,6 +973,17 @@ impl<'a> Printer<'a> {
             // or a parameter list owns (`(service) =>`) is ordinary code. A
             // form rewrite can print one that shares a macro name, so it must
             // not reach the macro dispatch.
+            // A macro name the expander holds as written: used before its
+            // definition, in a position its category cannot fill, or with
+            // nothing after it.
+            if self.depth == 0
+                && let Some(held) = self.held_name(nodes, index)
+            {
+                self.diagnostics.push(held);
+                self.print_node(&nodes[index]);
+                index += 1;
+                continue;
+            }
             // Upstream reads item macros at module level and in namespace
             // bodies only. Inside a block or function body the words are
             // left as written.
@@ -1366,6 +1414,46 @@ impl<'a> Printer<'a> {
         .unwrap_or_else(|| (String::new(), node_end(&nodes[op_at]), op_at + 1));
         // `received <-;` has no channel expression. Binding the hole to
         // empty text would print `yield take()`.
+        let unreadable = !right
+            .chars()
+            .any(|ch| ch.is_alphanumeric() || "_$\"'`([{".contains(ch));
+        let expression_operator = self
+            .macros
+            .iter()
+            .any(|macro_| macro_.name == name && macro_.operator && macro_.category == "expr");
+        if unreadable && expression_operator {
+            // Upstream's reader gives up on the expression before any rule
+            // sees it: SWR4021 at the operator, and SWR4020 where a group
+            // ends on it.
+            self.failed = true;
+            let op = node_span(&nodes[op_at]);
+            {
+                if op_at + 1 >= nodes.len() {
+                    let start = node_start(&nodes[index]);
+                    let end = node_end(&nodes[op_at]);
+                    self.diagnostics.push(Diagnostic {
+                        message: format!(
+                            "SWR4020: Sweetener could not read this as an expression: {}",
+                            sweetener_reader::slice_range(self.source, start, end).trim()
+                        ),
+                        start: u32_at(start),
+                        end: u32_at(end),
+                        severity: Severity::Error,
+                        related: Vec::new(),
+                    });
+                }
+            }
+            self.diagnostics.push(Diagnostic {
+                message: format!(
+                    "SWR4021: Operator {name} was left unexpanded: the expression it is written in could not be read, so none of its rules were tried."
+                ),
+                start: op.start,
+                end: op.end,
+                severity: Severity::Error,
+                related: Vec::new(),
+            });
+            return self.skip_failed(nodes, op_at);
+        }
         if right.trim().is_empty() {
             let rules: Vec<Rule> = self.rules_named(&name, node_start(&nodes[index]));
             let at = nodes
@@ -1757,6 +1845,7 @@ impl<'a> Printer<'a> {
                 // `$self` is a capture, so the plan above does not rename it.
                 // An outer `const self` still requires `self_1` in this method.
                 self.printing_core = was_core;
+                self.check_expansion_category(name, head_span, &expanded, rule.origin);
                 self.emit(
                     head_span.start,
                     u32_at(matched.end),
@@ -2522,23 +2611,23 @@ impl<'a> Printer<'a> {
         nodes: &[Syntax],
         index: usize,
         rules: &[Rule],
-    ) -> (Span, Option<String>) {
-        let mut best: Option<(Span, Option<String>, i32)> = None;
-        for rule in rules {
+    ) -> (Span, Option<String>, Option<usize>) {
+        let mut best: Option<(Span, Option<String>, i32, usize)> = None;
+        for (position, rule) in rules.iter().enumerate() {
             if let Some(found) =
                 failure_progress(self.source, nodes, index, &rule.pattern, &self.classes)
             {
                 let expect = found.expect.or_else(|| rule.expect.clone());
-                let better = best.as_ref().is_none_or(|(_, have_expect, have)| {
+                let better = best.as_ref().is_none_or(|(_, have_expect, have, _)| {
                     found.progress > *have && (expect.is_some() || have_expect.is_none())
                 });
                 if better {
-                    best = Some((found.span, expect, found.progress));
+                    best = Some((found.span, expect, found.progress, position));
                 }
             }
         }
-        best.map(|(span, expect, _)| (span, expect))
-            .unwrap_or_else(|| (node_span(&nodes[index]), None))
+        best.map(|(span, expect, _, position)| (span, expect, Some(position)))
+            .unwrap_or_else(|| (node_span(&nodes[index]), None, None))
     }
 
     fn fail_macro_at(&mut self, name: &str, rules: &[Rule], span: Span) {
@@ -2604,6 +2693,7 @@ impl<'a> Printer<'a> {
     fn fail_macro(&mut self, nodes: &[Syntax], index: usize, name: &str, rules: &[Rule]) {
         // A rule that matched but needs a context the invocation is not in.
         let missing = self.context_rejected.iter().find_map(|(rule, context)| {
+            let origin = rule.origin;
             match_rule_with(
                 self.source,
                 nodes,
@@ -2612,9 +2702,9 @@ impl<'a> Printer<'a> {
                 &self.classes,
                 &rule.refines,
             )
-            .map(|_| context.clone())
+            .map(|_| (context.clone(), origin))
         });
-        if let Some(context) = missing {
+        if let Some((context, origin)) = missing {
             let span = node_span(&nodes[index]);
             self.failed = true;
             self.diagnostics.push(Diagnostic {
@@ -2624,12 +2714,22 @@ impl<'a> Printer<'a> {
                 start: span.start,
                 end: span.end,
                 severity: Severity::Error,
-                related: Vec::new(),
+                related: origin
+                    .filter(|_| self.depth == 0)
+                    .map(|origin| crate::RelatedLocation {
+                        message: "The closest rule was still expecting syntax here".to_owned(),
+                        start: origin.start,
+                        end: origin.end,
+                    })
+                    .into_iter()
+                    .collect(),
             });
             return;
         }
-        let (span, expect) = self.rule_failure(nodes, index, rules);
+        let (span, expect, closest) = self.rule_failure(nodes, index, rules);
         self.failed = true;
+        let related =
+            self.failure_related(name, node_span(&nodes[index]), closest.map(|at| &rules[at]));
         // `module { record Cons(head:, tail) }` fails inside `record`.
         // The diagnostic names that macro, not the module that contained it.
         let owned = nested_macro_name(self.source, span);
@@ -2663,8 +2763,188 @@ impl<'a> Printer<'a> {
             start: span.start,
             end: span.end,
             severity: Severity::Error,
-            related: Vec::new(),
+            related,
         });
+    }
+
+    /// Upstream's held names (SWR4017, SWR4013, SWR4024). They are warnings
+    /// on an expansion path: the name stays in the output as written, and
+    /// only a type check could say whether anything else defines it.
+    fn held_name(&self, nodes: &[Syntax], index: usize) -> Option<Diagnostic> {
+        let Syntax::Token { raw: name, span } = nodes.get(index)? else {
+            return None;
+        };
+        let definitions: Vec<&Macro> = self
+            .macros
+            .iter()
+            .filter(|macro_| macro_.name == *name && !macro_.operator)
+            .collect();
+        if definitions.is_empty() {
+            return None;
+        }
+        let previous = index.checked_sub(1).and_then(|at| nodes.get(at));
+        let next = nodes.get(index + 1);
+        fn spelled(node: Option<&Syntax>) -> Option<&str> {
+            match node {
+                Some(Syntax::Token { raw, .. } | Syntax::Operator { raw, .. }) => {
+                    Some(raw.as_str())
+                }
+                _ => None,
+            }
+        }
+        // Only where an expression is plainly read.
+        let expression = matches!(
+            spelled(previous),
+            Some("=" | "," | "return" | "=>" | "?" | "&&" | "||" | "??" | "!" | "+" | "-" | "*")
+        );
+        if matches!(spelled(next), Some(":" | "." | "=>")) || spelled(previous) == Some(".") {
+            return None;
+        }
+        let warning = |message: String| Diagnostic {
+            message,
+            start: span.start,
+            end: span.end,
+            severity: Severity::Warning,
+            related: Vec::new(),
+        };
+        let defined_below = LOCAL_HEADS.with(|heads| {
+            heads
+                .borrow()
+                .get(name)
+                .is_some_and(|head| *head > span.start)
+        });
+        if defined_below && definitions.len() == 1 && macro_call_position(nodes, index) {
+            return Some(warning(format!(
+                "SWR4017: Macro {name} is defined below this point, and a macro is visible only to what follows its definition. Move the definition above this use, or into a module imported for syntax."
+            )));
+        }
+        if !expression {
+            return None;
+        }
+        let categories: Vec<&str> = definitions
+            .iter()
+            .map(|macro_| macro_.category.as_str())
+            .collect();
+        if let Some(declared) = categories
+            .iter()
+            .find(|category| matches!(**category, "stmt" | "item"))
+            .filter(|_| categories.iter().all(|category| *category != "expr"))
+        {
+            return Some(warning(format!(
+                "SWR4013: Macro {name} is declared {declared} and cannot be written where an expr is read. Declare it expr to use it here."
+            )));
+        }
+        let bare = next.is_none() || matches!(spelled(next), Some(";" | "," | ")" | "]" | "}"));
+        if bare && !compiled_accepts_bare(&definitions) {
+            return Some(warning(format!(
+                "SWR4024: Macro {name} is written here as a name on its own, where an expr is read. A macro is a compile-time name, so {name} is written into the emitted code as it stands, and nothing in this build checks this file for whether anything defines it there. Write an invocation its rules accept."
+            )));
+        }
+        None
+    }
+
+    /// SWR4011: an `expr` macro whose expansion is a statement, which
+    /// cannot stand where the invocation is read.
+    fn check_expansion_category(
+        &mut self,
+        name: &str,
+        invocation: Span,
+        expanded: &str,
+        origin: Option<Span>,
+    ) {
+        if self.depth != 0 {
+            return;
+        }
+        if let Some(param) = UNKNOWN_PARAMETERIZED.with(|cell| cell.borrow().get(name).cloned()) {
+            self.failed = true;
+            self.diagnostics.push(Diagnostic {
+                message: format!(
+                    "SWR4019: #parameterize names {param}, which is not a syntax parameter in scope here. Declare it with `syntax parameter`, and import it for syntax where the template is defined."
+                ),
+                start: invocation.start,
+                end: invocation.end,
+                severity: Severity::Error,
+                related: Vec::new(),
+            });
+            return;
+        }
+        let expression = self
+            .macros
+            .iter()
+            .any(|macro_| macro_.name == name && macro_.category == "expr" && !macro_.operator);
+        let first = expanded
+            .trim_start()
+            .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+            .next()
+            .unwrap_or("");
+        let statement = matches!(
+            first,
+            "if" | "for"
+                | "while"
+                | "do"
+                | "switch"
+                | "try"
+                | "const"
+                | "let"
+                | "var"
+                | "return"
+                | "throw"
+                | "break"
+                | "continue"
+                | "import"
+                | "export"
+                | "interface"
+                | "enum"
+                | "namespace"
+                | "declare"
+        );
+        if !expression || !statement {
+            return;
+        }
+        self.failed = true;
+        self.diagnostics.push(Diagnostic {
+            message: format!(
+                "SWR4011: Macro {name} expanded to syntax that is not one expr: {}",
+                expanded.trim()
+            ),
+            start: invocation.start,
+            end: invocation.end,
+            severity: Severity::Error,
+            related: origin
+                .map(|origin| crate::RelatedLocation {
+                    message: "This rule produced it".to_owned(),
+                    start: origin.start,
+                    end: origin.end,
+                })
+                .into_iter()
+                .collect(),
+        });
+    }
+
+    /// Upstream's related locations on SWR4001: the invocation, and where
+    /// the closest rule (when this file defines it) was still reading.
+    fn failure_related(
+        &self,
+        name: &str,
+        invocation: Span,
+        closest: Option<&Rule>,
+    ) -> Vec<crate::RelatedLocation> {
+        if self.depth != 0 {
+            return Vec::new();
+        }
+        let mut related = vec![crate::RelatedLocation {
+            message: format!("In this use of {name}"),
+            start: invocation.start,
+            end: invocation.end,
+        }];
+        if let Some(origin) = closest.and_then(|rule| rule.origin) {
+            related.push(crate::RelatedLocation {
+                message: "The closest rule was still expecting syntax here".to_owned(),
+                start: origin.start,
+                end: origin.end,
+            });
+        }
+        related
     }
 
     /// A rejected macro stays as written. Copy this item (through its
@@ -2842,6 +3122,8 @@ struct Rule {
     /// `context generator;` / `context async;`: the rule is used only where
     /// the invocation stands in those contexts.
     contexts: Vec<(String, Span)>,
+    /// The rule's pattern group, when this file defines the rule.
+    origin: Option<Span>,
 }
 
 /// One declarative binding contract, upstream's `BindingContract`:
@@ -3040,7 +3322,31 @@ fn load_macros(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let mut seen = std::collections::HashSet::<PathBuf>::new();
+    // SWR5007: one local name bound by two imports, or twice by one.
+    let mut bound = std::collections::HashSet::<String>::new();
+    let mut reported = std::collections::HashSet::<String>::new();
     for import in imports {
+        for name in &import.names {
+            if !bound.insert(name.clone()) && reported.insert(name.clone()) {
+                let (start, end) = import_name_span(source, import, name, true);
+                loaded.diagnostics.push(Diagnostic {
+                    message: format!(
+                        "SWR5007: Compile-time macro import binds local name {name} more than once."
+                    ),
+                    start,
+                    end,
+                    severity: Severity::Error,
+                    related: Vec::new(),
+                });
+            }
+        }
+    }
+    for import in imports {
+        TOP_IMPORT.with(|top| top.set(Some(import.span)));
+        let canonical = Path::new(filename)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(filename));
+        LOAD_STACK.with(|stack| *stack.borrow_mut() = vec![canonical]);
         load_syntax_module(
             &mut loaded,
             &base,
@@ -3074,9 +3380,97 @@ fn load_syntax_module(
     };
     let path = from_dir.join(body);
     let key = path.canonicalize().unwrap_or_else(|_| path.clone());
-    if !seen.insert(key) {
+    // SWR5005: a module that imports itself, through any chain.
+    let cycle = LOAD_STACK.with(|stack| {
+        let stack = stack.borrow();
+        stack.iter().position(|open| *open == key).map(|at| {
+            let mut chain: Vec<String> = stack[at..]
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            chain.push(key.display().to_string());
+            chain.join(" -> ")
+        })
+    });
+    if let Some(chain) = cycle {
+        if let Some(top) = TOP_IMPORT.with(std::cell::Cell::get) {
+            loaded.diagnostics.push(Diagnostic {
+                message: format!("SWR5005: Compile-time macro module cycle: {chain}."),
+                start: top.start,
+                end: top.end,
+                severity: Severity::Error,
+                related: Vec::new(),
+            });
+        }
         return;
     }
+    if !seen.insert(key.clone()) {
+        return;
+    }
+    LOAD_STACK.with(|stack| stack.borrow_mut().push(key));
+    load_syntax_module_body(
+        loaded, user_dir, from_dir, importer, import, seen, source, report, path, body,
+    );
+    LOAD_STACK.with(|stack| {
+        stack.borrow_mut().pop();
+    });
+}
+
+thread_local! {
+    /// The macro modules being read, outermost first.
+    static LOAD_STACK: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The span of this file's import that the current load started from.
+    static TOP_IMPORT: std::cell::Cell<Option<Span>> = const { std::cell::Cell::new(None) };
+}
+
+/// The written specifier, as upstream prints it: `./opdef.sts`.
+fn import_specifier_text(specifier: &str) -> &str {
+    specifier.trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`')
+}
+
+/// Where `name` is written in `import`'s braces; the last occurrence when
+/// `last`. An operator name includes its parentheses.
+fn import_name_span(source: &str, import: &SyntaxImport, name: &str, last: bool) -> (u32, u32) {
+    let fallback = (import.span.start, import.span.end);
+    let Some(rest) = source.get(import.span.start as usize..) else {
+        return fallback;
+    };
+    let close = rest.find('}').unwrap_or(rest.len());
+    let open = rest[..close].find('{').unwrap_or(0);
+    let inside = &rest[open..close];
+    let found = if last {
+        inside.rfind(name)
+    } else {
+        inside.find(name)
+    };
+    let Some(at) = found else {
+        return fallback;
+    };
+    let mut start = open + at;
+    let mut end = start + name.len();
+    if rest[..start].ends_with('(') && rest[end..].starts_with(')') {
+        start -= 1;
+        end += 1;
+    }
+    (
+        import.span.start + u32::try_from(start).unwrap_or(0),
+        import.span.start + u32::try_from(end).unwrap_or(0),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_syntax_module_body(
+    loaded: &mut Loaded,
+    user_dir: &Path,
+    from_dir: &Path,
+    importer: &Path,
+    import: &SyntaxImport,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    source: &str,
+    report: bool,
+    path: PathBuf,
+    body: &str,
+) {
     let text = std::fs::read_to_string(&path).ok();
     let Some(text) = text else {
         if !report {
@@ -3198,13 +3592,18 @@ fn load_syntax_module(
             .any(|param| param == exported)
         {
             note_syntax_parameter(name);
-        } else if report {
+        } else if report
+            && user_dir == from_dir
+            && !taken.iter().any(|macro_: &Macro| macro_.name == *name)
+        {
+            let (start, end) = import_name_span(source, import, exported, false);
             loaded.diagnostics.push(Diagnostic {
                 message: format!(
-                    "SWR4001: Sweetener macro error: macro `{name}` was imported for syntax but is not exported by its module"
+                    "SWR5004: Macro module {} does not export {exported}.",
+                    import_specifier_text(&import.specifier)
                 ),
-                start: import.span.start,
-                end: import.span.end,
+                start,
+                end,
                 severity: Severity::Error,
                 related: Vec::new(),
             });
@@ -3238,7 +3637,7 @@ fn load_syntax_module(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| from_dir.to_path_buf());
-    for nested in syntax_imports(&read.children) {
+    for nested in syntax_imports(&text, &read.children) {
         load_syntax_module(
             loaded,
             user_dir,
@@ -4034,6 +4433,7 @@ fn rules_in_source(source: &str, body: &Syntax) -> Vec<Rule> {
                 literal_alias: literal_alias_before(children, index),
                 contracts: contracts_after(children, group_index(children, pattern_group)),
                 contexts,
+                origin: Some(node_span(pattern_group)),
             });
         }
     }
@@ -9682,11 +10082,13 @@ fn method_param_name(nodes: &[Syntax], index: usize) -> bool {
     })
 }
 
-fn syntax_imports(nodes: &[Syntax]) -> Vec<SyntaxImport> {
+fn syntax_imports(source: &str, nodes: &[Syntax]) -> Vec<SyntaxImport> {
     let mut imports = Vec::new();
     let mut index = 0;
     while index < nodes.len() {
-        if is_syntax_import_at(nodes, index) {
+        if is_syntax_import_at(nodes, index)
+            && super::sweetener_validate::syntax_import_well_formed(source, nodes, index)
+        {
             if let Some(import) = syntax_import_at(nodes, index) {
                 imports.push(import);
             }
@@ -10495,6 +10897,24 @@ thread_local! {
     /// The first budget diagnostic of the current file-level invocation.
     static BUDGET: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+}
+
+thread_local! {
+    /// This file's macros whose templates parameterize a name that is not a
+    /// syntax parameter where they are defined, with that name.
+    static UNKNOWN_PARAMETERIZED: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Where this file defines each of its own macros.
+    static LOCAL_HEADS: std::cell::RefCell<HashMap<String, u32>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// A macro some rule of which is just its name (`syntax count` read as a
+/// value) accepts the name on its own.
+fn compiled_accepts_bare(definitions: &[&Macro]) -> bool {
+    definitions
+        .iter()
+        .any(|macro_| macro_.rules.iter().any(|rule| rule.pattern.len() <= 1))
 }
 
 fn note_budget(message: String) {

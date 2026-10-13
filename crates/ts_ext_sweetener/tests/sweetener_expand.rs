@@ -1172,3 +1172,124 @@ fn definition_diagnostics_from_upstream_compilers() {
         assert_eq!(messages, [expected], "{code}");
     }
 }
+
+#[test]
+fn expansion_time_diagnostics_match_upstream_codes() {
+    let defs = "export syntax foo:expr {\n  rule { foo() } => { 1 }\n}\n";
+    for (code, expected, severity) in [
+        ("const s = \"open;\nconst x = 1;\n".to_owned(), "SWR1001", Severity::Error),
+        (format!("{defs}const a = foo;\n"), "SWR4024", Severity::Warning),
+        (
+            "const a = foo();\nexport syntax foo:expr {\n  rule { foo() } => { 1 }\n}\n".to_owned(),
+            "SWR4017",
+            Severity::Warning,
+        ),
+        (
+            "export syntax foo:stmt {\n  rule { foo $x:expr; } => { console.log($x); }\n}\nconst a = foo 1;\n".to_owned(),
+            "SWR4013",
+            Severity::Warning,
+        ),
+        (
+            "export syntax foo:expr {\n  rule { foo() } => { if (x) {} }\n}\nconst a = foo();\n".to_owned(),
+            "SWR4011",
+            Severity::Error,
+        ),
+        (
+            "export syntax foo:expr {\n  rule { foo($x:expr) } => { #parameterize(bar = { 1 }) { $x } }\n}\nconst a = foo(1);\n".to_owned(),
+            "SWR4019",
+            Severity::Error,
+        ),
+        (
+            "import { foo } from \"./x.sts\" for syntax as;\nconst a = 1;\n".to_owned(),
+            "SWR2019",
+            Severity::Error,
+        ),
+        (
+            "export operator (+++):expr {\n  fixity infix;\n  associativity left;\n  precedence 10;\n  rule { $a:expr +++ $b:expr } => { $a + $b }\n}\nconst b = 1 +++ + ;\n".to_owned(),
+            "SWR4021",
+            Severity::Error,
+        ),
+    ] {
+        let out = expand(ExpandRequest {
+            filename: "held.sts",
+            code: &code,
+            phase: Phase::Check,
+        });
+        let found: Vec<(&str, Severity)> = out
+            .diagnostics
+            .iter()
+            .map(|d| (&d.message[..7], d.severity))
+            .collect();
+        assert_eq!(found, [(expected, severity)], "{code}");
+    }
+}
+
+#[test]
+fn rule_failures_carry_related_locations() {
+    let out = expand(ExpandRequest {
+        filename: "rel.sts",
+        code: "export syntax foo:stmt {\n  rule { foo $x:expr; } => { $x; }\n}\nfoo 1 2 3;\n",
+        phase: Phase::Check,
+    });
+    let related: Vec<&str> = out.diagnostics[0]
+        .related
+        .iter()
+        .map(|r| r.message.as_str())
+        .collect();
+    assert_eq!(
+        related,
+        [
+            "In this use of foo",
+            "The closest rule was still expecting syntax here"
+        ]
+    );
+}
+
+#[test]
+fn macro_module_import_diagnostics() {
+    let dir = std::env::temp_dir().join(format!("swr500x-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("op.sts"),
+        "export operator (+++):expr {\n  fixity infix;\n  associativity left;\n  precedence 10;\n  rule { $a:expr +++ $b:expr } => { $a + $b }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("a.sts"),
+        "import { two } from \"./b.sts\" for syntax;\nexport syntax one:expr {\n  rule { one() } => { 1 }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("b.sts"),
+        "import { one } from \"./a.sts\" for syntax;\nexport syntax two:expr {\n  rule { two() } => { 2 }\n}\n",
+    )
+    .unwrap();
+    let codes = |code: &str| {
+        let filename = dir.join("main.sts");
+        let out = expand(ExpandRequest {
+            filename: filename.to_str().unwrap(),
+            code,
+            phase: Phase::Check,
+        });
+        let mut codes: Vec<String> = out
+            .diagnostics
+            .iter()
+            .map(|d| d.message[..7].to_owned())
+            .collect();
+        codes.sort();
+        codes
+    };
+    assert_eq!(
+        codes("import { nothere } from \"./op.sts\" for syntax;\nconst a = 1;\n"),
+        ["SWR5004"]
+    );
+    assert_eq!(
+        codes("import { (+++), (+++) as (+++) } from \"./op.sts\" for syntax;\nconst a = 1;\n"),
+        ["SWR5007"]
+    );
+    assert_eq!(
+        codes("import { two } from \"./b.sts\" for syntax;\nconst a = two();\n"),
+        ["SWR5005"]
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}

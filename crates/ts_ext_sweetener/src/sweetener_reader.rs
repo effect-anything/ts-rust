@@ -359,6 +359,27 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// SWR1001, the scanner's unterminated literal. Only where a literal
+    /// can start: after an operator, an opener, or line start. A quote after
+    /// `/` may sit in a regular expression this reader does not scan.
+    fn unterminated(&mut self, start: usize, at: usize, what: &str) {
+        let before = self.source[..start].trim_end();
+        let operand_start = before.is_empty()
+            || before.ends_with(|ch: char| "=(,:[{;!&|?+-*%<>".contains(ch))
+            || before.ends_with("return");
+        if !operand_start {
+            return;
+        }
+        let at = at.min(self.bytes.len());
+        self.diagnostics.push(Diagnostic {
+            message: format!("SWR1001: Unterminated {what} literal."),
+            start: u32_at(at),
+            end: u32_at(at),
+            severity: Severity::Error,
+            related: Vec::new(),
+        });
+    }
+
     fn read_string(&mut self, start: usize, quote: char) -> Syntax {
         self.index += 1;
         // A template literal is one string. `${...}` may hold quotes, and a
@@ -403,12 +424,18 @@ impl<'a> Reader<'a> {
                 self.index += 1;
                 continue;
             }
+            if ch == '\n' && quote != '`' {
+                self.unterminated(start, self.index, "string");
+                self.index += 1;
+                break;
+            }
             self.index += 1;
             if ch == quote {
                 break;
             }
-            if ch == '\n' && quote != '`' {
-                break;
+            if self.index >= self.bytes.len() {
+                let what = if quote == '`' { "template" } else { "string" };
+                self.unterminated(start, self.index, what);
             }
         }
         Syntax::String {

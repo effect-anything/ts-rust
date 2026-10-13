@@ -116,6 +116,9 @@ struct Validator<'a> {
     next_group: usize,
     /// Definitions that failed to compile; upstream does not bind them.
     invalid: HashSet<String>,
+    /// Names a binding literal's path may start from: globals and what the
+    /// file declares or imports.
+    resolvable: HashSet<String>,
 }
 
 /// Check every definition in the file's top level, and report definitions
@@ -130,6 +133,7 @@ pub(crate) fn validate(
         out: Vec::new(),
         next_group: 0,
         invalid: HashSet::new(),
+        resolvable: declared_names(nodes),
     };
     // Classes first: a class failing SWR2009 is unresolved where it is used.
     for (index, _) in nodes.iter().enumerate() {
@@ -336,6 +340,23 @@ impl Validator<'_> {
         }
         let mut index = 0;
         while index < body.len() {
+            // `literal globalThis.NaN as NaN`: the path must resolve.
+            if is(body.get(index), "literal")
+                && let Some(root) = raw(body.get(index + 1))
+                && !self.resolvable.contains(root)
+            {
+                let mut path = String::new();
+                let mut at = index + 1;
+                while at < body.len() && !is(body.get(at), "as") && !is(body.get(at), ";") {
+                    path.push_str(raw(body.get(at)).unwrap_or(""));
+                    at += 1;
+                }
+                let alias = raw(body.get(at + 1)).unwrap_or("unknown");
+                self.out.push(error(
+                    format!("SWR4009: Binding literal {alias} cannot resolve {path}."),
+                    span(&body[index]),
+                ));
+            }
             if is(body.get(index), "rule") {
                 match group(body.get(index + 1), Delimiter::Brace) {
                     Some(pattern) => self.rule(body, index, pattern),
@@ -759,6 +780,175 @@ impl Validator<'_> {
     }
 }
 
+/// The global object's names and every name the file's top level declares
+/// or imports.
+fn declared_names(nodes: &[Syntax]) -> HashSet<String> {
+    let mut out: HashSet<String> = ["globalThis", "window", "self", "global"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    for (index, node) in nodes.iter().enumerate() {
+        if matches!(
+            raw(Some(node)),
+            Some("const" | "let" | "var" | "function" | "class" | "enum" | "namespace")
+        ) && let Some(name) = raw(nodes.get(index + 1)).filter(|name| is_word(name))
+        {
+            out.insert(name.to_owned());
+        }
+        if is(Some(node), "import")
+            && let Some(names) = group(nodes.get(index + 1), Delimiter::Brace)
+        {
+            for name in names {
+                if let Some(word) = raw(Some(name)).filter(|word| is_word(word)) {
+                    out.insert(word.to_owned());
+                }
+            }
+        }
+        if is(Some(node), "import")
+            && let Some(name) = raw(nodes.get(index + 1)).filter(|name| is_word(name))
+        {
+            out.insert(name.to_owned());
+        }
+        if is(Some(node), "as")
+            && let Some(name) = raw(nodes.get(index + 1)).filter(|name| is_word(name))
+        {
+            out.insert(name.to_owned());
+        }
+    }
+    out
+}
+
+/// Whether the import at `index` that names `for syntax` has upstream's
+/// shape: named bindings, a module string, `for syntax`, and an optional
+/// `shadows core`, ending the statement.
+pub(crate) fn syntax_import_well_formed(source: &str, nodes: &[Syntax], index: usize) -> bool {
+    let shaped = group(nodes.get(index + 1), Delimiter::Brace).is_some()
+        && is(nodes.get(index + 2), "from")
+        && matches!(nodes.get(index + 3), Some(Syntax::String { .. }))
+        && is(nodes.get(index + 4), "for")
+        && is(nodes.get(index + 5), "syntax");
+    if !shaped {
+        return false;
+    }
+    let mut end = index + 6;
+    if is(nodes.get(end), "shadows") && is(nodes.get(end + 1), "core") {
+        end += 2;
+    }
+    match nodes.get(end) {
+        None => true,
+        Some(next) if is(Some(next), ";") => true,
+        Some(next) => {
+            let gap = &source[span(&nodes[end - 1]).end as usize..span(next).start as usize];
+            gap.contains('\n')
+        }
+    }
+}
+
+/// SWR2019 for every `for syntax` import that is not well formed.
+pub(crate) fn malformed_syntax_imports(source: &str, nodes: &[Syntax]) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for index in 0..nodes.len() {
+        if !is(nodes.get(index), "import") {
+            continue;
+        }
+        let mut cursor = index + 1;
+        let mut names_syntax = false;
+        while cursor < nodes.len() && !is(nodes.get(cursor), ";") && cursor < index + 10 {
+            if is(nodes.get(cursor), "for") && is(nodes.get(cursor + 1), "syntax") {
+                names_syntax = true;
+                break;
+            }
+            if is(nodes.get(cursor), "import") {
+                break;
+            }
+            cursor += 1;
+        }
+        if names_syntax && !syntax_import_well_formed(source, nodes, index) {
+            out.push(error(
+                "SWR2019: Malformed compile-time syntax import: expected named bindings, module string, `for syntax`, and optional `shadows core`.".to_owned(),
+                span(&nodes[index]),
+            ));
+        }
+    }
+    out
+}
+
+/// Each definition of this file whose template parameterizes a name that is
+/// not a syntax parameter in scope here (SWR4019, reported where the macro
+/// is used): the macro and the name.
+pub(crate) fn unknown_parameterizations(
+    nodes: &[Syntax],
+    in_scope: &HashSet<String>,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for index in 0..nodes.len() {
+        let name = if is(nodes.get(index), "syntax")
+            && !is(nodes.get(index + 1), "class")
+            && !is(nodes.get(index + 1), "parameter")
+            && !(index > 0 && is(nodes.get(index - 1), "for"))
+        {
+            raw(nodes.get(index + 1)).map(str::to_owned)
+        } else if is(nodes.get(index), "operator") {
+            group(nodes.get(index + 1), Delimiter::Paren)
+                .map(|spelling| spelling.iter().filter_map(|node| raw(Some(node))).collect())
+        } else {
+            None
+        };
+        let Some(name) = name else {
+            continue;
+        };
+        let Some(body) = nodes[index..]
+            .iter()
+            .take(8)
+            .find_map(|node| group(Some(node), Delimiter::Brace))
+        else {
+            continue;
+        };
+        if let Some(param) = first_unknown_parameter(body, in_scope) {
+            out.entry(name).or_insert(param);
+        }
+    }
+    out
+}
+
+fn first_unknown_parameter(nodes: &[Syntax], in_scope: &HashSet<String>) -> Option<String> {
+    for (index, node) in nodes.iter().enumerate() {
+        let args = if is(Some(node), "#") && is(nodes.get(index + 1), "parameterize") {
+            group(nodes.get(index + 2), Delimiter::Paren)
+        } else if is(Some(node), "#parameterize") {
+            group(nodes.get(index + 1), Delimiter::Paren)
+        } else {
+            None
+        };
+        if let Some(args) = args {
+            let mut param = String::new();
+            for arg in args {
+                match raw(Some(arg)) {
+                    Some("=") => break,
+                    Some("required") if param.is_empty() => {}
+                    Some(word) => param.push_str(word),
+                    None => {
+                        if let Syntax::Group { children, .. } = arg {
+                            for child in children {
+                                param.push_str(raw(Some(child)).unwrap_or(""));
+                            }
+                        }
+                    }
+                }
+            }
+            if !param.is_empty() && !in_scope.contains(&param) {
+                return Some(param);
+            }
+        }
+        if let Syntax::Group { children, .. } = node
+            && let Some(param) = first_unknown_parameter(children, in_scope)
+        {
+            return Some(param);
+        }
+    }
+    None
+}
+
 fn is_arrow(nodes: &[Syntax], index: usize) -> bool {
     is(nodes.get(index), "=>") || (is(nodes.get(index), "=") && is(nodes.get(index + 1), ">"))
 }
@@ -910,5 +1100,19 @@ mod tests {
         ] {
             assert_eq!(codes(code), expected, "{code}");
         }
+    }
+
+    #[test]
+    fn binding_literal_paths_resolve() {
+        assert_eq!(
+            codes(
+                "export syntax foo:expr {\n  literal nosuch.thing as NaN;\n  rule { foo() } => { NaN }\n}\n"
+            ),
+            ["SWR4009"]
+        );
+        assert!(
+            codes("export syntax foo:expr {\n  literal globalThis.NaN as NaN;\n  rule { foo() } => { NaN }\n}\n")
+                .is_empty()
+        );
     }
 }
