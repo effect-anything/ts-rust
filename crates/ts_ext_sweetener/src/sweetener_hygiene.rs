@@ -35,13 +35,6 @@ pub(crate) fn placeholder(name: &str) -> String {
     format!("{PREFIX}{id}_{name}")
 }
 
-/// A `,` that is printed only when none of `placeholders` was renamed.
-/// Theirs prints a trailing comma after an untouched parameter list and
-/// drops it when hygiene renames one, which is known only on the output.
-pub(crate) fn comma_unless_renamed(placeholders: &[&str]) -> String {
-    format!("/*{PREFIX},{}*/", placeholders.join(","))
-}
-
 thread_local! {
     static SCOPE: std::cell::RefCell<Option<HashMap<String, String>>> =
         const { std::cell::RefCell::new(None) };
@@ -57,26 +50,11 @@ pub(crate) fn in_scope<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// The placeholder for `name` in the current expansion.
-pub(crate) fn scoped(name: &str) -> String {
-    SCOPE.with(|scope| match scope.borrow_mut().as_mut() {
-        Some(map) => map
-            .entry(name.to_owned())
-            .or_insert_with(|| placeholder(name))
-            .clone(),
-        None => placeholder(name),
-    })
-}
-
 /// Hand `printed` to the form that will print `name`'s declaration.
 pub(crate) fn remember(name: &str, printed: &str) {
     REMEMBERED.with(|map| {
         map.borrow_mut().insert(name.to_owned(), printed.to_owned());
     });
-}
-
-pub(crate) fn take_remembered(name: &str) -> Option<String> {
-    REMEMBERED.with(|map| map.borrow_mut().remove(name))
 }
 
 pub(crate) fn is_placeholder(text: &str) -> bool {
