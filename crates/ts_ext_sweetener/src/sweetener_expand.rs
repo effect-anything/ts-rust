@@ -1692,9 +1692,18 @@ impl<'a> Printer<'a> {
         .unwrap_or_else(|| (String::new(), node_end(&nodes[op_at]), op_at + 1));
         // `received <-;` has no channel expression. Binding the hole to
         // empty text would print `yield take()`.
+        // A syntax parameter (`%`) is spelled like an operator but reads as
+        // an operand: `x |> %` and `x |> % + %` have one.
         let unreadable = !right
             .chars()
-            .any(|ch| ch.is_alphanumeric() || "_$\"'`([{".contains(ch));
+            .any(|ch| ch.is_alphanumeric() || "_$\"'`([{".contains(ch))
+            && !nodes
+                .get(op_at + 1..next.min(nodes.len()))
+                .is_some_and(|operand| {
+                    operand
+                        .iter()
+                        .any(|node| matches!(node, Syntax::Operator { raw, .. } if is_syntax_parameter(raw)))
+                });
         let expression_operator = self
             .macros
             .iter()
@@ -9720,6 +9729,28 @@ fn is_operator_spelling(raw: &str) -> bool {
     !raw.is_empty() && raw.chars().all(|ch| "!=<>&|?+-*/%^~".contains(ch))
 }
 
+/// True when `nodes[index]` is a syntax parameter (`%`) where the
+/// expression that starts at `cursor` expects an operand: at its start, or
+/// after an operator that is not itself such an operand. Elsewhere the same
+/// spelling is the binary operator (`% % 2` is the parameter modulo 2).
+fn is_operand_parameter(nodes: &[Syntax], cursor: usize, index: usize) -> bool {
+    let is_parameter = |at: usize| matches!(nodes.get(at), Some(Syntax::Operator { raw, .. }) if is_syntax_parameter(raw));
+    if !is_parameter(index) {
+        return false;
+    }
+    let mut expect_operand = true;
+    for (at, node) in nodes.iter().enumerate().take(index).skip(cursor) {
+        match node {
+            Syntax::Comment { .. } => {}
+            Syntax::Operator { .. } if expect_operand && is_parameter(at) => expect_operand = false,
+            Syntax::Operator { raw, .. } if raw == "." => expect_operand = false,
+            Syntax::Operator { .. } => expect_operand = true,
+            _ => expect_operand = false,
+        }
+    }
+    expect_operand
+}
+
 /// Operand of a right-associative operator, including another copy of that
 /// operator. `2 ** 3 ** 2` captures `3 ** 2`, not just `3`.
 fn take_right_assoc_operand(
@@ -9767,6 +9798,10 @@ fn take_right_assoc_operand(
             }
             continue;
         }
+        if is_operand_parameter(nodes, cursor, index) {
+            index += 1;
+            continue;
+        }
         if matches!(node, Syntax::Operator { .. })
             && nodes.get(index + 1).is_some_and(is_expr_start)
         {
@@ -9798,7 +9833,9 @@ fn take_expr_until(
     index += 1;
     // `-4` starts on the operator. The operand is the next primary, not a
     // trailing operator the walk would drop.
-    if matches!(start_node, Syntax::Operator { .. }) && nodes.get(index).is_some_and(is_expr_start)
+    if matches!(start_node, Syntax::Operator { .. })
+        && !is_operand_parameter(nodes, cursor, cursor)
+        && nodes.get(index).is_some_and(is_expr_start)
     {
         index += 1;
     }
@@ -9885,6 +9922,10 @@ fn take_expr_until(
             }
             break;
         }
+        if is_operand_parameter(nodes, cursor, index) {
+            index += 1;
+            continue;
+        }
         if matches!(node, Syntax::Operator { .. }) {
             if stop_op.is_some() && operator_spelling(node) == stop_op && index > cursor {
                 break;
@@ -9920,7 +9961,10 @@ fn take_expr_until(
     }
     // Walk back if we consumed a trailing infix operator with no
     // right-hand side. A leading `-4` is the expression, not a trailing op.
-    while index > cursor + 1 && matches!(nodes.get(index - 1), Some(Syntax::Operator { .. })) {
+    while index > cursor + 1
+        && matches!(nodes.get(index - 1), Some(Syntax::Operator { .. }))
+        && !is_operand_parameter(nodes, cursor, index - 1)
+    {
         // `!==` was consumed as operators. Do not walk back onto `!` when
         // `==` and its operand are already part of the expression.
         let chained = matches!(nodes.get(index - 1), Some(Syntax::Operator { raw, .. }) if is_operator_spelling(raw))

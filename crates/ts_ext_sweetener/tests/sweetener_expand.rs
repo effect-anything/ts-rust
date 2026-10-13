@@ -1,7 +1,8 @@
 use std::fs;
 
 use ts_ext_sweetener::{
-    ExpandRequest, Phase, ResourceBudget, Severity, expand, expand_with_budget, structure,
+    ExpandRequest, Phase, ResourceBudget, SegmentKind, Severity, expand, expand_with_budget,
+    structure,
 };
 
 #[test]
@@ -845,6 +846,54 @@ async function load(id) {{\n  return id |> await get(%) |> %.name;\n}}\n"
         assert!(code.contains(piece), "missing {piece}: {code}");
     }
     assert!(!code.contains("note"), "{code}");
+}
+
+/// `%` spelled like an operator is still an operand where one is expected:
+/// as the whole body, as the last token of the body, and after another
+/// operator. Upstream prints each of these.
+#[test]
+fn a_syntax_parameter_ends_an_operand() {
+    let source = format!(
+        "{HACK_PIPE}const a = (() => 7)() |> % + %;\n\
+const b = x |> %;\n\
+const c = x |> 1 + %;\n\
+const d = x |> f(%) + %;\n\
+const e = x |> % |> % + 1;\n"
+    );
+    let out = expand(ExpandRequest {
+        filename: "pipe.sts",
+        code: &source,
+        phase: Phase::Check,
+    });
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    let code = out.code.split_whitespace().collect::<Vec<_>>().join(" ");
+    for piece in [
+        "const a = ((topic) => topic + topic)((() => 7)());",
+        "const b = ((topic_1) => topic_1)(x);",
+        "const c = ((topic_2) => 1 + topic_2)(x);",
+        "const d = ((topic_3) => f(topic_3) + topic_3)(x);",
+        "const e = ((topic_4) => ((topic_5) => topic_5 + 1)(topic_4))(x);",
+    ] {
+        assert!(code.contains(piece), "missing {piece}: {code}");
+    }
+    // The map covers the output in order; author text the body kept
+    // (`1 +`, `f(`) is verbatim, the rest names the invocation.
+    let mut at = 0;
+    for segment in &out.segments {
+        assert_eq!(segment.virtual_start, at, "gap before {segment:?}");
+        at = segment.virtual_end;
+        let original = &source[segment.original_start as usize..segment.original_end as usize];
+        let text = &out.code[segment.virtual_start as usize..segment.virtual_end as usize];
+        if segment.kind == SegmentKind::Verbatim {
+            assert_eq!(original, text);
+        } else if text.contains("topic") {
+            assert!(
+                original.contains("|>") && original.contains('%'),
+                "{original:?} -> {text:?}"
+            );
+        }
+    }
+    assert_eq!(at as usize, out.code.len());
 }
 
 /// A `required` parameter the body never uses is SWR4022; a parameter used
