@@ -8,6 +8,7 @@ pub mod structure;
 
 mod sweetener;
 mod sweetener_apps;
+mod sweetener_budget;
 mod sweetener_context;
 mod sweetener_expand;
 mod sweetener_forms;
@@ -165,6 +166,15 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     }
     unchanged(request.code)
 }
+
+/// [`expand`] under explicit resource limits instead of upstream's
+/// defaults. A non-macro file is unchanged.
+#[must_use]
+pub fn expand_with_budget(request: ExpandRequest<'_>, budget: ResourceBudget) -> Expansion {
+    sweetener_budget::with_budget(budget, || expand(request))
+}
+
+pub use sweetener_budget::ResourceBudget;
 
 #[must_use]
 pub fn unchanged(code: &str) -> Expansion {

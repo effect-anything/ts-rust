@@ -1,6 +1,8 @@
 use std::fs;
 
-use ts_ext_sweetener::{ExpandRequest, Phase, Severity, expand, structure};
+use ts_ext_sweetener::{
+    ExpandRequest, Phase, ResourceBudget, Severity, expand, expand_with_budget, structure,
+};
 
 #[test]
 fn every_local_macro_case_matches_theirs() {
@@ -1071,6 +1073,71 @@ fn expansion_cycles_and_depth_are_budgeted() {
         assert!(out.diagnostics[0].message.starts_with(expected));
         let at = out.diagnostics[0].start as usize;
         assert!(code[at..].starts_with(&kept[10..]), "{at}");
+    }
+}
+
+#[test]
+fn resource_budgets_stop_expansion_with_swr4015() {
+    let code = "export syntax twice:expr {\n  rule { twice($x:expr) } => { [$x, $x] }\n}\nconst a = twice(1);\nconst b = twice(2);\n";
+    let request = || ExpandRequest {
+        filename: "budget.sts",
+        code,
+        phase: Phase::Check,
+    };
+    let fine = expand(request());
+    assert!(fine.diagnostics.is_empty(), "{:?}", fine.diagnostics);
+    assert!(fine.code.contains("const b = [2, 2];"), "{}", fine.code);
+    for (budget, kind) in [
+        (
+            ResourceBudget {
+                max_expansion_steps: 1,
+                ..ResourceBudget::default()
+            },
+            "expansion-steps",
+        ),
+        (
+            ResourceBudget {
+                max_output_tokens: 3,
+                ..ResourceBudget::default()
+            },
+            "output-tokens",
+        ),
+        (
+            ResourceBudget {
+                max_input_tokens: 5,
+                ..ResourceBudget::default()
+            },
+            "input-tokens",
+        ),
+        (
+            ResourceBudget {
+                max_matcher_steps: 1,
+                ..ResourceBudget::default()
+            },
+            "matcher-steps",
+        ),
+        (
+            ResourceBudget {
+                deadline: Some(std::time::Duration::ZERO),
+                ..ResourceBudget::default()
+            },
+            "deadline",
+        ),
+    ] {
+        let out = expand_with_budget(request(), budget);
+        let message = format!("reached the {kind} limit. No further macros in it were expanded.");
+        assert!(
+            out.diagnostics
+                .iter()
+                .any(|d| d.message.starts_with("SWR4015") && d.message.contains(&message)),
+            "{kind}: {:?}",
+            out.diagnostics
+        );
+        assert!(
+            out.code.contains("const b = twice(2);"),
+            "{kind}: {}",
+            out.code
+        );
     }
 }
 

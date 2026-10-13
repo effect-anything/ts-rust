@@ -169,6 +169,13 @@ fn expand_pass(
     });
     super::sweetener_scoped::clear_unused();
     BUDGET.with(|budget| budget.borrow_mut().take());
+    super::sweetener_budget::reset();
+    if let Err(message) = super::sweetener_budget::charge(
+        super::sweetener_budget::Kind::InputTokens,
+        super::sweetener_budget::count_tokens(source),
+    ) {
+        note_budget(message);
+    }
     ACTIVE_EXPANSIONS.with(|active| active.borrow_mut().clear());
     let imports = syntax_imports(source, &read.children);
     let names_again = names.clone();
@@ -1720,6 +1727,7 @@ impl<'a> Printer<'a> {
 
     fn expand_head(&mut self, nodes: &[Syntax], index: usize, name: &str) -> usize {
         let head = &nodes[index];
+        super::sweetener_budget::enter(name);
         let head_span = node_span(head);
         self.copy_until(head_span.start as usize);
         let rules: Vec<Rule> = self.rules_named(&name, node_start(&nodes[index]));
@@ -1797,12 +1805,24 @@ impl<'a> Printer<'a> {
                     self.printing_core = true;
                 }
                 self.note_captures(&matched.captures);
+                if let Err(message) = super::sweetener_budget::charge(
+                    super::sweetener_budget::Kind::ExpansionSteps,
+                    1,
+                ) {
+                    note_budget(message);
+                }
                 let (mut replacement, protected) = instantiate_marked(
                     self.source,
                     &rule.template,
                     &matched.captures,
                     &self.classes,
                 );
+                if let Err(message) = super::sweetener_budget::charge(
+                    super::sweetener_budget::Kind::OutputTokens,
+                    super::sweetener_budget::count_tokens(&replacement),
+                ) {
+                    note_budget(message);
+                }
                 // `#core(...)` hides its binders from the template tree.
                 // The rendered text is the binding that must not collide.
                 self.define_syntax(&rule.template, &matched.captures);
@@ -2216,6 +2236,9 @@ impl<'a> Printer<'a> {
             note_budget(format!(
                 "SWR4014: Macro {name} expanded to itself and would not terminate. A rule has to reduce its input, so one of them must match without reaching this macro again."
             ));
+            return owned;
+        }
+        if super::sweetener_budget::exhausted() {
             return owned;
         }
         if usize::from(self.depth) >= MAX_NESTING_DEPTH {
@@ -7877,6 +7900,13 @@ fn match_pats_cont(
     rep_stop: &[String],
     cont: &Cont<'_>,
 ) -> Option<usize> {
+    if let Err(message) = super::sweetener_budget::charge(
+        super::sweetener_budget::Kind::MatcherSteps,
+        u64::try_from(pattern.len()).unwrap_or(u64::MAX).max(1),
+    ) {
+        note_budget(message);
+        return None;
+    }
     let start_end = nodes.get(*cursor).map(node_start).unwrap_or(0);
     let mut last_end = start_end;
     for (pat_index, pat) in pattern.iter().enumerate() {
@@ -11241,6 +11271,13 @@ fn render(
     protected: &mut Vec<(usize, usize)>,
 ) {
     let template = trim_template(template);
+    if let Err(message) = super::sweetener_budget::charge(
+        super::sweetener_budget::Kind::TemplateSteps,
+        u64::try_from(template.len()).unwrap_or(u64::MAX),
+    ) {
+        note_budget(message);
+        return;
+    }
     for (index, part) in template.iter().enumerate() {
         match part {
             Tpl::Text(text) => {
