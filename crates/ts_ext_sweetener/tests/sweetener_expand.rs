@@ -725,3 +725,28 @@ const b = 1 + x ::;\n\
     assert!(code.contains("const a = assertDefined(load());"), "{code}");
     assert!(code.contains("const b = assertDefined(1 + x);"), "{code}");
 }
+
+/// Hygiene asks the output, as upstream does: a binder the user wrote inside
+/// input a macro consumed (and did not print again) does not force a rename,
+/// one still printed does.
+#[test]
+fn hygiene_counts_only_names_the_output_spells() {
+    let code = "export syntax wrap:item {\n\
+  rule { wrap function $name:binding({ id }) { } } => {\n\
+    function $name(input: { id: number }) { const { id } = input; return id; }\n\
+  }\n\
+}\n\
+wrap function C({ id }) { }\n\
+";
+    let consumed = expand_ok("hygiene.sts", code);
+    assert!(
+        consumed.contains("const { id } = input; return id;"),
+        "{consumed}"
+    );
+    let kept = format!("{code}const id = 1;\n");
+    let kept = expand_ok("hygiene.sts", &kept);
+    assert!(
+        kept.contains("const { id: id_1 } = input; return id_1;"),
+        "{kept}"
+    );
+}

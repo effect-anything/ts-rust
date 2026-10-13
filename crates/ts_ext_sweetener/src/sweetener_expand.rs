@@ -59,10 +59,113 @@ use super::sweetener_reader::{self, Delimiter, Span, Syntax};
 /// is left as written; the rest of the file still expands.
 #[must_use]
 pub fn expand(request: ExpandRequest<'_>) -> Expansion {
+    let first = expand_pass(&request, None);
+    if first.1.is_empty() {
+        return first.0;
+    }
+    // Upstream decides hygiene on the printed program: a name is
+    // unavailable when the OUTPUT spells it. User code a top-level macro
+    // consumed and did not print again (its literal pattern tokens) is not
+    // in the output, so its binders do not force a rename. Its captures are
+    // printed again and still count.
+    let names = output_user_names(request.code, &first.1);
+    expand_pass(&request, Some(names)).0
+}
+
+/// User binders still present in the output: the source outside consumed
+/// top-level invocations, plus the captures those invocations print again.
+fn output_user_names(
+    source: &str,
+    consumed: &[(usize, usize, Vec<String>)],
+) -> std::collections::HashSet<String> {
+    let mut masked = source.as_bytes().to_vec();
+    // Definitions are not printed either.
+    let read = sweetener_reader::read_syntax(source);
+    let mut ranges: Vec<(usize, usize)> = consumed.iter().map(|(s, e, _)| (*s, *e)).collect();
+    for index in 0..read.children.len() {
+        // `... from "./m.sts" for syntax;` is an import, not a definition.
+        let after_for = index > 0 && token_at(&read.children, index - 1, "for");
+        if after_for || (index > 0 && token_at(&read.children, index - 1, "export")) {
+            continue;
+        }
+        if let Some(end) = local_syntax_end(&read.children, index) {
+            ranges.push((node_start(&read.children[index]), end));
+        }
+    }
+    for (start, end) in &ranges {
+        for byte in masked.get_mut(*start..*end).into_iter().flatten() {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    let masked = String::from_utf8(masked).unwrap_or_else(|_| source.to_owned());
+    let mut names = user_spellings(&sweetener_reader::read_syntax(&masked).children);
+    for (_, _, captures) in consumed {
+        for text in captures {
+            let text = text.trim();
+            if is_ident_text(text) {
+                names.insert(text.to_owned());
+            } else {
+                names.extend(user_spellings(
+                    &sweetener_reader::read_syntax(text).children,
+                ));
+            }
+        }
+    }
+    names
+}
+
+/// Whether `needle` occurs in `haystack` not inside a longer identifier.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let ident = |ch: char| ch == '_' || ch == '$' || ch.is_alphanumeric();
+    haystack.match_indices(needle).any(|(at, _)| {
+        let before = haystack[..at].chars().next_back();
+        let after = haystack[at + needle.len()..].chars().next();
+        !before.is_some_and(ident) && !after.is_some_and(ident)
+    })
+}
+
+/// The text of every capture, flattening repetitions and records.
+fn capture_texts(captures: &HashMap<String, Capture>) -> Vec<String> {
+    fn walk(capture: &Capture, out: &mut Vec<String>) {
+        match capture {
+            Capture::Text(text) => out.push(text.clone()),
+            // A class match is printed through its fields, not as a whole.
+            Capture::Record { fields, .. } => {
+                for value in fields.values() {
+                    walk(value, out);
+                }
+            }
+            Capture::Many(rows) => {
+                for row in rows {
+                    for (_, value) in row {
+                        walk(value, out);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for capture in captures.values() {
+        walk(capture, &mut out);
+    }
+    out
+}
+
+/// One expansion of the file. `names` replaces the source's user binders as
+/// the names an introduced binder must not take.
+fn expand_pass(
+    request: &ExpandRequest<'_>,
+    names: Option<std::collections::HashSet<String>>,
+) -> (Expansion, Vec<(usize, usize, Vec<String>)>) {
     let source = request.code;
     let read = sweetener_reader::read_syntax(source);
     let imports = syntax_imports(&read.children);
-    let user_names = user_spellings(&read.children);
+    let user_names = names.unwrap_or_else(|| user_spellings(&read.children));
     let mut loaded = load_macros(request.filename, source, &imports, &user_names);
     let mut local = HashMap::new();
     collect_macros(source, &read.children, &mut local);
@@ -97,7 +200,9 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
         dependencies: loaded.dependencies,
         depth: 0,
         printing_core: false,
-        user_names: user_spellings(&read.children),
+        user_names: user_names.clone(),
+        pending_captures: None,
+        consumed: Vec::new(),
         classes: share_list(loaded.classes),
         runtime_imports: loaded.runtime_imports,
         hygiene: HashMap::new(),
@@ -131,12 +236,15 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     printer
         .diagnostics
         .extend(unread_items(source, &read.children));
-    Expansion {
-        code: printer.out,
-        segments: printer.segments,
-        diagnostics: printer.diagnostics,
-        dependencies: printer.dependencies,
-    }
+    (
+        Expansion {
+            code: printer.out,
+            segments: printer.segments,
+            diagnostics: printer.diagnostics,
+            dependencies: printer.dependencies,
+        },
+        printer.consumed,
+    )
 }
 
 /// SWR2016: templates of this file's own definitions that upstream's
@@ -427,6 +535,12 @@ struct Printer<'a> {
     /// Spellings the user file already binds. A macro binding that collides
     /// is printed with a suffix; the user's spelling is not rewritten.
     user_names: std::collections::HashSet<String>,
+    /// Captures of the rule being instantiated at the top level, until its
+    /// expansion is emitted.
+    pending_captures: Option<Vec<String>>,
+    /// Top-level invocations a rule consumed: original range and the text
+    /// of each capture (the user code that is printed again).
+    consumed: Vec<(usize, usize, Vec<String>)>,
     /// Syntax classes compiled from the same modules as the macros.
     classes: SharedList<SyntaxClass>,
     /// Runtime imports the macro module needs, printed once at the top.
@@ -917,6 +1031,7 @@ impl<'a> Printer<'a> {
                     if template_is_core(&rule.template) {
                         self.printing_core = true;
                     }
+                    self.note_captures(&matched.captures);
                     let replacement = instantiate(
                         self.source,
                         &rule.template,
@@ -950,6 +1065,7 @@ impl<'a> Printer<'a> {
                 if template_is_core(&rule.template) {
                     self.printing_core = true;
                 }
+                self.note_captures(&captures);
                 let mut replacement =
                     instantiate(self.source, &rule.template, &captures, &self.classes);
                 // The rule's trailing `;` is the statement terminator. Emit it
@@ -1026,6 +1142,7 @@ impl<'a> Printer<'a> {
             if template_is_core(&rule.template) {
                 self.printing_core = true;
             }
+            self.note_captures(&captures);
             let replacement = instantiate(self.source, &rule.template, &captures, &self.classes);
             let expanded = self.expand_replacement(&replacement);
             self.printing_core = was_core;
@@ -1102,6 +1219,7 @@ impl<'a> Printer<'a> {
                 if template_is_core(&rule.template) {
                     self.printing_core = true;
                 }
+                self.note_captures(&matched.captures);
                 let replacement = instantiate(
                     self.source,
                     &rule.template,
@@ -1212,6 +1330,7 @@ impl<'a> Printer<'a> {
                 if template_is_core(&rule.template) {
                     self.printing_core = true;
                 }
+                self.note_captures(&matched.captures);
                 let (mut replacement, protected) = instantiate_marked(
                     self.source,
                     &rule.template,
@@ -1341,6 +1460,8 @@ impl<'a> Printer<'a> {
             depth: self.depth + 1,
             printing_core: false,
             user_names: self.user_names.clone(),
+            pending_captures: None,
+            consumed: Vec::new(),
             classes: self.classes.clone(),
             runtime_imports: Vec::new(),
             hygiene: HashMap::new(),
@@ -1560,6 +1681,8 @@ impl<'a> Printer<'a> {
             depth: self.depth + 1,
             printing_core: self.printing_core,
             user_names: self.user_names.clone(),
+            pending_captures: None,
+            consumed: Vec::new(),
             classes: self.classes.clone(),
             runtime_imports: Vec::new(),
             hygiene: self.hygiene.clone(),
@@ -2160,7 +2283,27 @@ impl<'a> Printer<'a> {
         self.last_original = original_end;
     }
 
+    /// The captures of a rule about to be instantiated. At the top level
+    /// they are the user code that survives into the output.
+    fn note_captures(&mut self, captures: &HashMap<String, Capture>) {
+        if self.depth == 0 {
+            self.pending_captures = Some(capture_texts(captures));
+        }
+    }
+
     fn emit(&mut self, original_start: u32, original_end: u32, text: &str, kind: SegmentKind) {
+        if self.depth == 0 && kind == SegmentKind::Atom {
+            if let Some(captures) = self.pending_captures.take() {
+                // Only a capture the expansion prints again is in the output.
+                // A `#syntax` definition prints nothing of its captures.
+                let printed = captures
+                    .into_iter()
+                    .filter(|capture| contains_word(text, capture.trim()))
+                    .collect();
+                self.consumed
+                    .push((original_start as usize, original_end as usize, printed));
+            }
+        }
         if text.is_empty() {
             return;
         }
@@ -8208,6 +8351,22 @@ fn collect_user_binders(nodes: &[Syntax], names: &mut std::collections::HashSet<
         if is_binder_keyword(nodes, index) {
             if let Some(name) = binder_name_after(nodes, index) {
                 names.insert(name);
+            }
+            // `const [id, setId] = ...` and `const { a, b } = ...`.
+            if ["const", "let", "var"]
+                .iter()
+                .any(|word| token_at(nodes, index, word))
+            {
+                if let Some(Syntax::Group {
+                    delimiter: Delimiter::Bracket | Delimiter::Brace,
+                    children,
+                    ..
+                }) = nodes.get(index + 1)
+                {
+                    let mut bound = Vec::new();
+                    pattern_binders(children, &mut bound);
+                    names.extend(bound);
+                }
             }
             // `function Component({ cond = false, id }: Props)` binds `id`.
             // The template's own `id` is then printed `id_1`.
