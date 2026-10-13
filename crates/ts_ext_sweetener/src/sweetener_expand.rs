@@ -282,8 +282,10 @@ fn capture_texts(captures: &HashMap<String, Capture>) -> Vec<String> {
         }
     }
     let mut out = Vec::new();
-    for capture in captures.values() {
-        walk(capture, &mut out);
+    for (key, capture) in captures {
+        if !is_literal_key(key) {
+            walk(capture, &mut out);
+        }
     }
     out
 }
@@ -6873,6 +6875,9 @@ enum Capture {
         fields: HashMap<String, Capture>,
         /// Where `text` starts in the printer's source.
         at: Option<u32>,
+        /// Word literals of the class rule that matched, and where each
+        /// matched the input (see [`record_literal`]).
+        literals: Vec<(String, u32)>,
     },
     Many(Vec<Vec<(String, Capture)>>),
 }
@@ -8389,6 +8394,7 @@ fn match_pats_cont(
                     last_end = node_end(&nodes[*cursor + width - 1]);
                     *cursor += width;
                 } else if node_is_lit(node, expected) {
+                    record_literal(source, captures, expected, node);
                     last_end = node_end(node);
                     *cursor += 1;
                 } else {
@@ -8630,7 +8636,12 @@ fn match_pats_cont(
                     for key in before {
                         one.remove(&key);
                     }
-                    let mut one: Vec<(String, Capture)> = one.into_iter().collect();
+                    // A literal's match position belongs to this step, and a
+                    // row is only its holes.
+                    let mut one: Vec<(String, Capture)> = one
+                        .into_iter()
+                        .filter(|(key, _)| !is_literal_key(key))
+                        .collect();
                     // A separator that was written inside the repetition
                     // (`$($rest:tt,)+`) is not part of the captured step.
                     if sep.is_some() {
@@ -8674,10 +8685,9 @@ fn match_pats_cont(
                     if let Some(sep) = sep {
                         let saved = *cursor;
                         skip_comments(nodes, cursor);
-                        if nodes
-                            .get(*cursor)
-                            .is_some_and(|node| node_is_lit(node, sep))
+                        if let Some(node) = nodes.get(*cursor).filter(|node| node_is_lit(node, sep))
                         {
+                            record_literal(source, captures, sep, node);
                             resume_next = saved;
                             *cursor += 1;
                             continue;
@@ -8909,6 +8919,16 @@ fn take_class(
             continue;
         }
         let text = sweetener_reader::slice_range(source, start, end).to_owned();
+        let mut literals: Vec<(String, u32)> = Vec::new();
+        raw.retain(|key, value| {
+            let Some(word) = key.strip_prefix(LITERAL_KEY) else {
+                return true;
+            };
+            if let Capture::Text(_, Some(at)) = value {
+                literals.push((word.to_owned(), *at));
+            }
+            false
+        });
         let mut fields = HashMap::new();
         for field in &class_.fields {
             let Some(value) = raw.remove(&field.name) else {
@@ -8940,7 +8960,16 @@ fn take_class(
             }
         }
         let at = u32::try_from(start).ok();
-        return Some((Capture::Record { text, fields, at }, end, child));
+        return Some((
+            Capture::Record {
+                text,
+                fields,
+                at,
+                literals,
+            },
+            end,
+            child,
+        ));
     }
     None
 }
@@ -10983,16 +11012,26 @@ fn instantiate_marked(
     let _ = source;
     let mut out = String::new();
     let mut protected = Vec::new();
+    let owner = std::ptr::from_ref(&out) as usize;
+    let outer = LITERAL_SINK.with(|sink| sink.replace(Some((owner, Vec::new()))));
     render(&mut out, template, captures, classes, &mut protected);
-    // Each capture the template printed is a copy of the printer's source.
-    let pieces: Vec<Piece> = protected
+    let literals = LITERAL_SINK
+        .with(|sink| sink.replace(outer))
+        .map(|(_, found)| found)
+        .unwrap_or_default();
+    // Each capture the template printed is a copy of the printer's source,
+    // and so is each pattern literal it reprinted.
+    let mut pieces: Vec<Piece> = protected
         .iter()
+        .chain(literals.iter())
         .filter_map(|(from, to, at)| {
             let (at, len) = (*at)?;
             let len = len.min(to.saturating_sub(*from));
             (len > 0 && out.get(*from..*from + len).is_some()).then_some((*from, *from + len, at))
         })
         .collect();
+    pieces.sort_unstable();
+    pieces.dedup_by(|b, a| b.0 < a.1);
     let start = out.len() - out.trim_start().len();
     let text = normalize_replacement(&out);
     let pieces = super::sweetener_origins::carry(&out, &text, &pieces);
@@ -11018,6 +11057,145 @@ type Prot = (usize, usize, Option<(u32, usize)>);
 /// from `at` on.
 pub(crate) type Piece = (usize, usize, u32);
 
+thread_local! {
+    /// Pattern literals [`render`] reprinted into the buffer
+    /// [`instantiate_marked`] owns (identified by address). They are not
+    /// `protected`: hygiene still renames them like any template word.
+    static LITERAL_SINK: std::cell::RefCell<Option<(usize, Vec<Prot>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Capture key prefix for a word pattern literal's matched input token.
+/// No template variable can name it.
+const LITERAL_KEY: &str = "\u{1}lit:";
+
+fn is_literal_key(key: &str) -> bool {
+    key.starts_with(LITERAL_KEY)
+}
+
+/// Remember where a word literal of the pattern (`select`, `and`) matched
+/// the input. Kept in `captures` so a backtracking matcher drops it with
+/// the attempt that made it. The first match of a spelling wins.
+fn record_literal(
+    source: &str,
+    captures: &mut HashMap<String, Capture>,
+    expected: &str,
+    node: &Syntax,
+) {
+    if !expected
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+    {
+        return;
+    }
+    let at = source_offset_of(source, node_start(node), expected);
+    if at.is_some() {
+        captures
+            .entry(format!("{LITERAL_KEY}{expected}"))
+            .or_insert_with(|| Capture::Text(expected.to_owned(), at));
+    }
+}
+
+/// Where the pattern literal `word` matched: the rule's own match first,
+/// else the one class match in scope that has it. Two class matches with
+/// the literal (rows of a repetition) are ambiguous and map nowhere.
+fn literal_at(captures: &HashMap<String, Capture>, word: &str) -> Option<u32> {
+    if let Some(Capture::Text(_, Some(at))) = captures.get(&format!("{LITERAL_KEY}{word}")) {
+        return Some(*at);
+    }
+    let mut all = Vec::new();
+    for value in captures.values() {
+        record_literals(value, &mut all);
+    }
+    let mut found: Vec<u32> = all
+        .into_iter()
+        .filter(|(have, _)| have == word)
+        .map(|(_, at)| at)
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    match found.as_slice() {
+        [at] => Some(*at),
+        _ => None,
+    }
+}
+
+/// Record [`literal_origins`] of `text` (about to be written at `base` of
+/// `out`) when `out` is the buffer [`instantiate_marked`] collects for.
+fn push_literal_origins(
+    out: &String,
+    text: &str,
+    base: usize,
+    captures: &HashMap<String, Capture>,
+) {
+    push_literal_origins_except(out, text, base, &[], captures);
+}
+
+fn push_literal_origins_except(
+    out: &String,
+    text: &str,
+    base: usize,
+    taken: &[Prot],
+    captures: &HashMap<String, Capture>,
+) {
+    let owner = std::ptr::from_ref::<String>(out) as usize;
+    LITERAL_SINK.with(|sink| {
+        if let Some((sink_owner, found)) = sink.borrow_mut().as_mut() {
+            if *sink_owner == owner {
+                literal_origins(text, base, taken, captures, found);
+            }
+        }
+    });
+}
+
+/// Template-authored words in `text` that spell a word literal the rule's
+/// pattern matched: they print what the user wrote there, so they map to
+/// the matched input token. Ranges in `taken` (substituted holes) are
+/// skipped.
+fn literal_origins(
+    text: &str,
+    base: usize,
+    taken: &[Prot],
+    captures: &HashMap<String, Capture>,
+    protected: &mut Vec<Prot>,
+) {
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut chars = text.char_indices().peekable();
+    let mut quote: Option<char> = None;
+    while let Some((start, c)) = chars.next() {
+        if let Some(q) = quote {
+            if c == '\\' {
+                chars.next();
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        if c == '"' || c == '\'' || c == '`' {
+            quote = Some(c);
+            continue;
+        }
+        if !word(c) {
+            continue;
+        }
+        let mut end = start + c.len_utf8();
+        while let Some(&(at, next)) = chars.peek() {
+            if !word(next) {
+                break;
+            }
+            end = at + next.len_utf8();
+            chars.next();
+        }
+        if taken.iter().any(|(from, to, _)| start < *to && *from < end) {
+            continue;
+        }
+        if let Some(at) = literal_at(captures, &text[start..end]) {
+            protected.push((base + start, base + end, Some((at, end - start))));
+        }
+    }
+}
+
 /// Where `slice` (text borrowed from one of `captures`) is in the source.
 /// The capture owning the bytes is found by address, so two captures with
 /// the same spelling are never confused.
@@ -11031,7 +11209,9 @@ fn text_origin(captures: &HashMap<String, Capture>, slice: &str) -> Option<(u32,
                 }
                 None
             }
-            Capture::Record { text, fields, at } => {
+            Capture::Record {
+                text, fields, at, ..
+            } => {
                 let base = text.as_ptr() as usize;
                 if !text.is_empty() && ptr >= base && ptr + len <= base + text.len() {
                     return at.map(|at| at + u32::try_from(ptr - base).unwrap_or(0));
@@ -11132,8 +11312,10 @@ fn introduced_names(
 
 fn capture_spellings(captures: &HashMap<String, Capture>) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
-    for value in captures.values() {
-        collect_capture_idents(value, &mut names);
+    for (key, value) in captures {
+        if !is_literal_key(key) {
+            collect_capture_idents(value, &mut names);
+        }
     }
     names
 }
@@ -11672,6 +11854,7 @@ fn render_fold(
                 text: String::new(),
                 fields: row.iter().cloned().collect(),
                 at: None,
+                literals: Vec::new(),
             });
         scoped.insert(item.to_owned(), element);
         let spliced = if is_primary_text(&current) {
@@ -11889,6 +12072,7 @@ fn render(
                 };
                 let base = out.len();
                 let (substituted, spans) = substitute_text_protecting(&text, captures);
+                push_literal_origins_except(out, &substituted, base, &spans, captures);
                 for (from, to, at) in spans {
                     protected.push((base + from, base + to, at));
                 }
@@ -11908,7 +12092,9 @@ fn render(
                             out.push_str(text.trim());
                             protected.push((start, out.len(), text_origin(captures, text.trim())));
                             out.push('.');
+                            let base = out.len();
                             out.push_str(rest);
+                            push_literal_origins(out, rest, base, captures);
                         }
                     }
                 }
@@ -12177,7 +12363,43 @@ fn rep_row_scope(
         scoped.insert(name, value);
     }
     scope_record_fields(&mut scoped);
+    // This row's class literals (`where` of its `Filter`) are the ones its
+    // template reprints. One spelling matched twice in the row maps nowhere.
+    let mut literals: Vec<(String, u32)> = Vec::new();
+    for (_, value) in row {
+        record_literals(value, &mut literals);
+    }
+    literals.sort_unstable();
+    literals.dedup();
+    for (word, at) in &literals {
+        if literals.iter().filter(|(other, _)| other == word).count() == 1 {
+            scoped.insert(
+                format!("{LITERAL_KEY}{word}"),
+                Capture::Text(word.clone(), Some(*at)),
+            );
+        }
+    }
     scoped
+}
+
+/// Every class-rule literal under `capture`.
+fn record_literals(capture: &Capture, out: &mut Vec<(String, u32)>) {
+    match capture {
+        Capture::Text(..) => {}
+        Capture::Record {
+            fields, literals, ..
+        } => {
+            out.extend(literals.iter().cloned());
+            for value in fields.values() {
+                record_literals(value, out);
+            }
+        }
+        Capture::Many(rows) => {
+            for (_, value) in rows.iter().flatten() {
+                record_literals(value, out);
+            }
+        }
+    }
 }
 
 fn scope_record_fields(scoped: &mut HashMap<String, Capture>) {

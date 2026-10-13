@@ -288,6 +288,7 @@ pub(crate) fn carry(
     for k in 0..suffix {
         pairs.push((old_tokens.len() - suffix + k, new_tokens.len() - suffix + k));
     }
+    let pairs = anchored_pairs(old, &old_tokens, pairs);
     let mut out: Vec<crate::sweetener_expand::Piece> = Vec::new();
     let mut piece = 0;
     for (oi, ni) in pairs {
@@ -321,6 +322,34 @@ pub(crate) fn carry(
         out.push((ns, ne, src));
     }
     out
+}
+
+/// Drop a punctuation pair the alignment made on its own. A `(` or `,`
+/// matched with no matched token next to it on both sides is any of the
+/// rewrite's punctuation, not the one the author wrote, so it keeps no
+/// origin. Words, and punctuation inside a run that agrees on both sides,
+/// stay.
+fn anchored_pairs(
+    old: &str,
+    old_tokens: &[(usize, usize)],
+    pairs: Vec<(usize, usize)>,
+) -> Vec<(usize, usize)> {
+    let word = |oi: usize| {
+        let (a, b) = old_tokens[oi];
+        old[a..b].chars().any(|c| {
+            c.is_alphanumeric() || c == '_' || c == '$' || c == '"' || c == '\'' || c == '`'
+        })
+    };
+    let set: std::collections::HashSet<(usize, usize)> = pairs.iter().copied().collect();
+    pairs
+        .iter()
+        .copied()
+        .filter(|&(oi, ni)| {
+            word(oi)
+                || (oi > 0 && ni > 0 && set.contains(&(oi - 1, ni - 1)))
+                || set.contains(&(oi + 1, ni + 1))
+        })
+        .collect()
 }
 
 /// Compose `outer` (ranges of a text copying a middle text) with `inner`
@@ -657,5 +686,19 @@ mod tests {
             elapsed.as_millis() < 1_000,
             "myers took {elapsed:?} on {n} tokens"
         );
+    }
+
+    /// A lone `(` the alignment paired between unrelated words is not the
+    /// author's paren; punctuation inside a matching run still is.
+    #[test]
+    fn isolated_punctuation_pairs_keep_no_origin() {
+        let old = "alpha ( beta";
+        let new = "gamma ( delta";
+        let pieces = carry(old, new, &[(0, old.len(), 100)]);
+        assert!(pieces.is_empty(), "{pieces:?}");
+        let old = "f(a, b)";
+        let new = "g(a, b)";
+        let pieces = carry(old, new, &[(0, old.len(), 100)]);
+        assert_eq!(pieces, vec![(1, 7, 101)]);
     }
 }
