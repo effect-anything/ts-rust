@@ -3483,6 +3483,11 @@ mod tests {
             "nested import authorized match:\n{}",
             expanded.code
         );
+        assert!(
+            expanded.code.contains("import { match }"),
+            "nested import was dropped: {}",
+            expanded.code
+        );
 
         assert!(
             expanded.code.contains("#[1, 2]"),

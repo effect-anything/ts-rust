@@ -141,8 +141,8 @@ struct Printer<'a> {
     /// Resume index after the form rewrite just applied.
     last_form_next: usize,
     /// The file's top-level nodes. A form inside a function is authorized by
-    /// a `for syntax` import written anywhere in the file, not only by the
-    /// siblings of the form.
+    /// a top-level `for syntax` import, as upstream. Nested imports bind
+    /// nothing and stay in the output as written.
     file_nodes: &'a [Syntax],
     /// Channel binders this generator must print with a suffix.
     channel_renames: HashMap<String, String>,
@@ -419,6 +419,15 @@ impl<'a> Printer<'a> {
     fn try_drop_syntax_import(&mut self, nodes: &[Syntax], index: usize) -> bool {
         if !is_syntax_import_at(nodes, index) {
             return false;
+        }
+        // Upstream binds module-level imports only. A nested one binds nothing
+        // and is passed through as written.
+        let at: *const Syntax = &nodes[index];
+        if !self.file_nodes.as_ptr_range().contains(&at) {
+            // Copy the whole statement: its `syntax` word must not start a
+            // macro definition that swallows the rest of the block.
+            self.copy_until(syntax_import_end(nodes, index));
+            return true;
         }
         // The syntax import is the last specifier of the previous import.
         // Starting the drop at `import` copies that list's trailing comma.
