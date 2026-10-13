@@ -16,7 +16,8 @@ fn vec2f_plus_is_vec2f_and_a_number_is_an_error() {
     if !bin.is_file() {
         panic!("tsgo missing at {}", bin.display());
     }
-    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/overload");
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/overload");
     let output = Command::new(&bin)
         .args(["--noEmit", "--pretty", "false", "-p"])
         .arg(&fixture)
@@ -41,5 +42,8 @@ fn vec2f_plus_is_vec2f_and_a_number_is_an_error() {
         "a legal overload was rejected:\n{report}"
     );
     let errors = report.matches("error TS").count();
-    assert_eq!(errors, 2, "expected the two intentional errors only:\n{report}");
+    assert_eq!(
+        errors, 2,
+        "expected the two intentional errors only:\n{report}"
+    );
 }

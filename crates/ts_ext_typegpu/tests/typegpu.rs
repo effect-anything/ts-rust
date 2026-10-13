@@ -146,7 +146,8 @@ fn build_reports_a_body_the_transpiler_refuses() {
 
 #[test]
 fn a_nested_directive_is_reported_on_the_inner_directive() {
-    let code = "function outer() {\n  \"use gpu\";\n  function inner() {\n    \"use gpu\";\n  }\n}\n";
+    let code =
+        "function outer() {\n  \"use gpu\";\n  function inner() {\n    \"use gpu\";\n  }\n}\n";
     let inner = code.rfind("\"use gpu\"").unwrap() as u32;
     let out = TypegpuSession::check().transform("a.ts", code);
     let diag = out

@@ -241,11 +241,15 @@ fn check(path: &str, code: &str) -> Transformed {
     // from `Symbol.operatorPlus`. A body that cannot be printed, and a
     // nested directive, are still reported at the author node.
     let mut diagnostics = nesting_diagnostics(path, code);
-    diagnostics.extend(typegpu::refusals(path, code).into_iter().map(|item| Diagnostic {
-        message: item.message,
-        start: item.start,
-        end: item.end,
-    }));
+    diagnostics.extend(
+        typegpu::refusals(path, code)
+            .into_iter()
+            .map(|item| Diagnostic {
+                message: item.message,
+                start: item.start,
+                end: item.end,
+            }),
+    );
     Transformed {
         code: code.to_owned(),
         diagnostics,

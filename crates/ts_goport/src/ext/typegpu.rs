@@ -141,7 +141,7 @@ pub fn embed_metadata_with(
     // a node whose file name is the other parse.
     let file_name = "/input.ts".to_owned();
     let opts = SourceFileParseOptions {
-        file_name: file_name.clone(),
+        file_name,
         ..SourceFileParseOptions::default()
     };
     let _ = filename;
@@ -299,7 +299,8 @@ fn embedded_of(node: Node) -> Option<EmbeddedMetadata> {
     if meta.kind() != SyntaxKind::ObjectLiteralExpression {
         return None;
     }
-    let version = object_prop(meta, "v").filter(|value| value.kind() == SyntaxKind::NumericLiteral)?;
+    let version =
+        object_prop(meta, "v").filter(|value| value.kind() == SyntaxKind::NumericLiteral)?;
     let name_node = object_prop(meta, "name")?;
     if object_prop(meta, "ast").is_none() || object_prop(meta, "externals").is_none() {
         return None;
@@ -393,12 +394,12 @@ fn object_prop(object: Node, expected: &str) -> Option<Node> {
             continue;
         }
         let key = prop.name();
-        let name = if key.kind() == SyntaxKind::Identifier || key.kind() == SyntaxKind::StringLiteral
-        {
-            key.text().to_owned()
-        } else {
-            continue;
-        };
+        let name =
+            if key.kind() == SyntaxKind::Identifier || key.kind() == SyntaxKind::StringLiteral {
+                key.text().to_owned()
+            } else {
+                continue;
+            };
         if name == expected {
             return Some(prop.initializer());
         }
