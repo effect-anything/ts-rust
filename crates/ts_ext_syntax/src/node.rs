@@ -65,6 +65,33 @@ impl NodeSession {
     pub fn transform(&self, path: String, code: String) -> NodeTransform {
         to_node(self.inner.transform(&path, &code))
     }
+
+    /// Upstream plugin switches. `unstable_obfuscate` is not accepted.
+    #[napi]
+    pub fn configure(
+        &mut self,
+        auto_naming: Option<bool>,
+        early_pruning: Option<bool>,
+        force_tgpu_alias: Option<String>,
+        filter_id: Option<bool>,
+        exclude: Option<String>,
+    ) {
+        if let Some(enabled) = auto_naming {
+            self.inner = self.inner.clone().with_auto_naming(enabled);
+        }
+        if let Some(enabled) = early_pruning {
+            self.inner = self.inner.clone().early_pruning(enabled);
+        }
+        if let Some(alias) = force_tgpu_alias {
+            self.inner = self.inner.clone().force_tgpu_alias(alias);
+        }
+        if let Some(enabled) = filter_id {
+            self.inner = self.inner.clone().filter_id(enabled);
+        }
+        if let Some(text) = exclude {
+            self.inner = self.inner.clone().exclude(text);
+        }
+    }
 }
 
 fn to_node(value: Transformed) -> NodeTransform {

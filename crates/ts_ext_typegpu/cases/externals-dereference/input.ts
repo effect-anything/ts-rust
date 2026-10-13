@@ -1,15 +1,9 @@
-    const ext = {
-      value: 7,
-      config: {
-        multiplier: 1,
-        zero: 0,
-      }
-    };
+    import tgpu, { d } from 'typegpu';
+
+    const root = await tgpu.init();
+    const buffer = root.createMutable(d.vec2u);
     const fn = () => {
       'use gpu';
-      const a = ext.value;
-      const b = ext.config.multiplier;
-      const c = ext.config.zero;
-      const d = ext.config.multiplier;
+      const a = buffer.$.x;
     };
     console.log(fn);

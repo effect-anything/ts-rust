@@ -9,7 +9,7 @@
 //! - Any other file: that session only. Check leaves operators alone.
 //!   Build rewrites them to `__tsover_*` and then wraps marked functions.
 
-use crate::{ExpandRequest, Phase, expand, sweetener_matches};
+use crate::{expand, sweetener_matches, ExpandRequest, Phase};
 
 /// What the caller will do with the text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -29,6 +29,15 @@ pub struct TransformSession {
     /// test helper defaults it off, so a caller that compares against those
     /// snapshots sets it per file.
     auto_naming: bool,
+    /// Upstream `earlyPruning`. Off: this session is the visitor the snapshots
+    /// call. The compiler emit hook prunes on its own.
+    early_pruning: bool,
+    /// Upstream `forceTgpuAlias`.
+    force_tgpu_alias: Option<String>,
+    /// Upstream default include regex.
+    filter_id: bool,
+    /// Upstream `exclude`.
+    exclude: Option<String>,
 }
 
 impl Default for TransformSession {
@@ -74,6 +83,10 @@ impl TransformSession {
         Self {
             phase: TransformPhase::Check,
             auto_naming: true,
+            early_pruning: false,
+            force_tgpu_alias: None,
+            filter_id: false,
+            exclude: None,
         }
     }
 
@@ -82,6 +95,10 @@ impl TransformSession {
         Self {
             phase: TransformPhase::Build,
             auto_naming: true,
+            early_pruning: false,
+            force_tgpu_alias: None,
+            filter_id: false,
+            exclude: None,
         }
     }
 
@@ -91,7 +108,41 @@ impl TransformSession {
         Self {
             phase: TransformPhase::Build,
             auto_naming,
+            early_pruning: false,
+            force_tgpu_alias: None,
+            filter_id: false,
+            exclude: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_auto_naming(mut self, enabled: bool) -> Self {
+        self.auto_naming = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn early_pruning(mut self, enabled: bool) -> Self {
+        self.early_pruning = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn force_tgpu_alias(mut self, alias: impl Into<String>) -> Self {
+        self.force_tgpu_alias = Some(alias.into());
+        self
+    }
+
+    #[must_use]
+    pub fn filter_id(mut self, enabled: bool) -> Self {
+        self.filter_id = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn exclude(mut self, text: impl Into<String>) -> Self {
+        self.exclude = Some(text.into());
+        self
     }
 
     /// Plugin entry. See the module docs for which passes run.
@@ -142,7 +193,17 @@ fn apply_typegpu(
     let extension = virtual_extension(path);
     let gpu = match phase {
         TransformPhase::Build => {
-            ts_ext_typegpu::TypegpuSession::build_with_auto_naming(session.auto_naming)
+            let mut gpu =
+                ts_ext_typegpu::TypegpuSession::build_with_auto_naming(session.auto_naming)
+                    .early_pruning(session.early_pruning)
+                    .filter_id(session.filter_id);
+            if let Some(alias) = session.force_tgpu_alias.clone() {
+                gpu = gpu.force_tgpu_alias(alias);
+            }
+            if let Some(exclude) = session.exclude.clone() {
+                gpu = gpu.exclude(exclude);
+            }
+            gpu
         }
         TransformPhase::Check => ts_ext_typegpu::TypegpuSession::check(),
     }
@@ -432,7 +493,7 @@ pub fn mappings_json(segments: &[(i32, i32, i32, i32, i32)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TransformSession, compose};
+    use super::{compose, TransformSession};
 
     #[test]
     fn ordinary_file_runs_typegpu_only() {

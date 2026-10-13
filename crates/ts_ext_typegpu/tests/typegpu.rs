@@ -250,6 +250,13 @@ fn captured_cases_match_their_structure() {
                 .transform(&format!("{id}.ts"), &input)
                 .code
         };
+        if line.contains("\"compare\":\"metadata\"") {
+            if meta_json(&built) != theirs.trim() {
+                failures.push(id);
+            }
+            ran += 1;
+            continue;
+        }
         let externals_only = id.starts_with("externals-")
             && theirs.trim_start().starts_with('{')
             && theirs.contains(": () =>")
@@ -269,7 +276,11 @@ fn captured_cases_match_their_structure() {
         }
         ran += 1;
     }
-    assert_eq!(ran, 62, "the manifest no longer has 62 cases");
+    let listed = manifest
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count() as u32;
+    assert_eq!(ran, listed, "a manifest row did not run");
     assert!(
         failures.is_empty(),
         "{} cases differ: {}",
@@ -412,6 +423,184 @@ fn original_line_col(mapped: &Mapped, input: &str, generated: usize) -> (i32, i3
         segment.original_start
     };
     line_col(input, usize::try_from(original.max(0)).unwrap_or(0))
+}
+
+fn meta_json(code: &str) -> String {
+    let items = ts_goport::ext::typegpu::embedded_metadata("a.ts", code);
+    let parts = items
+        .iter()
+        .map(|item| {
+            let version = if item.version.fract() == 0.0 {
+                format!("{}", item.version as i64)
+            } else {
+                item.version.to_string()
+            };
+            match &item.name {
+                Some(name) => format!(r#"{{"v":{version},"name":"{name}"}}"#),
+                None => format!(r#"{{"v":{version}}}"#),
+            }
+        })
+        .collect::<Vec<_>>();
+    format!("[{}]", parts.join(","))
+}
+
+/// bun.test.ts `respects earlyPruning`. Undefined and true keep the file.
+/// False names `d.struct` even though the text matches neither prune needle.
+#[test]
+fn early_pruning_matches_the_bun_plugin() {
+    let code = "const myStruct = d.struct({ value: d.f32 });";
+    assert_eq!(ts_goport::ext::typegpu::embed_metadata("a.ts", code), code);
+    let pruned = TypegpuSession::build()
+        .early_pruning(true)
+        .transform("a.ts", code);
+    assert_eq!(pruned.code, code);
+    let named = TypegpuSession::build().transform("a.ts", code);
+    assert!(
+        named.code.contains("__TYPEGPU_AUTONAME__"),
+        "{}",
+        named.code
+    );
+    assert!(named.code.contains("\"myStruct\""), "{}", named.code);
+}
+
+/// `forceTgpuAlias` is the alias an import would have added. The expected
+/// shape is the aliased-import snapshot with the import removed.
+#[test]
+fn force_tgpu_alias_wraps_a_shell_without_an_import() {
+    let code = "const increment = tgpu.fn([])(() => {\n  const x = 2 + 2;\n});\n";
+    let plain = TypegpuSession::build_with_auto_naming(false).transform("a.ts", code);
+    assert!(!plain.code.contains("__TYPEGPU_META__"), "{}", plain.code);
+    let forced = TypegpuSession::build_with_auto_naming(false)
+        .force_tgpu_alias("tgpu")
+        .transform("a.ts", code);
+    let expected = "const increment = tgpu.fn([])(/*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {\n  const x = 2 + 2;\n}, {\n  v: 2,\n  name: undefined,\n  ast: {\n    params: [],\n    body: [0, [[13, \"x\", [1, [5, \"2\"], \"+\", [5, \"2\"]]]]]\n  },\n  externals: {}\n}) && $.f)({}));\n";
+    assert!(
+        forced.code == expected || ts_ext_typegpu::structure::same(&forced.code, expected, false),
+        "{}\n---\n{}",
+        forced.code,
+        expected
+    );
+}
+
+/// `regex.test.ts`, the default include.
+#[test]
+fn default_include_matches_the_plugin_regex() {
+    let yes = [
+        "file.ts",
+        "file.mts",
+        "file.tsx",
+        "file.mtsx",
+        "file.js",
+        "file.mjs",
+        "file.jsx",
+        "file.mjsx",
+        "file.ts?query=1",
+        "file.js?query=1",
+        "component.tsx?inline&raw",
+        "utils.mjs?t=1234567890",
+        "app.ts?import=default&as=App",
+        "my.component.tsx",
+        "utils.test.ts",
+        "config.dev.mjs",
+        "file.ts?",
+        "file.jsx?=",
+        "file.mts?&&&",
+        "file.js?#hash",
+    ];
+    let no = [
+        "file.css",
+        "file.html",
+        "file.json",
+        "file.t",
+        "file.j",
+        "file.tsv",
+        "file.jso",
+        "README",
+        "Dockerfile",
+        "makefile",
+        "file.ts.map",
+        "component.tsx.old",
+        "script.js.bak?query=1",
+    ];
+    for id in yes {
+        assert!(
+            ts_ext_typegpu::default_include_matches(id),
+            "{id} should match"
+        );
+    }
+    for id in no {
+        assert!(
+            !ts_ext_typegpu::default_include_matches(id),
+            "{id} should not match"
+        );
+    }
+    let marked = "function f() { \"use gpu\"; return 1 }\n";
+    let skipped = TypegpuSession::build()
+        .filter_id(true)
+        .transform("file.css", marked);
+    assert_eq!(skipped.code, marked);
+    let kept = TypegpuSession::build()
+        .filter_id(true)
+        .transform("file.ts", marked);
+    assert!(kept.code.contains("__TYPEGPU_META__"), "{}", kept.code);
+    let excluded = TypegpuSession::build()
+        .exclude("secret.ts")
+        .transform("secret.ts", marked);
+    assert_eq!(excluded.code, marked);
+}
+
+/// `embedded-metadata.test.ts`. The collector snapshot, every downlevel
+/// shape, and an unrelated `.set` that must still be wrapped.
+#[test]
+fn embedded_metadata_matches_the_plugin_collector() {
+    let code = "\
+    const fn1 = () => {\n      'use gpu';\n    };\n\n    const fn2 = () => {\n      'use gpu';\n      'worklet';\n    };\n\n    const fn3 = () => {\n      'worklet';\n      'use gpu';\n    };\n\n    console.log(fn1, fn2, fn3);\n  ";
+    let built = TypegpuSession::build_with_auto_naming(false).transform("a.ts", code);
+    assert_eq!(
+        meta_json(&built.code),
+        r#"[{"v":2,"name":"fn1"},{"v":2,"name":"fn2"},{"v":2,"name":"fn3"}]"#
+    );
+
+    let body = r#"()=>{"use gpu";let a=1,b=2;return a+b}"#;
+    let meta = r#"{v:2,name:"fn",ast:{params:[],body:[0,[]]},externals:{}}"#;
+    let variants = [
+        format!(
+            "const fn=/*#__PURE__*/($=>(globalThis.__TYPEGPU_META__??=new WeakMap()).set($.f={body},{meta})&&$.f)({{}});"
+        ),
+        format!(
+            "const fn=(e=>(globalThis.__TYPEGPU_META__??(globalThis.__TYPEGPU_META__=new WeakMap)).set(e.f={body},{meta})&&e.f)({{}});"
+        ),
+        format!(
+            "const fn=(e=>{{var a;return((a=globalThis.__TYPEGPU_META__)!=null?a:globalThis.__TYPEGPU_META__=new WeakMap).set(e.f={body},{meta})&&e.f}})({{}});"
+        ),
+        format!(
+            "var fn=function($,_g){{return((_g=globalThis.__TYPEGPU_META__)!==null&&_g!==void 0?_g:globalThis.__TYPEGPU_META__=new WeakMap()).set($.f=function(){{\"use gpu\";let a=1,b=2;return a+b}},{meta})&&$.f}}({{}});"
+        ),
+        format!(
+            "const fn=(e=>(globalThis[\"__TYPEGPU_META__\"]??=new WeakMap).set((e.f=({body})),{meta})&&e.f)({{}});"
+        ),
+    ];
+    for variant in &variants {
+        assert_eq!(meta_json(variant), r#"[{"v":2,"name":"fn"}]"#, "{variant}");
+        let again = TypegpuSession::build().transform("a.ts", variant);
+        assert_eq!(
+            again.code.matches("__TYPEGPU_META__").count(),
+            variant.matches("__TYPEGPU_META__").count(),
+            "{}",
+            again.code
+        );
+    }
+
+    let unrelated = format!(
+        "const m = new WeakMap(); const fn = ($ => m.set($.f = () => {{ 'use gpu'; }}, {meta}) && $.f)({{}});"
+    );
+    assert_eq!(meta_json(&unrelated), "[]");
+    let wrapped = TypegpuSession::build().transform("a.ts", &unrelated);
+    assert!(
+        wrapped.code.contains("__TYPEGPU_META__"),
+        "{}",
+        wrapped.code
+    );
 }
 
 fn line_col(text: &str, offset: usize) -> (i32, i32) {

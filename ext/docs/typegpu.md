@@ -192,8 +192,8 @@ records the tinyest AST.
 
 | pinned plugin (`unplugin-typegpu`)                                                                                        | this port                                                                                  | snippet                                                      |
 | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
-| `tgpu` aliases come from an `import ... from 'typegpu'` only: default, `{ tgpu as x }`, `* as x` giving `x.tgpu`          | `gather_aliases`                                                                           | `no-import-shell.ts`, `other-source-import.ts`, `alias-*.ts` |
-| `isTgpu` walks the member path and skips a `["~unstable"]` step                                                           | `is_tgpu_alias`                                                                            | `unstable-access.ts`                                         |
+| `tgpu` aliases come from an `import ... from 'typegpu'` only: default, `{ tgpu as x }`, `* as x` giving `x.tgpu`. `forceTgpuAlias` adds one name without an import | `gather_aliases`, `EmbedFlags::force_tgpu_alias` | `aliasing-*` cases |
+| `isTgpu` walks the member path and skips a `["~unstable"]` step                                                           | `is_tgpu_alias`                                                                            | `auto-naming-works-with-tgpu-unstable-items`                 |
 | naming positions: `VariableDeclarator`, `ObjectProperty`, `ClassProperty`, `ClassPrivateProperty`, `AssignmentExpression` | `labelled`                                                                                 | `auto-naming/*` cases                                        |
 | a shell implementation is a named resource whatever the tgpu object is called                                             | `contains_resource`                                                                        | `aliased-shell.ts`, `shell-unmarked.ts`                      |
 | `$name(...)` ends the resource chain                                                                                      | `contains_resource`                                                                        | `dollar-name.ts`                                             |
@@ -202,7 +202,7 @@ records the tinyest AST.
 | `**` is not in the plugin's table, so it stays `a ** b` (the pin's runtime does install `__tsover_pow`)                   | `"use gpu"` keeps `**`; only `"use tsover"` rewrites it (`tsover::name_with_pow`)          | `pow-operator.ts`, `pow-assign.ts`                           |
 | tinyest node kinds: 1 binary, 2 assignment, 3 logical, and the operator text                                              | `operator_text`, `is_assignment`, `is_logical`                                             | `assign-kinds`, `bitwise.ts`                                 |
 | hoisting: a named declaration moves to the top, `export { name }` (or `export default name;`) stays behind                | `hoist_edit`, `apply_wraps`                                                                | `hoists-*` cases                                             |
-| `earlyPruneRegex` (on by default) skips a file that mentions none of `"use gpu"`, `tgpu`                                  | `pruned` in the emit hook; a bundler session uses `embed_metadata_unpruned`                | `works-with-properties` case                                 |
+| `earlyPruneRegex` (on by default) skips a file that mentions none of `"use gpu"`, `tgpu`                                  | `pruned` in the emit hook. The session defaults it off, matching the babel visitor; `early_pruning(true)` turns it on | bun `respects earlyPruning` |
 | `autoNamingEnabled` is an option: the plugin defaults it on, its test helper off                                          | `TransformSession::build_with_auto_naming`; the corpus passes the setting its capture used | `aliasing/*` (off), `auto-naming/*` (on)                     |
 
 The tinyest AST is what the runtime's WGSL printer reads, so its node kinds
@@ -228,6 +228,25 @@ the syntax tree, so whitespace, a trailing comma, a redundant pair of
 parentheses, a comment and a numeric literal form are shape, while a node
 kind, a name, an operator or a statement order is not.
 
+## Switches
+
+| upstream | this port |
+| --- | --- |
+| `autoNamingEnabled` (plugin default on, test helper off) | `TypegpuSession::build_with_auto_naming` |
+| `earlyPruning` (unplugin and emit default on; babel snapshots call the visitor with it off) | `TypegpuSession::early_pruning`; `embed_metadata` always prunes |
+| `forceTgpuAlias` | `TypegpuSession::force_tgpu_alias` |
+| default `include` `/\.m?[jt]sx?(?:\?.*)?$/` | `default_include_matches`, applied when `filter_id(true)` |
+| `exclude` | `TypegpuSession::exclude` |
+| `unstable_obfuscate` | not implemented. The pin defaults it off |
+
+Check is not a plugin switch. The author's operators stay in the tree. The
+compiler types them. This session's check phase does not rewrite.
+
+`embedded_metadata` is the plugin's collector. It accepts the pin's
+`??=`, `??`, `!= null`, `!== null && !== void 0`, and computed
+`__TYPEGPU_META__` shapes, and it does not treat an unrelated `.set` as
+already wrapped. Locked in `tests/typegpu.rs`.
+
 ## Open differences
 
 - A nested function inside a `"use gpu"` body: the plugin throws
@@ -238,5 +257,6 @@ kind, a name, an operator or a statement order is not.
   the payload carries no positions. The compiler emit hook returns text only,
   so it marks the body unprintable and reports nothing.
   Locked in `tests/typegpu.rs`.
-- `unstable_obfuscate` is not implemented. The pin's default is off, and it
-  refuses to run with auto-naming on.
+- `unstable_obfuscate` is not implemented. That is a decision, not a gap in
+  the captured transform cases. The pin's default is off, and it refuses to
+  run with auto-naming on.

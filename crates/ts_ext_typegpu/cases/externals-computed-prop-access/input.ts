@@ -1,15 +1,9 @@
     const ext = {
-      value: 7,
-      config: {
-        multiplier: 1,
-        zero: 0,
-      }
+      n: 1,
     };
+
     const fn = () => {
       'use gpu';
-      const a = ext.value;
-      const b = ext.config.multiplier;
-      const c = ext.config.zero;
-      const d = ext.config.multiplier;
+      const a = ext['n'];
     };
     console.log(fn);

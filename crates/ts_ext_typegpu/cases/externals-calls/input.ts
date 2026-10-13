@@ -1,15 +1,19 @@
-    const ext = {
-      value: 7,
-      config: {
-        multiplier: 1,
-        zero: 0,
-      }
-    };
+    import tgpu, { d } from 'typegpu';
+
     const fn = () => {
       'use gpu';
-      const a = ext.value;
-      const b = ext.config.multiplier;
-      const c = ext.config.zero;
-      const d = ext.config.multiplier;
+      const a = ext.comptime().x;
+      const b = ext.runtime().y;
     };
+
+    const ext = {
+      comptime: tgpu.comptime(() => {
+        return d.vec4f();
+      }),
+      runtime: () => {
+        'use gpu';
+        return d.vec4f();
+      },
+    };
+
     console.log(fn);

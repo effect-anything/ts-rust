@@ -76,15 +76,52 @@ pub fn embed_metadata_unpruned(filename: &str, code: &str, auto_name: bool) -> S
 /// [`embed_metadata_unpruned`] plus the messages for a body upstream's
 /// transpiler refuses. The text is upstream's, and the body of that function
 /// is marked unprintable (`[0, []]`) instead of holding a wrong tree.
-#[must_use]
+///
+/// Switches the plugin session can set. The compiler emit hook does not
+/// use this: it always prunes and always auto-names, and it has no alias
+/// override. `unstable_obfuscate` is not a field. That switch is not
+/// implemented.
+#[derive(Clone, Debug)]
+pub struct EmbedFlags<'a> {
+    pub auto_naming: bool,
+    /// Upstream `earlyPruning`. The unplugin transform defaults it on. The
+    /// babel visitor the plugin tests call does not prune, so a session
+    /// that compares with those snapshots leaves this off.
+    pub early_pruning: bool,
+    /// Upstream `forceTgpuAlias`. Added to the alias set before imports are
+    /// read, including when the file has no `typegpu` import.
+    pub force_tgpu_alias: Option<&'a str>,
+}
+
 pub fn embed_metadata_reports(
     filename: &str,
     code: &str,
     auto_name: bool,
 ) -> (String, Vec<String>) {
+    embed_metadata_with(
+        filename,
+        code,
+        &EmbedFlags {
+            auto_naming: auto_name,
+            early_pruning: false,
+            force_tgpu_alias: None,
+        },
+    )
+}
+
+/// [`embed_metadata_reports`] with the plugin switches.
+pub fn embed_metadata_with(
+    filename: &str,
+    code: &str,
+    flags: &EmbedFlags<'_>,
+) -> (String, Vec<String>) {
+    if flags.early_pruning && pruned(code) {
+        return (code.to_owned(), Vec::new());
+    }
     if code.contains("__TYPEGPU_META__") {
         return (code.to_owned(), Vec::new());
     }
+    let auto_name = flags.auto_naming;
     // One stable name. An absolute caller path makes the printer refuse
     // a node whose file name is the other parse.
     let file_name = "/input.ts".to_owned();
@@ -109,6 +146,9 @@ pub fn embed_metadata_reports(
     let file = _owned.file();
     let mut aliases = std::collections::BTreeSet::new();
     gather_aliases(file.root, &mut aliases);
+    if let Some(alias) = flags.force_tgpu_alias.filter(|alias| !alias.is_empty()) {
+        aliases.insert(alias.to_owned());
+    }
     let mut edits = Vec::new();
     let unsupported = collect_wraps(file.root, code, &aliases, auto_name, &mut edits);
     if edits.is_empty() {
@@ -169,6 +209,186 @@ pub fn embed_metadata_js(filename: &str, code: &str) -> String {
         return code.to_owned();
     }
     embed_metadata(filename, code)
+}
+
+/// Metadata `getEmbeddedTypegpuMetadata` would collect, in source order.
+///
+/// `name` is `None` when the property is not a string (`undefined` in the
+/// plugin's snapshots). The version is the numeric `v` property.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmbeddedMetadata {
+    pub version: f64,
+    pub name: Option<String>,
+}
+
+/// Walk a program the way the plugin's metadata collector does.
+///
+/// A function counts only when it is the right-hand side of an assignment
+/// that is the first argument of a `.set` whose receiver mentions
+/// `__TYPEGPU_META__`, and the second argument has `v`, `name`, `ast` and
+/// `externals`. Downleveled `??` and `!= null` receivers count. An unrelated
+/// `.set` does not.
+pub fn embedded_metadata(filename: &str, code: &str) -> Vec<EmbeddedMetadata> {
+    let opts = SourceFileParseOptions {
+        file_name: "/input.ts".to_owned(),
+        ..SourceFileParseOptions::default()
+    };
+    let kind = if filename.ends_with(".tsx") || filename.ends_with(".jsx") {
+        ScriptKind::TSX
+    } else {
+        ScriptKind::TS
+    };
+    let text = crate::ast::FileText::Shared(std::sync::Arc::from(code.to_owned()));
+    let owned = parse_for_transform(&opts, text, kind);
+    let mut found = Vec::new();
+    collect_embedded(owned.file().root, &mut found);
+    found
+}
+
+fn collect_embedded(node: Node, found: &mut Vec<EmbeddedMetadata>) {
+    if node.is_nil() {
+        return;
+    }
+    if let Some(meta) = embedded_of(node) {
+        found.push(meta);
+    }
+    node.for_each_child(|child| {
+        if child != node {
+            collect_embedded(child, found);
+        }
+        false
+    });
+}
+
+fn embedded_of(node: Node) -> Option<EmbeddedMetadata> {
+    if !is_function_like_declaration(node) {
+        return None;
+    }
+    let wrapped = skip_transparent_up(node);
+    let assignment = wrapped.parent();
+    if assignment.kind() != SyntaxKind::BinaryExpression
+        || assignment.operator_token().kind() != SyntaxKind::EqualsToken
+        || assignment.right() != wrapped
+    {
+        return None;
+    }
+    let assigned = skip_transparent_up(assignment);
+    let call = assigned.parent();
+    if call.kind() != SyntaxKind::CallExpression
+        || call.arguments().get(0) != assigned
+        || !is_metadata_set_call(call)
+    {
+        return None;
+    }
+    let meta = call.arguments().get(1);
+    if meta.kind() != SyntaxKind::ObjectLiteralExpression {
+        return None;
+    }
+    let version = object_prop(meta, "v").filter(|value| value.kind() == SyntaxKind::NumericLiteral)?;
+    let name_node = object_prop(meta, "name")?;
+    if object_prop(meta, "ast").is_none() || object_prop(meta, "externals").is_none() {
+        return None;
+    }
+    let name = (name_node.kind() == SyntaxKind::StringLiteral).then(|| name_node.text().to_owned());
+    Some(EmbeddedMetadata {
+        version: version.text().parse().unwrap_or(0.0),
+        name,
+    })
+}
+
+fn skip_transparent_up(mut node: Node) -> Node {
+    while let Some(parent) = transparent_parent(node) {
+        node = parent;
+    }
+    node
+}
+
+fn transparent_parent(node: Node) -> Option<Node> {
+    let parent = node.parent();
+    if parent.is_nil()
+        || !matches!(
+            parent.kind(),
+            SyntaxKind::ParenthesizedExpression
+                | SyntaxKind::AsExpression
+                | SyntaxKind::SatisfiesExpression
+                | SyntaxKind::TypeAssertionExpression
+                | SyntaxKind::NonNullExpression
+        )
+    {
+        return None;
+    }
+    (parent.expression() == node).then_some(parent)
+}
+
+fn is_metadata_set_call(node: Node) -> bool {
+    let callee = unwrap_parens(node.expression());
+    if !matches!(
+        callee.kind(),
+        SyntaxKind::PropertyAccessExpression | SyntaxKind::ElementAccessExpression
+    ) {
+        return false;
+    }
+    if member_property_name(callee).as_deref() != Some("set") {
+        return false;
+    }
+    contains_metadata_access(callee.expression())
+}
+
+fn contains_metadata_access(node: Node) -> bool {
+    if node.is_nil() {
+        return false;
+    }
+    if is_metadata_access(node) {
+        return true;
+    }
+    let mut found = false;
+    node.for_each_child(|child| {
+        if child != node && contains_metadata_access(child) {
+            found = true;
+        }
+        false
+    });
+    found
+}
+
+fn is_metadata_access(node: Node) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::PropertyAccessExpression | SyntaxKind::ElementAccessExpression
+    ) && member_property_name(node).as_deref() == Some("__TYPEGPU_META__")
+}
+
+fn member_property_name(node: Node) -> Option<String> {
+    match node.kind() {
+        SyntaxKind::PropertyAccessExpression => {
+            let name = node.name();
+            (name.kind() == SyntaxKind::Identifier).then(|| name.text().to_owned())
+        }
+        SyntaxKind::ElementAccessExpression => {
+            let arg = node.argument_expression();
+            (arg.kind() == SyntaxKind::StringLiteral).then(|| arg.text().to_owned())
+        }
+        _ => None,
+    }
+}
+
+fn object_prop(object: Node, expected: &str) -> Option<Node> {
+    for prop in object.properties().iter() {
+        if prop.kind() != SyntaxKind::PropertyAssignment {
+            continue;
+        }
+        let key = prop.name();
+        let name = if key.kind() == SyntaxKind::Identifier || key.kind() == SyntaxKind::StringLiteral
+        {
+            key.text().to_owned()
+        } else {
+            continue;
+        };
+        if name == expected {
+            return Some(prop.initializer());
+        }
+    }
+    None
 }
 
 /// One rebuild of a source file. The factory is synthetic, so the result

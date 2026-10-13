@@ -21,11 +21,21 @@ ROOT = Path(__file__).resolve().parents[3]
 CRATE = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "vendor" / "TypeGPU" / "packages" / "unplugin-typegpu" / "test"
 MANIFEST = CRATE / "cases.jsonl"
-TITLE = re.compile(r"""(?:describe|it|test)\(\s*(['"`])(.*?)\1""")
+TITLE = re.compile(
+    r"""(?:describe|it|test)\(\s*(['"`])((?:\\.|(?!\1).)*)\1"""
+)
 SKIP_TITLES = {"babel", "rollup"}
+# Obfuscation is an explicit non-goal. Rollup reprints are the bundler's
+# printer, not this transform; a babel snapshot of the same title covers them.
+SKIP_FILES = {"obfuscation.test.ts"}
+
+
+def unescape(title: str) -> str:
+    return title.replace("\\'", "'").replace('\\"', '"')
 
 
 def slug(title: str) -> str:
+    title = unescape(title)
     text = title.lower().replace("'", "").replace('"', "")
     text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
     return text
@@ -76,9 +86,9 @@ def cases_in(path: Path) -> list[tuple[str, str]]:
         if code is None:
             break
         titles = [
-            match.group(2)
+            unescape(match.group(2))
             for match in TITLE.finditer(text[:at])
-            if match.group(2) not in SKIP_TITLES
+            if unescape(match.group(2)) not in SKIP_TITLES
         ]
         if titles:
             found.append((titles[-1], code))
@@ -115,6 +125,8 @@ def main() -> int:
     discovered: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for path in sorted(VENDOR.glob("*.test.ts")):
+        if path.name in SKIP_FILES:
+            continue
         for title, _code in cases_in(path):
             key = (path.name, title)
             if key in seen:

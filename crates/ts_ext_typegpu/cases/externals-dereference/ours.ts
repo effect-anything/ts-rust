@@ -1,27 +1,19 @@
-    const ext = {
-      value: 7,
-      config: {
-        multiplier: 1,
-        zero: 0,
-      }
-    };
+    import tgpu, { d } from 'typegpu';
+
+    const root = await tgpu.init();
+    const buffer = root.createMutable(d.vec2u);
     const fn = /*#__PURE__*/($ => (globalThis.__TYPEGPU_META__ ??= new WeakMap()).set($.f = () => {
       'use gpu';
-      const a = ext.value;
-      const b = ext.config.multiplier;
-      const c = ext.config.zero;
-      const d = ext.config.multiplier;
+      const a = buffer.$.x;
     }, {
   v: 2,
   name: "fn",
   ast: {
     params: [],
-    body: [0, [[13, "a", "ext.value"], [13, "b", "ext.config.multiplier"], [13, "c", "ext.config.zero"], [13, "d", "ext.config.multiplier"]]]
+    body: [0, [[13, "a", [7, [7, "buffer", "$"], "x"]]]]
   },
   externals: {
-    "ext.value": () => ext.value,
-    "ext.config.multiplier": () => ext.config.multiplier,
-    "ext.config.zero": () => ext.config.zero
+    "buffer": () => buffer
   }
 }) && $.f)({});
     console.log(fn);

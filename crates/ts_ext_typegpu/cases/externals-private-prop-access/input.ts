@@ -1,15 +1,12 @@
-    const ext = {
-      value: 7,
-      config: {
-        multiplier: 1,
-        zero: 0,
-      }
-    };
-    const fn = () => {
-      'use gpu';
-      const a = ext.value;
-      const b = ext.config.multiplier;
-      const c = ext.config.zero;
-      const d = ext.config.multiplier;
-    };
-    console.log(fn);
+    import tgpu, { d } from 'typegpu';
+
+    const cls = new (class {
+      #const = tgpu.const(d.u32, 1);
+
+      fn = () => {
+        'use gpu';
+        const a = this.#const.$;
+      };
+    })();
+
+    console.log(cls);
