@@ -443,21 +443,34 @@ fn map_through(first: &crate::Expansion, start: u32, end: u32) -> Option<MappedR
             },
         });
     }
-    let low = match start_at.kind {
-        crate::SegmentKind::Verbatim => start_at
-            .original_start
-            .saturating_add(start - start_at.virtual_start),
-        crate::SegmentKind::Atom => start_at.original_start,
-    };
-    let high = match end_at.kind {
-        crate::SegmentKind::Verbatim => end_at
-            .original_start
-            .saturating_add(end - end_at.virtual_start),
-        crate::SegmentKind::Atom => end_at.original_end,
-    };
-    Some(MappedRange {
+    // A range across segments is the union of what each covered segment
+    // maps to: macro output can put operands in a different order than the
+    // author wrote them, so the two endpoints alone may cover too little.
+    let mut low = u32::MAX;
+    let mut high = 0;
+    for segment in &first.segments {
+        let lo = start.max(segment.virtual_start);
+        let hi = end.min(segment.virtual_end);
+        if lo >= hi {
+            continue;
+        }
+        let (s, e) = match segment.kind {
+            crate::SegmentKind::Verbatim => (
+                segment
+                    .original_start
+                    .saturating_add(lo - segment.virtual_start),
+                segment
+                    .original_start
+                    .saturating_add(hi - segment.virtual_start),
+            ),
+            crate::SegmentKind::Atom => (segment.original_start, segment.original_end),
+        };
+        low = low.min(s);
+        high = high.max(e);
+    }
+    (low <= high).then_some(MappedRange {
         start: low,
-        end: high.max(low),
+        end: high,
     })
 }
 
@@ -656,7 +669,25 @@ pub fn mappings_json(segments: &[(i32, i32, i32, i32, i32)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TransformSession, compose};
+    use super::{TransformSession, compose, map_through};
+
+    #[test]
+    fn ranges_across_reordered_segments_cover_every_operand() {
+        let verbatim = |vs, ve, os| crate::Segment {
+            virtual_start: vs,
+            virtual_end: ve,
+            original_start: os,
+            original_end: os + (ve - vs),
+            kind: crate::SegmentKind::Verbatim,
+        };
+        // `[b, a]` printed from `pair(a, b)` (a at 5, b at 8).
+        let first = crate::Expansion {
+            segments: vec![verbatim(1, 2, 8), verbatim(4, 5, 5)],
+            ..Default::default()
+        };
+        let mapped = map_through(&first, 1, 5).unwrap();
+        assert_eq!((mapped.start, mapped.end), (5, 9));
+    }
 
     #[test]
     fn ordinary_file_runs_typegpu_only() {
