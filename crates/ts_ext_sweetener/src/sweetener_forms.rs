@@ -24,11 +24,18 @@ pub fn expand_state_signal(name: &str, initial: &str) -> String {
 /// file owns. `None` means the expander's own rules should run.
 pub fn try_expand_fixture(
     source: &str,
+    file: &[Syntax],
     nodes: &[Syntax],
     index: usize,
     signals: &[(String, String)],
     methods: &[MethodBinding],
 ) -> Option<FixtureRewrite> {
+    // Handwritten forms are library macros. They run only where this file
+    // imported the spelling. Core TypeScript forms are not in that set.
+    // `file` is the module root: the use may be nested inside a function.
+    if !handwritten_form_authorized(file, nodes, index) {
+        return None;
+    }
     if let Some(item) = match_method_item(source, &nodes[index..]) {
         let end = if item.requests.is_empty() {
             method_item_end(nodes, index)
@@ -204,6 +211,216 @@ pub fn try_expand_fixture(
     }
     let _ = (source, nodes, index);
     None
+}
+
+/// Spellings the handwritten form pass may rewrite, and the `for syntax`
+/// name that authorizes each one.
+///
+/// These are library macros, not Sweetener core forms. Upstream dispatches a
+/// core form from the consumer when no syntax binding is in scope
+/// (`docs/specifications/04-expansion-enforestation.md` §4 and §7;
+/// `docs/decisions/0004-core-forms-operators-and-generated-syntax.md`). The
+/// reserved set is `packages/syntax/src/identifier-tokens.ts` `reservedWords`
+/// plus the expression heads in
+/// `packages/enforestation/src/primary-expression.ts` `expressionHeadWords`.
+/// Of the heads this pass rewrites, only `function` and `export` are in that
+/// set, and only `function` has a handwritten rewrite (`match_effect_item`
+/// calls `match_implicit_function`). `export` is recognized so a modifier in
+/// front of `function` does not hide the core form. `do` is reserved too, but
+/// this pass expands `doSteps`, which is not reserved. Everything else,
+/// including `match`, `#`, `data`, `protocol`, `->`, `when`, and `each`, is
+/// an ordinary macro: upstream leaves it unread (TS4025) unless the file
+/// imports it.
+const HANDWRITTEN_FORMS: &[(&str, &str)] = &[
+    ("match", "match"),
+    ("#", "#"),
+    ("data", "data"),
+    ("protocol", "protocol"),
+    ("implements", "implements"),
+    ("doSteps", "doSteps"),
+    ("->", "->"),
+    ("->>", "->>"),
+    ("<-", "<-"),
+    ("when", "when"),
+    ("each", "each"),
+    ("assert", "assert"),
+    ("effect", "effect"),
+    ("method", "method"),
+    ("error", "error"),
+    ("service", "service"),
+    ("handle", "handle"),
+    ("gen", "gen"),
+];
+
+/// True when the node at `index` is a core form, or a handwritten library
+/// form whose spelling this file imported `for syntax`.
+///
+/// The import may be nested (`function body() { import { match } ... }`).
+/// A local `export syntax` is not an import and does not authorize the form.
+/// Callers that already proved a use (`form_signals`, `form_methods`) pass
+/// that proof in `active`.
+pub fn handwritten_form_in_scope(
+    file: &[Syntax],
+    nodes: &[Syntax],
+    index: usize,
+    active: bool,
+) -> bool {
+    if active {
+        return true;
+    }
+    let Some(spelling) = handwritten_spelling(nodes, index) else {
+        // Not a library form this pass owns. Leave it for the core printer.
+        return true;
+    };
+    // The use may sit inside a function. The import is anywhere in the file.
+    imported_syntax_names(file)
+        .iter()
+        .any(|name| name == spelling)
+}
+
+fn handwritten_form_authorized(file: &[Syntax], nodes: &[Syntax], index: usize) -> bool {
+    handwritten_form_in_scope(file, nodes, index, false)
+}
+
+/// The library-macro spelling at `index`, if this pass would rewrite it.
+fn handwritten_spelling(nodes: &[Syntax], index: usize) -> Option<&'static str> {
+    if let Some(name) = token_raw(nodes.get(index)) {
+        if name == "function" || name == "export" {
+            return None;
+        }
+        return HANDWRITTEN_FORMS
+            .iter()
+            .find(|(head, _)| *head == name)
+            .map(|(_, spelling)| *spelling);
+    }
+    if operator_is(nodes.get(index), "#") {
+        return Some("#");
+    }
+    if operator_is(nodes.get(index), "->") || operator_is(nodes.get(index), "->>") {
+        return thread_spelling(nodes.get(index).map(|node| std::slice::from_ref(node)));
+    }
+    if let Some(children) = group_children(nodes.get(index), Delimiter::Brace) {
+        let head = token_raw(children.first())?;
+        if head == "when" || head == "each" {
+            return HANDWRITTEN_FORMS
+                .iter()
+                .find(|(form, _)| *form == head)
+                .map(|(_, spelling)| *spelling);
+        }
+        return None;
+    }
+    if let Some(children) = group_children(nodes.get(index), Delimiter::Bracket) {
+        if children
+            .first()
+            .is_some_and(|child| operator_is(Some(child), "#"))
+        {
+            return Some("#");
+        }
+        return None;
+    }
+    if let Some(children) = group_children(nodes.get(index), Delimiter::Paren) {
+        return thread_spelling(Some(children));
+    }
+    None
+}
+
+fn thread_spelling(children: Option<&[Syntax]>) -> Option<&'static str> {
+    let children = children?;
+    let first = operator_raw(children.first()?)?;
+    if first == "<-" {
+        return Some("<-");
+    }
+    if first == "->>" {
+        return Some(THREAD_LAST);
+    }
+    if first == "->" {
+        let second = children.get(1).and_then(operator_raw);
+        if second == Some(">") {
+            let adjacent = node_end(&children[0]) == node_start(children.get(1)?);
+            if adjacent {
+                return Some(THREAD_LAST);
+            }
+        }
+        return Some("->");
+    }
+    None
+}
+
+/// `->>`, written beside the constant so a replacement cannot drop a `>`.
+const THREAD_LAST: &str = "->>";
+
+/// Names a `for syntax` import binds in this list or inside a nested group.
+fn imported_syntax_names(nodes: &[Syntax]) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_imported_syntax_names(nodes, &mut names);
+    names
+}
+
+fn collect_imported_syntax_names(nodes: &[Syntax], names: &mut Vec<String>) {
+    let mut index = 0;
+    while index < nodes.len() {
+        if let Some(Syntax::Group { children, .. }) = nodes.get(index) {
+            collect_imported_syntax_names(children, names);
+        }
+        if syntax_import_here(nodes, index) {
+            if let Some(Syntax::Group {
+                children,
+                delimiter: Delimiter::Brace,
+                ..
+            }) = nodes.get(index + 1)
+            {
+                collect_import_binding_names(children, names);
+            }
+        }
+        index += 1;
+    }
+}
+
+fn syntax_import_here(nodes: &[Syntax], index: usize) -> bool {
+    if !token_is(nodes.get(index), "import") {
+        return false;
+    }
+    nodes
+        .iter()
+        .skip(index)
+        .take_while(|node| !operator_is(Some(node), ";"))
+        .any(|node| token_is(Some(node), "syntax"))
+}
+
+fn collect_import_binding_names(children: &[Syntax], names: &mut Vec<String>) {
+    let mut child = 0;
+    while child < children.len() {
+        if let Syntax::Token { raw, .. } = &children[child] {
+            if is_word(raw) && raw != "as" {
+                if token_is(children.get(child + 1), "as") {
+                    if let Some(Syntax::Token { raw: local, .. }) = children.get(child + 2) {
+                        names.push(local.clone());
+                        child += 3;
+                        continue;
+                    }
+                }
+                names.push(raw.clone());
+            }
+        }
+        if let Syntax::Group {
+            delimiter: Delimiter::Paren,
+            children: inner,
+            ..
+        } = &children[child]
+        {
+            let name = inner
+                .iter()
+                .filter_map(|node| match node {
+                    Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => Some(raw.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            if !name.is_empty() {
+                names.push(name);
+            }
+        }
+        child += 1;
+    }
 }
 
 /// Prefix `(#)`: `#[a, b]` is `vector(a, b)`. The spelling is an operator,
@@ -3144,6 +3361,105 @@ mod tests {
         assert_eq!(
             expand_jsx_each("items", "item", Some("index"), "<li />"),
             "{(items).map((item, index) => <li />)}"
+        );
+    }
+
+    /// A library form with no `for syntax` import is not rewritten. The same
+    /// form expands once the file imports its spelling, including from inside
+    /// a nested block. `function` is a core form and still rewrites.
+    #[test]
+    fn handwritten_forms_follow_the_syntax_import() {
+        let bare = "const a = match (1) { 1 => 2, _ => 3 };\nconst v = #[1, 2];\nconst d = data Box<T> = Full(value: T) | Empty();\n";
+        let expanded = crate::expand(crate::ExpandRequest {
+            filename: "bare.sts",
+            code: bare,
+            phase: crate::Phase::Build,
+        });
+        assert!(
+            expanded.diagnostics.is_empty(),
+            "{:?}",
+            expanded.diagnostics
+        );
+        assert!(
+            expanded.code.contains("match (1)"),
+            "match was rewritten:\n{}",
+            expanded.code
+        );
+        assert!(
+            expanded.code.contains("#[1, 2]"),
+            "vector was rewritten:\n{}",
+            expanded.code
+        );
+        assert!(!expanded.code.contains("vector("), "{}", expanded.code);
+        assert!(
+            expanded.code.contains("data Box"),
+            "data was rewritten:\n{}",
+            expanded.code
+        );
+
+        let dir = std::env::temp_dir().join("sw-gate-form-import");
+        let _ = std::fs::create_dir_all(&dir);
+        let macros = "export syntax match:expr {\n  rule { match ($value:expr) { $($arms)* } } => { matched($value) }\n}\nexport syntax (#):expr {\n  rule { #[$($element:expr),*] } => { vector($($element),*) }\n}\nexport syntax data:item {\n  rule { data $name:binding; } => { type $name = 1; }\n}\n";
+        std::fs::write(dir.join("macros.sts"), macros).expect("macro fixture");
+        let imported_path = dir.join("imported.sts");
+        let imported = "import { match, (#), data } from \"./macros.sts\" for syntax;\nconst a = match (1) { 1 => 2, _ => 3 };\nconst v = #[1, 2];\nconst d = data Box<T> = Full(value: T) | Empty();\n";
+        let imported_name = imported_path.display().to_string();
+        let expanded = crate::expand(crate::ExpandRequest {
+            filename: &imported_name,
+            code: imported,
+            phase: crate::Phase::Build,
+        });
+        assert!(
+            expanded.diagnostics.is_empty(),
+            "{:?}",
+            expanded.diagnostics
+        );
+        assert!(
+            !expanded.code.contains("match (1)"),
+            "imported match stayed:\n{}",
+            expanded.code
+        );
+        assert!(
+            expanded.code.contains("vector(1, 2)"),
+            "imported vector stayed:\n{}",
+            expanded.code
+        );
+        assert!(
+            !expanded.code.contains("data Box"),
+            "imported data stayed:\n{}",
+            expanded.code
+        );
+
+        let nested_path = dir.join("nested.sts");
+        let nested = "function body() {\n  import { match } from \"./macros.sts\" for syntax;\n  const a = match (1) { 1 => 2, _ => 3 };\n}\nconst v = #[1, 2];\n";
+        let nested_name = nested_path.display().to_string();
+        let expanded = crate::expand(crate::ExpandRequest {
+            filename: &nested_name,
+            code: nested,
+            phase: crate::Phase::Build,
+        });
+        assert!(
+            !expanded.code.contains("match (1)"),
+            "nested import did not authorize match:\n{}",
+            expanded.code
+        );
+        assert!(
+            expanded.code.contains("#[1, 2]"),
+            "unimported vector was rewritten:\n{}",
+            expanded.code
+        );
+
+        let function =
+            "const f = function(value: number) { const doubled = value * 2; doubled + 1 };\n";
+        let expanded = crate::expand(crate::ExpandRequest {
+            filename: "core.sts",
+            code: function,
+            phase: crate::Phase::Build,
+        });
+        assert!(
+            expanded.code.contains("return doubled + 1"),
+            "core function was not rewritten:\n{}",
+            expanded.code
         );
     }
 }

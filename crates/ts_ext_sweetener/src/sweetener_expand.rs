@@ -14,6 +14,9 @@ use std::rc::Rc;
 /// not the table.
 type SharedList<T> = Rc<Vec<T>>;
 
+/// `->>`. Kept as a constant so a rewrite cannot drop a `>`.
+const THREAD_LAST_OP: &str = "->>";
+
 const FORM_HEADS: &[&str] = &[
     "assert",
     "data",
@@ -91,6 +94,7 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
         form_methods: Vec::new(),
         last_form_next: 0,
         failed: false,
+        file_nodes: &read.children,
     };
     printer.diagnostics.extend(loaded.diagnostics);
     printer.print_nodes(&read.children);
@@ -136,6 +140,10 @@ struct Printer<'a> {
     form_methods: Vec<super::sweetener_forms::MethodBinding>,
     /// Resume index after the form rewrite just applied.
     last_form_next: usize,
+    /// The file's top-level nodes. A form inside a function is authorized by
+    /// a `for syntax` import written anywhere in the file, not only by the
+    /// siblings of the form.
+    file_nodes: &'a [Syntax],
     /// Channel binders this generator must print with a suffix.
     channel_renames: HashMap<String, String>,
     /// A macro rule rejected an item. That item stays as written; the rest
@@ -927,6 +935,7 @@ impl<'a> Printer<'a> {
             last_form_next: 0,
             channel_renames: HashMap::new(),
             failed: false,
+            file_nodes: self.file_nodes,
         };
         nested.print_nodes(&read.children);
         nested.copy_until(owned.len());
@@ -950,23 +959,46 @@ impl<'a> Printer<'a> {
                 delimiter,
                 children,
                 ..
-            } => match delimiter {
-                Delimiter::Brace => {
-                    token_is(children.first(), "when") || token_is(children.first(), "each")
-                }
-                Delimiter::Bracket => children
-                    .first()
-                    .is_some_and(|child| operator_is(Some(child), "#")),
-                Delimiter::Paren => children.first().is_some_and(|child| {
-                    operator_is(Some(child), "->") || operator_is(Some(child), "->>")
-                }),
-            },
+            } => {
+                let library = match delimiter {
+                    Delimiter::Brace => {
+                        token_is(children.first(), "when") || token_is(children.first(), "each")
+                    }
+                    Delimiter::Bracket => children
+                        .first()
+                        .is_some_and(|child| operator_is(Some(child), "#")),
+                    Delimiter::Paren => children.first().is_some_and(|child| {
+                        operator_is(Some(child), "->") || operator_is(Some(child), THREAD_LAST_OP)
+                    }),
+                };
+                // A grouped library head expands only after the file imports it.
+                !library
+                    || super::sweetener_forms::handwritten_form_in_scope(
+                        self.file_nodes,
+                        nodes,
+                        index,
+                        false,
+                    )
+            }
             Syntax::Operator { raw, .. } => {
-                matches!(raw.as_str(), "#" | "<-" | "->" | "->>" | "|>")
+                if raw.as_str() == "|>"
                     || self
                         .macros
                         .iter()
                         .any(|macro_| macro_.fixity == Fixity::Infix && macro_.name == *raw)
+                {
+                    return true;
+                }
+                (raw.as_str() == "#"
+                    || raw.as_str() == "<-"
+                    || raw.as_str() == "->"
+                    || raw.as_str() == THREAD_LAST_OP)
+                    && super::sweetener_forms::handwritten_form_in_scope(
+                        self.file_nodes,
+                        nodes,
+                        index,
+                        false,
+                    )
             }
             Syntax::Token { raw, .. } => {
                 if index > 0 && operator_is(nodes.get(index - 1), ".") {
@@ -983,8 +1015,18 @@ impl<'a> Printer<'a> {
                 if self.form_methods.iter().any(|method| method.head == *raw) {
                     return true;
                 }
-                if FORM_HEADS.contains(&raw.as_str()) {
+                // `function` and `export` are core forms. The other heads are
+                // library macros and run only after a `for syntax` import.
+                if raw == "function" || raw == "export" {
                     return true;
+                }
+                if FORM_HEADS.contains(&raw.as_str()) {
+                    return super::sweetener_forms::handwritten_form_in_scope(
+                        self.file_nodes,
+                        nodes,
+                        index,
+                        false,
+                    );
                 }
                 self.macros.iter().any(|macro_| macro_.name == *raw)
             }
@@ -1109,6 +1151,7 @@ impl<'a> Printer<'a> {
             last_form_next: 0,
             channel_renames: self.channel_renames.clone(),
             failed: false,
+            file_nodes: self.file_nodes,
         };
         // A form that already rewrote `function (...)` is TypeScript. Matching
         // it again as the function macro fails the file on the `return` the
@@ -1351,6 +1394,7 @@ impl<'a> Printer<'a> {
         }
         let Some(rewritten) = super::sweetener_forms::try_expand_fixture(
             self.source,
+            self.file_nodes,
             nodes,
             index,
             &self.form_signals,
