@@ -182,6 +182,13 @@ pub fn try_expand_fixture(
         // The imported `effect` rule owns this form. A copy of the body
         // here skips macros inside template literals.
         let _ = signals;
+    } else if token_is(nodes.get(index), "function")
+        && !imported_syntax_bindings(file)
+            .iter()
+            .any(|(_, export)| export == "function")
+    {
+        // The implicit-return `function` is a library macro that shadows
+        // core. Without a `for syntax` import, `function` is TypeScript.
     } else if let Some(mut effect) = match_effect_item(source, nodes, index) {
         effect.text = substitute_signal_reads(&effect.text, signals);
         return Some(effect);
@@ -287,6 +294,15 @@ pub fn handwritten_form_in_scope(
         }
     }
     let Some(spelling) = handwritten_spelling(nodes, index) else {
+        // `x <- channel` and `value -> channel` are infix library forms:
+        // the operator after the operand is the spelling, and it needs an
+        // import like any other. A file that never imported `<-` keeps the
+        // text, as upstream reads it as ordinary code.
+        if let Some(op) = nodes.get(index + 1).and_then(operator_raw) {
+            if op == "<-" || op == "->" {
+                return imports.iter().any(|(local, _)| local == op);
+            }
+        }
         // Not a library form this pass owns. Leave it for the core printer.
         return true;
     };
@@ -3522,9 +3538,11 @@ mod tests {
             code: function,
             phase: crate::Phase::Build,
         });
+        // Upstream's implicit-return `function` is a library macro. Without
+        // a `for syntax` import the function is core TypeScript, as written.
         assert!(
-            expanded.code.contains("return doubled + 1"),
-            "core function was not rewritten:\n{}",
+            !expanded.code.contains("return doubled + 1"),
+            "unimported function was rewritten:\n{}",
             expanded.code
         );
     }
