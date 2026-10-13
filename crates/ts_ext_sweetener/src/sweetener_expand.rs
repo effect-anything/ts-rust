@@ -67,20 +67,39 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     let budget = super::sweetener_budget::configured();
     let stack = super::sweetener_budget::stack_bytes(&budget);
     let code = request.code;
-    std::thread::scope(|scope| {
+    let (filename, phase) = (request.filename, request.phase);
+    if let Some(hit) = super::sweetener_cache::lookup_file(filename, code, phase, &budget) {
+        return hit;
+    }
+    let cache_budget = budget.clone();
+    let joined = std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("sweetener-expand".to_owned())
             .stack_size(stack)
             .spawn_scoped(scope, move || {
-                super::sweetener_budget::with_budget(budget, || expand_here(request))
+                super::sweetener_cache::take_read_hashes();
+                let expansion =
+                    super::sweetener_budget::with_budget(budget, || expand_here(request));
+                (expansion, super::sweetener_cache::take_read_hashes())
             })
             .ok()
             .map(|handle| handle.join())
-    })
-    .map_or_else(
-        || crate::unchanged(code),
-        |joined| joined.unwrap_or_else(|panic| internal_error(code, panic.as_ref())),
-    )
+    });
+    match joined {
+        None => crate::unchanged(code),
+        Some(Err(panic)) => internal_error(code, panic.as_ref()),
+        Some(Ok((expansion, modules))) => {
+            super::sweetener_cache::store_file(
+                filename,
+                code,
+                phase,
+                &cache_budget,
+                &expansion,
+                modules,
+            );
+            expansion
+        }
+    }
 }
 
 /// An expander bug must not pass the file through silently: the author
@@ -3941,12 +3960,12 @@ fn load_syntax_module_body(
         });
         return;
     };
-    if let Ok(canonical) = path.canonicalize() {
-        loaded.dependencies.push(canonical.display().to_string());
-    } else {
-        loaded.dependencies.push(path.display().to_string());
-    }
-    let read = sweetener_reader::read_syntax(&text);
+    let dependency = path.canonicalize().map_or_else(
+        |_| path.display().to_string(),
+        |canonical| canonical.display().to_string(),
+    );
+    loaded.dependencies.push(dependency.clone());
+    let read = super::sweetener_cache::read_module(&dependency, &text);
     let mut found = HashMap::<String, Macro>::new();
     collect_macros(&text, &read.children, &mut found);
     let owner: Rc<str> = Rc::from(path.display().to_string());

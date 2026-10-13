@@ -84,6 +84,12 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// The operator spellings currently added to the reader, longest first.
+#[must_use]
+pub fn extra_operators() -> Vec<String> {
+    EXTRA_OPERATORS.with(|extra| extra.borrow().clone())
+}
+
 /// Spellings the reader already reads as one operator.
 const BUILTIN_SPELLINGS: &[&str] = &["|>", "==", "=>", "**", "->", "<-", "::"];
 
