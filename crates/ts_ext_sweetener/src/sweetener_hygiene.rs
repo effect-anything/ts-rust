@@ -31,6 +31,13 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 /// A fresh placeholder for one introduced binder named `name`.
 pub(crate) fn placeholder(name: &str) -> String {
+    // Tests force an expander panic through a `#fresh` hint. Every fresh
+    // binder, including one a later pass reprints, comes through here, and
+    // the expander never produces this hint itself.
+    #[cfg(test)]
+    if name == crate::sweetener_expand::PANIC_FRESH_HINT {
+        panic!("forced expander panic");
+    }
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     format!("{PREFIX}{id}_{name}")
 }
