@@ -14,7 +14,8 @@
 //! Three readers share this module, so they see the same values:
 //!
 //! - the content mapper (`tsc-ext` with no arguments): `tsc` sends the
-//!   entry's `options` with `openProject`, already parsed;
+//!   entry's `options` with `openProject`, already parsed; `plugin` builds
+//!   under them, `transform` (the check view) has no option that changes it;
 //! - `tsc-ext sweetener --expand`: `--tsconfig`, else the nearest
 //!   `tsconfig.json` above the file;
 //! - the Node API (`Transformer`): its `tsconfig` option, else the nearest

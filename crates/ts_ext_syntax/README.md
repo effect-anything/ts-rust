@@ -37,8 +37,15 @@ entry for `@effect-x/tsc`.
 Unknown keys and wrong types are errors. `src/config.rs` reads the nearest `tsconfig.json`
 above a file (JSONC; a relative `extends` is followed when the config has no `contentMappers`).
 
-- `tsc` sends the entry's options with `openProject`; the content mapper validates them and
-  reports invalid ones as option diagnostics.
+- `tsc` sends the entry's options with `openProject`; the content mapper validates them,
+  reports invalid ones as option diagnostics, and keeps them per project handle.
+
+One pipeline turns the options into output (`TransformSession::from_options`): the Node API, the
+mapper's `plugin` method and `sweetener --expand --build` print the same bundler text for the same
+options (`tests/options_parity.rs`). The mapper's `transform` (what `tsc` type-checks) and plain
+`sweetener --expand` are the check view: Sweetener only. No current option changes it: `tsc` keeps
+the author's operators in `"use gpu"` code and does not emit `.sts` files, so `typegpu.*` and
+`sweetener.rewriteImports` only shape runtime JavaScript.
 - `tsc-ext sweetener --expand` reads `--tsconfig`, else the nearest tsconfig.json.
 - `Transformer` reads its `tsconfig` option, else the nearest tsconfig.json of each file
   (`tsconfig: false` reads none). Explicit options override single fields.
@@ -47,7 +54,7 @@ above a file (JSONC; a relative `extends` is followed when the config has no `co
 
 ```
 tsc-ext                       content mapper on stdin/stdout (started by tsc)
-tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map]
+tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map] [--build]
 tsc-ext help
 ```
 
@@ -55,7 +62,8 @@ tsc-ext help
 stdout. Diagnostics go to stderr as `file(line,col): error SWRxxxx: message` (warnings as
 `warning`), related locations indented below; an error exits 1. `--map` appends the v3 source map
 as an inline `//# sourceMappingURL=data:application/json;base64,...` comment, so stdout stays one
-file that tools and browsers read.
+file that tools and browsers read. `--build` prints the bundler output instead (the
+`Transformer` result under the tsconfig's options).
 
 `tsc` starts the mapper from the package's `typescript.contentMapper.exec` (`./bin/tsc-ext`), run
 in the package directory. In the published package that is a Node launcher that runs `lib/tsc-ext`

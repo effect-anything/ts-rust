@@ -66,7 +66,8 @@ Register the content mapper in tsconfig.json and run `tsc --runExternalCode`:
                      "options": { "typegpu": { "autoNaming": true } } }]
 ```
 
-- `tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map]` prints the expansion; diagnostics
+- `tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map] [--build]` prints the expansion
+  (`--build`: the bundler output, as the Node API returns it); diagnostics
   go to stderr.
 - `import { Transformer, formatDiagnostics } from "@effect-x/tsc"` for bundler plugins:
   `new Transformer().transform(code, path)` returns `{ code, hostPath, dependencies, diagnostics,

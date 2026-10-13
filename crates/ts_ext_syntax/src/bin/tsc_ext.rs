@@ -4,8 +4,10 @@
 //! stdin/stdout; a tsconfig `contentMappers` entry for `@effect-x/tsc`
 //! starts it. `tsgo` does not link this binary.
 //!
-//! `tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map]` prints
-//! the expansion `tsc` type-checks (Sweetener, check phase) to stdout.
+//! `tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map] [--build]`
+//! prints the expansion `tsc` type-checks (Sweetener, check phase) to
+//! stdout; with `--build`, the bundler output instead (the Node API's
+//! `Transformer` result, `TypeGPU` options applied).
 //! Diagnostics go to stderr as `file(line,col): error SWRxxxx: message`;
 //! any error exits 1. `--map` appends the v3 source map to the output as an
 //! inline `//# sourceMappingURL=data:application/json;base64,...` comment.
@@ -24,10 +26,12 @@ use ts_ext_syntax::protocol::{self, TransformResponse};
 
 const USAGE: &str = "usage:
   tsc-ext                       content mapper on stdin/stdout (started by tsc)
-  tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map]
+  tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map] [--build]
                                 print the expansion of <file> to stdout;
                                 diagnostics to stderr, exit 1 on an error;
-                                --map appends an inline v3 source map
+                                --map appends an inline v3 source map;
+                                --build prints the bundler output (what the
+                                Node API returns) instead of what tsc checks
   tsc-ext help                  this text";
 
 fn main() -> ExitCode {
@@ -50,6 +54,7 @@ fn sweetener_cli(args: &[String]) -> ExitCode {
     let mut file = None;
     let mut tsconfig = None;
     let mut map = false;
+    let mut build = false;
     let mut expand = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -60,6 +65,7 @@ fn sweetener_cli(args: &[String]) -> ExitCode {
             }
             "--tsconfig" => tsconfig = rest.next().map(PathBuf::from),
             "--map" => map = true,
+            "--build" => build = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -82,13 +88,16 @@ fn sweetener_cli(args: &[String]) -> ExitCode {
         }
     };
     let tsconfig = tsconfig.or_else(|| config::find_tsconfig(Path::new(&path)));
-    // No Sweetener option changes the expansion yet; reading them still
-    // reports an invalid config here, as tsc would.
-    if let Some(tsconfig) = &tsconfig
-        && let Err(err) = config::read_tsconfig_options(tsconfig)
-    {
-        eprintln!("{err}");
-        return ExitCode::from(1);
+    let options = match tsconfig.as_deref().map(config::read_tsconfig_options) {
+        Some(Err(err)) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+        Some(Ok(options)) => options,
+        None => Options::default(),
+    };
+    if build {
+        return build_cli(&path, &content, &options, map);
     }
     let expanded = ts_ext_syntax::expand(ts_ext_syntax::ExpandRequest {
         filename: &path,
@@ -125,6 +134,46 @@ fn sweetener_cli(args: &[String]) -> ExitCode {
             out,
             "{newline}//# sourceMappingURL=data:application/json;base64,{}\n",
             base64(v3.as_bytes())
+        );
+    }
+    if let Err(err) = written.and_then(|()| out.flush()) {
+        eprintln!("tsc-ext: {err}");
+        return ExitCode::from(1);
+    }
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// `--build`: the same pipeline as the Node API and the mapper's `plugin`
+/// method ([`ts_ext_syntax::TransformSession::from_options`]).
+fn build_cli(path: &str, content: &str, options: &Options, map: bool) -> ExitCode {
+    let built = ts_ext_syntax::TransformSession::from_options(options).transform(path, content);
+    let mut failed = false;
+    for diagnostic in &built.diagnostics {
+        let (line, col) = line_col(content, diagnostic.start);
+        let error = diagnostic.severity == ts_ext_syntax::Severity::Error;
+        failed |= error;
+        eprintln!(
+            "{path}({line},{col}): {} {}",
+            if error { "error" } else { "warning" },
+            report_message(&diagnostic.message)
+        );
+        for related in &diagnostic.related {
+            let (line, col) = line_col(content, related.start);
+            eprintln!("  {path}({line},{col}): {}", related.message);
+        }
+    }
+    let mut out = io::stdout().lock();
+    let mut written = out.write_all(built.code.as_bytes());
+    if map && written.is_ok() {
+        let newline = if built.code.ends_with('\n') { "" } else { "\n" };
+        written = write!(
+            out,
+            "{newline}//# sourceMappingURL=data:application/json;base64,{}\n",
+            base64(strip_segments(&built.source_map).as_bytes())
         );
     }
     if let Err(err) = written.and_then(|()| out.flush()) {
@@ -264,11 +313,16 @@ fn handle(message: &str, projects: &mut Projects) -> String {
             let content = json_string(&params, "content").unwrap_or_default();
             encode_transform(&protocol::transform_file(&file_name, &content))
         }
+        // The bundler output under the project's options: the same
+        // pipeline as `sweetener --build` and the Node API.
         "plugin" => {
             let file_name = json_string(&params, "fileName").unwrap_or_default();
             let content = json_string(&params, "content").unwrap_or_default();
-            let transformed =
-                ts_ext_syntax::TransformSession::new().transform(&file_name, &content);
+            let options = json_string(&params, "projectHandle")
+                .and_then(|handle| projects.get(&handle).cloned())
+                .unwrap_or_default();
+            let transformed = ts_ext_syntax::TransformSession::from_options(&options)
+                .transform(&file_name, &content);
             encode_plugin(&transformed)
         }
         _ => {

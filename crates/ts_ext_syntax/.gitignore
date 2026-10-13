@@ -1,4 +1,4 @@
-bin/
+/bin/
 node_modules/
 # napi build output (the addon and its generated loader/types; js/ is the API)
 *.node
