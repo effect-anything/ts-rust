@@ -533,6 +533,7 @@ mod tests {
             ],
             diagnostics: Vec::new(),
             dependencies: Vec::new(),
+            ..Default::default()
         };
         let rewritten = ts_goport::ext::tsover::rewrite_text("a.ts", &virtual_text).unwrap();
         let segments = compose(&expansion, &rewritten);

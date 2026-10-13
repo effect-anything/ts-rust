@@ -1077,6 +1077,69 @@ fn expansion_cycles_and_depth_are_budgeted() {
 }
 
 #[test]
+fn traces_and_token_origins() {
+    let code = "export syntax twice:expr {\n  rule { twice($x:expr) } => { [$x, $x] }\n}\nexport syntax outer:expr {\n  rule { outer($x:expr) } => { twice($x) }\n}\nconst a = outer(value);\nconst b = 1;\n";
+    let out = expand(ExpandRequest {
+        filename: "trace.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(
+        out.code.contains("const a = [value, value];"),
+        "{}",
+        out.code
+    );
+    let call = code.find("outer(value)").unwrap() as u32;
+    let call_end = call + "outer(value)".len() as u32;
+    let names: Vec<(&str, u32)> = out
+        .traces
+        .iter()
+        .map(|trace| (trace.macro_name.as_str(), trace.depth))
+        .collect();
+    assert_eq!(names, [("outer", 0), ("twice", 1)], "{:?}", out.traces);
+    for trace in &out.traces {
+        assert_eq!((trace.start, trace.end), (call, call_end));
+        assert!(trace.module.is_none() && trace.rule_start.is_some());
+    }
+    // Every output token has one origin, in order.
+    let at = out.code.find("[value, value]").unwrap() as u32;
+    let origin = |virtual_start: u32| {
+        out.origins
+            .iter()
+            .find(|origin| origin.virtual_start == virtual_start)
+            .copied()
+            .unwrap()
+    };
+    let bracket = origin(at);
+    assert!(bracket.introduced);
+    assert_eq!(
+        (bracket.original_start, bracket.original_end),
+        (call, call_end)
+    );
+    let value = origin(at + 1);
+    assert!(!value.introduced);
+    let value_at = code.find("value)").unwrap() as u32;
+    assert_eq!(
+        (value.original_start, value.original_end),
+        (value_at, value_at + 5)
+    );
+    let second = origin(at + "[value, ".len() as u32);
+    assert_eq!(
+        (second.original_start, second.introduced),
+        (value_at, false)
+    );
+    let b = origin(out.code.find("b = 1").unwrap() as u32);
+    let b_at = code.find("b = 1").unwrap() as u32;
+    assert_eq!((b.original_start, b.introduced), (b_at, false));
+    assert!(
+        out.origins
+            .windows(2)
+            .all(|w| w[0].virtual_end <= w[1].virtual_start)
+    );
+}
+
+#[test]
 fn resource_budgets_stop_expansion_with_swr4015() {
     let code = "export syntax twice:expr {\n  rule { twice($x:expr) } => { [$x, $x] }\n}\nconst a = twice(1);\nconst b = twice(2);\n";
     let request = || ExpandRequest {

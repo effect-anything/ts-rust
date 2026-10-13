@@ -13,6 +13,7 @@ mod sweetener_context;
 mod sweetener_expand;
 mod sweetener_forms;
 mod sweetener_hygiene;
+mod sweetener_origins;
 mod sweetener_reader;
 mod sweetener_scoped;
 mod sweetener_validate;
@@ -79,13 +80,47 @@ pub struct Diagnostic {
 /// `code` is ordinary TypeScript (or the original text when nothing applied).
 /// `segments` cover the virtual text that came from the original. Gaps are
 /// synthesized and have no source location.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Expansion {
     pub code: String,
     pub segments: Vec<Segment>,
     pub diagnostics: Vec<Diagnostic>,
     /// Other files this expansion read. The build hook watches them.
     pub dependencies: Vec<String>,
+    /// Upstream's expansion traces: every macro invocation, in order.
+    pub traces: Vec<ExpansionTrace>,
+    /// Upstream's token origins: one entry per token of `code`.
+    pub origins: Vec<TokenOrigin>,
+}
+
+/// One macro invocation (upstream `ExpansionTrace`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExpansionTrace {
+    /// The macro's name as invoked.
+    pub macro_name: String,
+    /// The macro module that defines the rule; `None` for this file.
+    pub module: Option<String>,
+    /// Start of the matched rule's pattern in this file, for a local rule.
+    pub rule_start: Option<u32>,
+    /// `0` for an invocation the user wrote; deeper for one a template
+    /// produced.
+    pub depth: u32,
+    /// The user-written invocation this expansion belongs to.
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Where one output token came from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenOrigin {
+    pub virtual_start: u32,
+    pub virtual_end: u32,
+    /// The source token for a token the user wrote; the invocation for a
+    /// token a template introduced (empty when synthesized outside one).
+    pub original_start: u32,
+    pub original_end: u32,
+    /// A template, not the user, wrote this token.
+    pub introduced: bool,
 }
 
 impl Expansion {
@@ -190,5 +225,7 @@ pub fn unchanged(code: &str) -> Expansion {
         }],
         diagnostics: Vec::new(),
         dependencies: Vec::new(),
+        traces: Vec::new(),
+        origins: Vec::new(),
     }
 }

@@ -195,6 +195,7 @@ fn expand_pass(
     BUDGET.with(|budget| budget.borrow_mut().take());
     super::sweetener_budget::reset();
     INVOKED_OWNERS.with(|set| set.borrow_mut().clear());
+    TRACES.with(|traces| *traces.borrow_mut() = (Vec::new(), Vec::new()));
     if let Err(message) = super::sweetener_budget::charge(
         super::sweetener_budget::Kind::InputTokens,
         super::sweetener_budget::count_tokens(source),
@@ -395,6 +396,8 @@ fn expand_pass(
     );
     (
         Expansion {
+            origins: super::sweetener_origins::token_origins(&code, source, &printer.segments),
+            traces: TRACES.with(|traces| std::mem::take(&mut traces.borrow_mut().1)),
             code,
             segments: printer.segments,
             diagnostics: printer.diagnostics,
@@ -1543,7 +1546,7 @@ impl<'a> Printer<'a> {
                         self.printing_core = true;
                     }
                     self.note_captures(&matched.captures);
-                    note_invoked(rule.owner.as_deref());
+                    note_invoked(&rule, &name, self.depth);
                     let replacement = instantiate(
                         self.source,
                         &rule.template,
@@ -1578,7 +1581,7 @@ impl<'a> Printer<'a> {
                     self.printing_core = true;
                 }
                 self.note_captures(&captures);
-                note_invoked(rule.owner.as_deref());
+                note_invoked(&rule, &name, self.depth);
                 let mut replacement =
                     instantiate(self.source, &rule.template, &captures, &self.classes);
                 // The rule's trailing `;` is the statement terminator. Emit it
@@ -1661,7 +1664,7 @@ impl<'a> Printer<'a> {
                 self.printing_core = true;
             }
             self.note_captures(&captures);
-            note_invoked(rule.owner.as_deref());
+            note_invoked(&rule, &name, self.depth);
             let replacement = instantiate(self.source, &rule.template, &captures, &self.classes);
             let expanded = self.expand_replacement(&replacement);
             self.printing_core = was_core;
@@ -1736,7 +1739,7 @@ impl<'a> Printer<'a> {
                     self.printing_core = true;
                 }
                 self.note_captures(&matched.captures);
-                note_invoked(rule.owner.as_deref());
+                note_invoked(&rule, &name, self.depth);
                 let replacement = instantiate(
                     self.source,
                     &rule.template,
@@ -1852,7 +1855,7 @@ impl<'a> Printer<'a> {
                 ) {
                     note_budget(message);
                 }
-                note_invoked(rule.owner.as_deref());
+                note_invoked(&rule, &name, self.depth);
                 let (mut replacement, protected) = instantiate_marked(
                     self.source,
                     &rule.template,
@@ -3169,6 +3172,16 @@ impl<'a> Printer<'a> {
 
     fn emit(&mut self, original_start: u32, original_end: u32, text: &str, kind: SegmentKind) {
         let source = self.source;
+        if self.depth == 0 && kind == SegmentKind::Atom {
+            TRACES.with(|traces| {
+                let (pending, placed) = &mut *traces.borrow_mut();
+                for mut trace in pending.drain(..) {
+                    trace.start = original_start;
+                    trace.end = original_end;
+                    placed.push(trace);
+                }
+            });
+        }
         let mut text = text;
         if self.depth == 0
             && let Some(message) = BUDGET.with(|budget| budget.borrow_mut().take())
@@ -11323,8 +11336,27 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
-fn note_invoked(owner: Option<&str>) {
-    if let Some(owner) = owner {
+thread_local! {
+    /// Invocations not yet placed (no top-level span yet), then the traces.
+    static TRACES: std::cell::RefCell<(Vec<crate::ExpansionTrace>, Vec<crate::ExpansionTrace>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
+fn note_invoked(rule: &Rule, name: &str, depth: u8) {
+    TRACES.with(|traces| {
+        traces.borrow_mut().0.push(crate::ExpansionTrace {
+            macro_name: name.to_owned(),
+            module: rule.owner.as_deref().map(str::to_owned),
+            rule_start: rule
+                .origin
+                .filter(|_| rule.owner.is_none())
+                .map(|span| span.start),
+            depth: u32::from(depth),
+            start: 0,
+            end: 0,
+        });
+    });
+    if let Some(owner) = rule.owner.as_deref() {
         INVOKED_OWNERS.with(|set| {
             set.borrow_mut().insert(owner.to_owned());
         });

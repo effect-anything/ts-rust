@@ -12,8 +12,9 @@
 pub mod session;
 
 pub use ts_ext_sweetener::{
-    Diagnostic, ExpandRequest, Expansion, Phase, RelatedLocation, Segment, SegmentKind, Severity,
-    expand, sweetener_matches, unchanged,
+    Diagnostic, ExpandRequest, Expansion, ExpansionTrace, Phase, RelatedLocation, ResourceBudget,
+    Segment, SegmentKind, Severity, TokenOrigin, expand, expand_with_budget, sweetener_matches,
+    unchanged,
 };
 pub use ts_ext_typegpu::structure;
 
