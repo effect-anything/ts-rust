@@ -301,6 +301,10 @@ mod expansion_tests {
             diag::Virtual_code_produced_by_the_content_mapper_0_has_problems_with_no_corresponding_location_in_this_file,
             vec!["m".to_string()],
         );
-        assert!(with_expansion_context(&plain).related_information().is_empty());
+        assert!(
+            with_expansion_context(&plain)
+                .related_information()
+                .is_empty()
+        );
     }
 }
