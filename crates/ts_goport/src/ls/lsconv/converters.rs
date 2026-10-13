@@ -1220,6 +1220,16 @@ fn diagnostic_script_and_range<'a>(
         return (ScriptOrOriginal::Original(original), loc);
     }
     let (mapped, fidelity) = SpanMap::virtual_to_original_span(Some(span_map), loc);
+    if fidelity == Fidelity::NONE
+        && let Some(expansion) = SpanMap::expansions_containing_virtual(Some(span_map), loc).first()
+    {
+        // PORT: ts-rust extension. Code a macro synthesized belongs to the
+        // invocation that produced it.
+        return (
+            ScriptOrOriginal::Original(original),
+            TextRange::new(expansion.original_start, expansion.original_end),
+        );
+    }
     if fidelity == Fidelity::NONE {
         // Entirely synthesized code has no original location; surface it at the top of the file.
         return (ScriptOrOriginal::Original(original), TextRange::new(0, 0));

@@ -14,9 +14,123 @@ pub const TYPE_FORMAT_FLAGS: TypeFormatFlags =
     TypeFormatFlags::USE_ALIAS_DEFINED_OUTSIDE_CURRENT_SCOPE
         .union(TypeFormatFlags::USE_INSTANTIATION_EXPRESSIONS);
 
+/// PORT: ts-rust extension. One macro expansion, for hover and the
+/// `custom/textDocument/showExpansion` request.
+#[derive(Clone, Debug)]
+pub struct ExpansionView {
+    pub label: String,
+    pub text: String,
+    pub range: lsproto::Range,
+}
+
 impl LanguageService {
-    // Go: ls/hover.go:27 ProvideHover
+    /// PORT: ts-rust extension. The hover, plus "Expanded from" and the
+    /// expanded code when the position is inside a macro invocation.
     pub fn provide_hover(
+        &self,
+        ctx: &Context,
+        params: &lsproto::HoverParams,
+    ) -> Result<lsproto::HoverResponse, GoError> {
+        let mut response = self.provide_hover_go(ctx, params)?;
+        let Some(expansion) = self.expansion_at(&params.text_document.uri, params.position) else {
+            return Ok(response);
+        };
+        let caps = lsproto::get_client_capabilities(ctx);
+        let markdown = lsproto::preferred_markup_kind(&caps.text_document.hover.content_format)
+            == lsproto::MarkupKind::MARKDOWN;
+        let note = if markdown {
+            format!(
+                "Expanded from {}\n```ts\n{}\n```",
+                expansion.label, expansion.text
+            )
+        } else {
+            format!("Expanded from {}\n{}", expansion.label, expansion.text)
+        };
+        match response.hover.as_mut() {
+            Some(hover) => {
+                if let Some(markup) = hover.contents.markup_content.as_mut() {
+                    markup
+                        .value
+                        .push_str(if markdown { "\n\n---\n\n" } else { "\n\n" });
+                    markup.value.push_str(&note);
+                }
+            }
+            None => {
+                response.hover = Some(lsproto::Hover {
+                    contents:
+                        lsproto::MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings {
+                            markup_content: Some(lsproto::MarkupContent {
+                                kind: if markdown {
+                                    lsproto::MarkupKind::MARKDOWN
+                                } else {
+                                    lsproto::MarkupKind::PLAIN_TEXT
+                                },
+                                value: note,
+                            }),
+                            ..Default::default()
+                        },
+                    range: Some(expansion.range),
+                    ..Default::default()
+                });
+            }
+        }
+        Ok(response)
+    }
+
+    /// PORT: ts-rust extension. The innermost macro expansion whose
+    /// invocation contains `position`: its label, the virtual code it
+    /// produced, and the invocation's range in the author's file.
+    pub fn expansion_at(
+        &self,
+        uri: &lsproto::DocumentUri,
+        position: lsproto::Position,
+    ) -> Option<ExpansionView> {
+        let (_, file) = self.get_program_and_file(uri);
+        for projection in lsconv::from_lsp_position_for_source_file(
+            &self.converters,
+            file,
+            position,
+            Feature::ALL,
+        ) {
+            let script = projection.script;
+            let span_map = source_file_span_map(script)?;
+            let at = TextRange::new(projection.position, projection.position);
+            let Some(expansion) =
+                crate::spanmap::SpanMap::expansions_containing_virtual(Some(span_map), at)
+                    .into_iter()
+                    .next()
+            else {
+                continue;
+            };
+            let text = source_file_text(script);
+            let start = usize::try_from(expansion.virtual_start).ok()?;
+            let end = usize::try_from(expansion.virtual_end).ok()?.min(text.len());
+            let mut code = text.get(start..end)?.trim().to_string();
+            const LIMIT: usize = 4000;
+            if code.len() > LIMIT {
+                let mut cut = LIMIT;
+                while !code.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                code.truncate(cut);
+                code.push_str("\n…");
+            }
+            // The expansion's virtual text maps back over its invocation.
+            let (range, _) = self.converters.to_lsp_range(
+                &script as &dyn lsconv::Script,
+                TextRange::new(expansion.virtual_start, expansion.virtual_end),
+            );
+            return Some(ExpansionView {
+                label: expansion.label.clone(),
+                text: code,
+                range,
+            });
+        }
+        None
+    }
+
+    // Go: ls/hover.go:27 ProvideHover
+    fn provide_hover_go(
         &self,
         ctx: &Context,
         params: &lsproto::HoverParams,

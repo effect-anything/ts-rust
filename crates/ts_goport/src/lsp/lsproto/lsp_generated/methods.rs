@@ -359,6 +359,9 @@ impl Method {
     // Request to get source definitions for a position.
     pub const CUSTOM_TEXT_DOCUMENT_SOURCE_DEFINITION: Method =
         Method(Cow::Borrowed("custom/textDocument/sourceDefinition"));
+    // Request the macro expansion at a position: the macro and the code it produced.
+    pub const CUSTOM_TEXT_DOCUMENT_SHOW_EXPANSION: Method =
+        Method(Cow::Borrowed("custom/textDocument/showExpansion"));
     // Request to get document highlights across multiple files.
     pub const CUSTOM_TEXT_DOCUMENT_MULTI_DOCUMENT_HIGHLIGHT: Method =
         Method(Cow::Borrowed("custom/textDocument/multiDocumentHighlight"));
@@ -1094,6 +1097,15 @@ pub const CUSTOM_TEXT_DOCUMENT_SOURCE_DEFINITION_INFO: RequestInfo<
     TextDocumentPositionParams,
     CustomTextDocumentSourceDefinitionResponse,
 > = RequestInfo::new(Method::CUSTOM_TEXT_DOCUMENT_SOURCE_DEFINITION);
+
+// Response type for `custom/textDocument/showExpansion`
+pub type CustomTextDocumentShowExpansionResponse = HoverOrNull;
+
+// Type mapping info for `custom/textDocument/showExpansion`
+pub const CUSTOM_TEXT_DOCUMENT_SHOW_EXPANSION_INFO: RequestInfo<
+    TextDocumentPositionParams,
+    CustomTextDocumentShowExpansionResponse,
+> = RequestInfo::new(Method::CUSTOM_TEXT_DOCUMENT_SHOW_EXPANSION);
 
 // Response type for `custom/textDocument/multiDocumentHighlight`
 pub type CustomMultiDocumentHighlightResponse = MultiDocumentHighlightsOrNull;

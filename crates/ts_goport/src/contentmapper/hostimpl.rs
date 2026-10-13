@@ -440,6 +440,58 @@ pub struct MappedOutput {
     // virtual ranges and optionally report an error when no diagnostic is produced.
     // PORT: Go `*DiagnosticDirectives`; nil is `None`.
     pub diagnostic_directives: Option<DiagnosticDirectives>,
+    // PORT: ts-rust extension. Macro expansions: which virtual range each
+    // invocation in the original produced, in the selected position encoding.
+    pub expansions: Vec<ExpansionInformation>,
+}
+
+// PORT: ts-rust extension. One macro invocation and the virtual text it
+// produced.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExpansionInformation {
+    pub virtual_start: i32,
+    pub virtual_length: i32,
+    pub original_start: i32,
+    pub original_length: i32,
+    pub label: String,
+}
+
+impl MarshalerTo for ExpansionInformation {
+    fn marshal_json_to(&self, enc: &mut String) -> std::result::Result<(), JsonError> {
+        let first = &mut true;
+        write_object_start(enc);
+        marshal_field(enc, first, "virtualStart", &self.virtual_start)?;
+        marshal_field(enc, first, "virtualLength", &self.virtual_length)?;
+        marshal_field(enc, first, "originalStart", &self.original_start)?;
+        marshal_field(enc, first, "originalLength", &self.original_length)?;
+        marshal_field(enc, first, "label", &self.label)?;
+        write_object_end(enc);
+        Ok(())
+    }
+}
+
+impl UnmarshalerFrom for ExpansionInformation {
+    fn unmarshal_json_from(
+        &mut self,
+        dec: &mut JsonDecoder<'_>,
+    ) -> std::result::Result<(), JsonError> {
+        let is_object =
+            unmarshal_struct_fields(dec, "contentmapper.ExpansionInformation", |name, dec| {
+                match name {
+                    "virtualStart" => json_unmarshal_decode(dec, &mut self.virtual_start)?,
+                    "virtualLength" => json_unmarshal_decode(dec, &mut self.virtual_length)?,
+                    "originalStart" => json_unmarshal_decode(dec, &mut self.original_start)?,
+                    "originalLength" => json_unmarshal_decode(dec, &mut self.original_length)?,
+                    "label" => json_unmarshal_decode(dec, &mut self.label)?,
+                    _ => return Ok(false),
+                }
+                Ok(true)
+            })?;
+        if !is_object {
+            *self = ExpansionInformation::default();
+        }
+        Ok(())
+    }
 }
 
 impl MappedOutput {
@@ -458,7 +510,8 @@ impl MappedOutput {
             first,
             "diagnosticDirectives",
             &self.diagnostic_directives,
-        )
+        )?;
+        marshal_field_omitempty(enc, first, "expansions", &self.expansions)
     }
 
     /// Decodes one member of `MappedOutput`; false for an unknown name.
@@ -472,6 +525,7 @@ impl MappedOutput {
             "extension" => json_unmarshal_decode(dec, &mut self.extension)?,
             "mappings" => json_unmarshal_decode(dec, &mut self.mappings)?,
             "diagnosticDirectives" => json_unmarshal_decode(dec, &mut self.diagnostic_directives)?,
+            "expansions" => json_unmarshal_decode(dec, &mut self.expansions)?,
             _ => return Ok(false),
         }
         Ok(true)
@@ -2836,11 +2890,10 @@ fn decode_mapped_output<'a>(
     // nil, which would mean "not content-mapped".
     if !output.mappings.0.is_empty() {
         let mappings = spanmap::unmarshal(&output.mappings.0)?;
-        result.mappings = Some(Arc::new(normalize_mappings(
-            &mappings,
-            &virtual_positions,
-            &original_positions,
-        )?));
+        let normalized = normalize_mappings(&mappings, &virtual_positions, &original_positions)?;
+        let expansions =
+            normalize_expansions(&output.expansions, &virtual_positions, &original_positions);
+        result.mappings = Some(Arc::new(normalized.with_expansions(expansions)));
     } else {
         result.mappings = Some(Arc::new(spanmap::new(&[])));
     }
@@ -2973,6 +3026,36 @@ fn normalize_diagnostic_directives(
         }
     }
     Ok(result)
+}
+
+// PORT: ts-rust extension. Expansions in UTF-8 offsets, like the segments.
+// An entry with a position outside its text is dropped: it is information
+// for language features, not part of the mapping contract.
+fn normalize_expansions(
+    expansions: &[ExpansionInformation],
+    virtual_positions: &PositionNormalizer<'_>,
+    original_positions: &PositionNormalizer<'_>,
+) -> Vec<spanmap::Expansion> {
+    expansions
+        .iter()
+        .filter_map(|item| {
+            Some(spanmap::Expansion {
+                virtual_start: virtual_positions
+                    .normalize_text_pos(item.virtual_start)
+                    .ok()?,
+                virtual_end: virtual_positions
+                    .normalize_text_pos(item.virtual_start + item.virtual_length)
+                    .ok()?,
+                original_start: original_positions
+                    .normalize_text_pos(item.original_start)
+                    .ok()?,
+                original_end: original_positions
+                    .normalize_text_pos(item.original_start + item.original_length)
+                    .ok()?,
+                label: item.label.clone(),
+            })
+        })
+        .collect()
 }
 
 // Go: contentmapper/hostimpl.go:1293 normalizeMappings
@@ -3154,6 +3237,36 @@ mod tests {
             out.contains(r#""relatedInformation":[{"messageText":"r","start":5,"length":3}]"#),
             "{out}"
         );
+    }
+    #[test]
+    fn expansions_decode_and_attach_to_the_span_map() {
+        // `twice(value)` at 10..22 expanded to `[value, value]` at 10..24.
+        let input = br#"{"text":"const a = [value, value];","extension":".ts","mappings":[[0,10,0,10,0],[10,14,10,12,1]],"expansions":[{"virtualStart":10,"virtualLength":14,"originalStart":10,"originalLength":12,"label":"macro `twice`"}]}"#;
+        let mut output = MappedOutput::default();
+        crate::frontend::json::json_unmarshal(input, &mut output, &[]).unwrap();
+        assert_eq!(output.expansions.len(), 1);
+        let mut encoded = String::new();
+        output.marshal_json_to(&mut encoded).unwrap();
+        assert!(
+            encoded.contains(r#""expansions":[{"virtualStart":10"#),
+            "{encoded}"
+        );
+        let (result, _) = decode_mapped_output(
+            &output,
+            "const a = twice(value);",
+            &PositionEncoding::UTF8,
+            "m",
+        )
+        .unwrap();
+        let map = result.mappings.as_deref();
+        let inside = spanmap::SpanMap::expansions_containing_virtual(map, TextRange::new(11, 16));
+        assert_eq!(inside.len(), 1);
+        assert_eq!(inside[0].label, "macro `twice`");
+        assert_eq!((inside[0].original_start, inside[0].original_end), (10, 22));
+        assert!(
+            spanmap::SpanMap::expansions_containing_virtual(map, TextRange::new(0, 5)).is_empty()
+        );
+        assert_eq!(spanmap::SpanMap::expansions_at_original(map, 12).len(), 1);
     }
     use crate::ipc::{Protocol as _, ReadWriteCloser as _};
     use std::io::Read;
@@ -3419,6 +3532,7 @@ mod tests {
                         mapped_output: MappedOutput {
                             text: p.content,
                             extension: ".ts".to_string(),
+                            expansions: Vec::new(),
                             mappings: JsonValue(mappings.into_bytes()),
                             diagnostic_directives: protocol_diagnostic_directives(
                                 vec![MappedDiagnosticDirective {

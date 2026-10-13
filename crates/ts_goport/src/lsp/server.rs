@@ -2762,6 +2762,11 @@ static HANDLERS: LazyLock<HandlerMap> = LazyLock::new(|| {
     );
     register_language_service_document_request_handler(
         &mut handlers,
+        lsproto::CUSTOM_TEXT_DOCUMENT_SHOW_EXPANSION_INFO,
+        Server::handle_show_expansion,
+    );
+    register_language_service_document_request_handler(
+        &mut handlers,
         lsproto::TEXT_DOCUMENT_TYPE_DEFINITION_INFO,
         Server::handle_type_definition,
     );
@@ -4434,6 +4439,36 @@ impl Server {
     ) -> Result<lsproto::CustomTextDocumentSourceDefinitionResponse, GoError> {
         let resp = ls.provide_source_definition(ctx, &params.text_document.uri, params.position)?;
         Ok(Some(resp))
+    }
+
+    /// PORT: ts-rust extension. `custom/textDocument/showExpansion`: the
+    /// innermost macro expansion at the position, as a hover whose range is
+    /// the invocation and whose contents are the macro and its output.
+    pub fn handle_show_expansion(
+        self: &Rc<Self>,
+        _ctx: &Context,
+        ls: &ls::LanguageService,
+        params: &lsproto::TextDocumentPositionParams,
+    ) -> Result<lsproto::CustomTextDocumentShowExpansionResponse, GoError> {
+        let Some(expansion) = ls.expansion_at(&params.text_document.uri, params.position) else {
+            return Ok(lsproto::HoverOrNull::default());
+        };
+        Ok(lsproto::HoverOrNull {
+            hover: Some(lsproto::Hover {
+                contents: lsproto::MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings {
+                    markup_content: Some(lsproto::MarkupContent {
+                        kind: lsproto::MarkupKind::MARKDOWN,
+                        value: format!(
+                            "Expanded from {}\n```ts\n{}\n```",
+                            expansion.label, expansion.text
+                        ),
+                    }),
+                    ..Default::default()
+                },
+                range: Some(expansion.range),
+                ..Default::default()
+            }),
+        })
     }
 
     // Go: server.go:2143 handleTypeDefinition

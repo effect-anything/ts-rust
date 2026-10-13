@@ -200,8 +200,27 @@ fn encode_transform(response: &TransformResponse) -> String {
     } else {
         format!(r#""diagnostics":{diagnostics},"#)
     };
+    let expansions = if response.expansions.is_empty() {
+        String::new()
+    } else {
+        let items: Vec<String> = response
+            .expansions
+            .iter()
+            .map(|item| {
+                format!(
+                    r#"{{"virtualStart":{},"virtualLength":{},"originalStart":{},"originalLength":{},"label":{}}}"#,
+                    item.virtual_start,
+                    item.virtual_length,
+                    item.original_start,
+                    item.original_length,
+                    json_encode(&item.label),
+                )
+            })
+            .collect();
+        format!(r#""expansions":[{}],"#, items.join(","))
+    };
     format!(
-        r#"{{"text":{},"extension":{},{mappings}{diagnostics}}}"#,
+        r#"{{"text":{},"extension":{},{mappings}{diagnostics}{expansions}}}"#,
         json_encode(&response.text),
         json_encode(response.extension),
     )

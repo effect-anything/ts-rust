@@ -26,6 +26,7 @@ impl MapperHandler for DiagnosticCodeCollisionHandler {
                         code: diag::Function_must_have_an_explicit_return_type_annotation_with_isolatedDeclarations
                             .code() as i32,
                         category: None,
+                        related_information: Vec::new(),
                     }],
                     ..TransformResult::default()
                 })

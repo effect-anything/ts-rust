@@ -12,6 +12,59 @@ pub struct TransformResponse {
     pub extension: &'static str,
     pub mappings: String,
     pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// Macro invocations and the virtual text each produced, for language
+    /// features ("expanded from", show expansion).
+    pub expansions: Vec<ExpansionRegion>,
+}
+
+/// One macro invocation (`original_*`) and the virtual range it produced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpansionRegion {
+    pub virtual_start: i32,
+    pub virtual_length: i32,
+    pub original_start: i32,
+    pub original_length: i32,
+    pub label: String,
+}
+
+/// Each traced invocation and the output that came from inside it: every
+/// segment whose original range lies within the invocation. Nested
+/// invocations are listed too; their region is the part of the output that
+/// copies their own text.
+#[must_use]
+pub fn expansion_regions(expansion: &crate::Expansion) -> Vec<ExpansionRegion> {
+    let mut out: Vec<ExpansionRegion> = Vec::new();
+    for trace in &expansion.traces {
+        let mut low = u32::MAX;
+        let mut high = 0;
+        for segment in &expansion.segments {
+            if segment.original_start >= trace.start
+                && segment.original_end <= trace.end
+                && segment.virtual_end > segment.virtual_start
+            {
+                low = low.min(segment.virtual_start);
+                high = high.max(segment.virtual_end);
+            }
+        }
+        if low >= high {
+            continue;
+        }
+        let mut label = format!("macro `{}`", trace.macro_name);
+        if let Some(module) = &trace.module {
+            label.push_str(&format!(" from \"{module}\""));
+        }
+        let region = ExpansionRegion {
+            virtual_start: i32::try_from(low).unwrap_or(0),
+            virtual_length: i32::try_from(high - low).unwrap_or(0),
+            original_start: i32::try_from(trace.start).unwrap_or(0),
+            original_length: i32::try_from(trace.end.saturating_sub(trace.start)).unwrap_or(0),
+            label,
+        };
+        if !out.contains(&region) {
+            out.push(region);
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +109,9 @@ pub fn transform_file(file_name: &str, content: &str) -> TransformResponse {
         crate::unchanged(content)
     };
     let mappings = crate::session::mappings_json(&expanded.span_map_segments());
+    let expansions = expansion_regions(&expanded);
     TransformResponse {
+        expansions,
         text: expanded.code,
         extension: crate::session::virtual_extension(file_name),
         mappings,
@@ -91,6 +146,23 @@ pub fn transform_file(file_name: &str, content: &str) -> TransformResponse {
 #[cfg(test)]
 mod tests {
     use super::transform_file;
+
+    #[test]
+    fn expansions_cover_the_output_of_each_invocation() {
+        let code = "export syntax twice:expr {\n  rule { twice($x:expr) } => { [$x, $x] }\n}\nconst a = twice(value);\n";
+        let response = transform_file("a.sts", code);
+        assert_eq!(response.expansions.len(), 1, "{:?}", response.expansions);
+        let region = &response.expansions[0];
+        assert_eq!(region.label, "macro `twice`");
+        let start = region.virtual_start as usize;
+        let text = &response.text[start..start + region.virtual_length as usize];
+        assert_eq!(text, "[value, value]");
+        let original = region.original_start as usize;
+        assert_eq!(
+            &code[original..original + region.original_length as usize],
+            "twice(value)"
+        );
+    }
 
     #[test]
     fn mapper_does_not_rewrite_typegpu() {

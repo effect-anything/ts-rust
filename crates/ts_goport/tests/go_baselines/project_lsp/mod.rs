@@ -83,6 +83,7 @@ mod bulkcache_test;
 mod checkerpool_test;
 mod configfilechanges_test;
 mod contentmapper_test;
+mod contentmapper_expansion_test;
 mod customconfigfilename_test;
 mod dirty_syncmap_test;
 mod effect_autoimport_style_test;

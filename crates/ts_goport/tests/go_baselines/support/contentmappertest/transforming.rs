@@ -79,6 +79,7 @@ impl MapperHandler for Handler {
                         extension: mapped_extension(&p.content),
                         mappings,
                         diagnostic_directives,
+                        expansions: Vec::new(),
                     },
                     diagnostics,
                     ..TransformResult::default()
@@ -187,6 +188,7 @@ fn transform(
                 length: (line_end - token_start) as i32,
                 code: UNCLOSED_INTERPOLATION_CODE,
                 category: None,
+                related_information: Vec::new(),
             });
             pos = line_end;
             continue;

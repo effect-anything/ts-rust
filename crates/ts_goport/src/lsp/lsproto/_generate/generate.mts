@@ -950,6 +950,20 @@ const customRequests: Request[] = [
         documentation: "Request to get source definitions for a position.",
     },
     {
+        method: "custom/textDocument/showExpansion",
+        typeName: "CustomTextDocumentShowExpansionRequest",
+        params: { kind: "reference", name: "TextDocumentPositionParams" },
+        result: {
+            kind: "or",
+            items: [
+                { kind: "reference", name: "Hover" },
+                { kind: "base", name: "null" },
+            ],
+        },
+        messageDirection: "clientToServer",
+        documentation: "Request the macro expansion at a position: the macro and the code it produced.",
+    },
+    {
         method: "custom/textDocument/multiDocumentHighlight",
         typeName: "CustomMultiDocumentHighlightRequest",
         params: { kind: "reference", name: "MultiDocumentHighlightParams" },

@@ -151,6 +151,22 @@ pub struct SpanMap {
 
     // origOnce guards lazy construction of the interval index used for original-to-virtual lookups.
     original_index: OnceLock<OriginalIndex>,
+
+    // PORT: beyond Go. Macro expansions the mapper reported: which virtual
+    // text each invocation produced. Language features use them for
+    // "expanded from" information and to show an expansion.
+    expansions: Vec<Expansion>,
+}
+
+/// PORT: beyond Go. One macro invocation in the original and the virtual
+/// text it expanded to. `label` names the macro (and its module).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Expansion {
+    pub virtual_start: i32,
+    pub virtual_end: i32,
+    pub original_start: i32,
+    pub original_end: i32,
+    pub label: String,
 }
 
 // Go: spanmap/spanmap.go:140 MappingErrorKind
@@ -287,6 +303,47 @@ impl SpanMap {
             }
         }
         None
+    }
+
+    /// PORT: beyond Go. This map with the mapper's expansions attached.
+    #[must_use]
+    pub fn with_expansions(mut self, mut expansions: Vec<Expansion>) -> SpanMap {
+        expansions.sort_by_key(|item| (item.virtual_start, -item.virtual_end));
+        self.expansions = expansions;
+        self
+    }
+
+    /// PORT: beyond Go. Every expansion whose virtual text contains the
+    /// virtual range `r`, innermost first.
+    #[must_use]
+    pub fn expansions_containing_virtual(m: Option<&SpanMap>, r: TextRange) -> Vec<&Expansion> {
+        let Some(m) = m else {
+            return Vec::new();
+        };
+        let mut found: Vec<&Expansion> = m
+            .expansions
+            .iter()
+            .filter(|item| item.virtual_start <= r.pos() && r.end() <= item.virtual_end)
+            .filter(|item| item.virtual_start < item.virtual_end)
+            .collect();
+        found.sort_by_key(|item| item.virtual_end - item.virtual_start);
+        found
+    }
+
+    /// PORT: beyond Go. Every expansion whose invocation contains original
+    /// position `pos`, innermost first.
+    #[must_use]
+    pub fn expansions_at_original(m: Option<&SpanMap>, pos: i32) -> Vec<&Expansion> {
+        let Some(m) = m else {
+            return Vec::new();
+        };
+        let mut found: Vec<&Expansion> = m
+            .expansions
+            .iter()
+            .filter(|item| item.original_start <= pos && pos < item.original_end)
+            .collect();
+        found.sort_by_key(|item| item.original_end - item.original_start);
+        found
     }
 
     // Go: spanmap/spanmap.go:231 SpanMap.Segments
@@ -935,6 +992,7 @@ pub fn new(segments: &[Segment]) -> SpanMap {
     SpanMap {
         segments: sorted,
         original_index: OnceLock::new(),
+        expansions: Vec::new(),
     }
 }
 
