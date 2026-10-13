@@ -210,6 +210,13 @@ pub fn expand_with_budget(request: ExpandRequest<'_>, budget: ResourceBudget) ->
     sweetener_budget::with_budget(budget, || expand(request))
 }
 
+/// Drop the process-wide expansion caches (macro-module reads and file
+/// memos). Benchmarks use it to time a cold expansion.
+#[doc(hidden)]
+pub fn clear_caches() {
+    sweetener_cache::clear();
+}
+
 /// Expand `code` as a `.sts` file on the calling thread, without the
 /// panic catch [`expand`] uses. Tests use this so a byte-slicing bug
 /// fails the test instead of becoming an internal-error diagnostic.

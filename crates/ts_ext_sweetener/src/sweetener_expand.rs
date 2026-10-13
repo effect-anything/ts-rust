@@ -464,9 +464,11 @@ fn expand_pass(
         pending_pieces: None,
     };
     printer.diagnostics.extend(loaded.diagnostics);
-    printer.print_nodes(&read.children);
-    printer.copy_until(source.len());
-    printer.finish_fixture_tails();
+    super::sweetener_forms::with_file_imports(&read.children, || {
+        printer.print_nodes(&read.children);
+        printer.copy_until(source.len());
+        printer.finish_fixture_tails();
+    });
     // A macro the rules refuse, or a delimiter the reader cannot pair, is
     // reported on the author token. The item that failed is already in
     // `out` as written (verbatim). Other files are separate expansions.

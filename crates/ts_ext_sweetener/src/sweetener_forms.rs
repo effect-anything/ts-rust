@@ -142,9 +142,9 @@ fn is_handwritten_export(name: &str) -> bool {
 /// `local`, when `local` is not already that export's own spelling.
 pub fn aliased_handwritten_head(file: &[Syntax], local: &str) -> Option<String> {
     imported_syntax_bindings(file)
-        .into_iter()
+        .iter()
         .find(|(name, _)| name == local)
-        .map(|(_, export)| export)
+        .map(|(_, export)| export.clone())
         .filter(|export| export != local && is_handwritten_export(export))
 }
 
@@ -225,10 +225,53 @@ const THREAD_LAST: &str = "->>";
 /// `(local, export)` pairs bound by top-level `for syntax` imports.
 /// Imports nested in a function or block do not count (upstream reads module
 /// imports only).
-fn imported_syntax_bindings(nodes: &[Syntax]) -> Vec<(String, String)> {
+fn imported_syntax_bindings(nodes: &[Syntax]) -> std::rc::Rc<Vec<(String, String)>> {
+    let active = FILE_IMPORTS.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .filter(|(range, _)| *range == nodes.as_ptr_range())
+            .map(|(_, imports)| imports.clone())
+    });
+    active.unwrap_or_else(|| {
+        let mut names = Vec::new();
+        collect_imported_syntax_names(nodes, &mut names);
+        std::rc::Rc::new(names)
+    })
+}
+
+thread_local! {
+    /// The top-level `for syntax` bindings of the file being printed. Every
+    /// form head asks for them; scanning the file per head was quadratic.
+    static FILE_IMPORTS: std::cell::RefCell<
+        Option<(std::ops::Range<*const Syntax>, std::rc::Rc<Vec<(String, String)>>)>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `file`'s imports computed once. Only this exact slice uses
+/// them, and the previous value is restored after, so a nested or later
+/// expansion never sees another file's bindings.
+pub fn with_file_imports<T>(file: &[Syntax], f: impl FnOnce() -> T) -> T {
     let mut names = Vec::new();
-    collect_imported_syntax_names(nodes, &mut names);
-    names
+    collect_imported_syntax_names(file, &mut names);
+    let saved = FILE_IMPORTS.with(|active| {
+        active
+            .borrow_mut()
+            .replace((file.as_ptr_range(), std::rc::Rc::new(names)))
+    });
+    type Saved = Option<(
+        std::ops::Range<*const Syntax>,
+        std::rc::Rc<Vec<(String, String)>>,
+    )>;
+    struct Restore(Saved);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let saved = self.0.take();
+            FILE_IMPORTS.with(|active| *active.borrow_mut() = saved);
+        }
+    }
+    let _restore = Restore(saved);
+    f()
 }
 
 fn collect_imported_syntax_names(nodes: &[Syntax], names: &mut Vec<(String, String)>) {
@@ -792,5 +835,38 @@ mod tests {
             "unimported function was rewritten:\n{}",
             expanded.code
         );
+    }
+}
+
+#[cfg(test)]
+mod file_import_tests {
+    use super::{imported_syntax_bindings, with_file_imports};
+    use crate::sweetener_reader::read_syntax;
+
+    /// The once-per-file bindings answer only for that exact slice, and the
+    /// previous scope comes back after, so another file is never confused.
+    #[test]
+    fn file_imports_are_scoped_to_their_slice() {
+        let a = read_syntax("import { each } from \"./a.sts\" for syntax;\nconst x = 1;\n");
+        let b = read_syntax("import { when as w } from \"./b.sts\" for syntax;\n");
+        let pairs =
+            |nodes| -> Vec<(String, String)> { imported_syntax_bindings(nodes).as_ref().clone() };
+        let fresh_a = pairs(&a.children);
+        assert_eq!(fresh_a, vec![("each".to_owned(), "each".to_owned())]);
+        with_file_imports(&a.children, || {
+            assert_eq!(pairs(&a.children), fresh_a);
+            assert_eq!(
+                pairs(&b.children),
+                vec![("w".to_owned(), "when".to_owned())]
+            );
+            assert!(pairs(&a.children[1..]).is_empty());
+            with_file_imports(&b.children, || {
+                assert_eq!(
+                    pairs(&b.children),
+                    vec![("w".to_owned(), "when".to_owned())]
+                );
+            });
+            assert_eq!(pairs(&a.children), fresh_a);
+        });
     }
 }

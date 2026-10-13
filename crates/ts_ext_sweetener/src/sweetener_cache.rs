@@ -198,6 +198,16 @@ pub fn store_file(
     );
 }
 
+/// Forget every cached module read and file expansion.
+pub fn clear() {
+    if let Ok(mut map) = modules().lock() {
+        map.clear();
+    }
+    if let Ok(mut map) = files().lock() {
+        map.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
