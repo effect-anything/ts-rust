@@ -450,6 +450,7 @@ mod tests {
         assert!(build.code.contains("v: 2"), "{}", build.code);
     }
 
+    #[test]
     fn plain_ts_is_unchanged() {
         let code = "export const n = 1\n";
         let out = TransformSession::new().transform("a.ts", code);
