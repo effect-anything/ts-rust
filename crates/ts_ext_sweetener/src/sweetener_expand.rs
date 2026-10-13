@@ -194,7 +194,10 @@ fn expand_pass(
     if !spellings.is_empty() {
         return sweetener_reader::with_operators(&spellings, || expand_pass(request, names_again));
     }
-    for macro_ in local.into_values() {
+    let mut local: Vec<Macro> = local.into_values().collect();
+    local.sort_by_key(|macro_| macro_.head.start);
+    for macro_ in local {
+        loaded.diagnostics.extend(contract_diagnostics(&macro_));
         if macro_.shadows_core && !core_shadow_valid(&macro_) {
             loaded.diagnostics.push(Diagnostic {
                 message: format!(
@@ -2439,6 +2442,7 @@ impl<'a> Printer<'a> {
             expect: Some("upper argument segment".to_owned()),
             refines: Vec::new(),
             literal_alias: None,
+            contracts: Vec::new(),
         };
         if let Some(existing) = self
             .macros_mut()
@@ -2653,6 +2657,22 @@ struct Rule {
     /// `literal globalThis.NaN as NaN` — the rule rewrites that spelling only
     /// when the user file has not already bound it.
     literal_alias: Option<String>,
+    /// `bind $name in following as recursive value;` clauses.
+    contracts: Vec<Contract>,
+}
+
+/// One declarative binding contract, upstream's `BindingContract`:
+/// `bind <binder path> in (following | <region path>) as <kind> <space>`.
+/// A part that did not read is `None`; the definition reports it.
+#[derive(Clone, Debug)]
+struct Contract {
+    /// `$name` or `$field.name`: the capture root and its field path.
+    binder: Option<(String, Vec<String>)>,
+    /// `None` is `following`; `Some` a capture path.
+    region: Option<Option<(String, Vec<String>)>>,
+    kind: Option<String>,
+    space: Option<String>,
+    span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -2949,6 +2969,15 @@ fn load_syntax_module(
                     severity: Severity::Error,
                     related: Vec::new(),
                 });
+            }
+            // A broken binding contract in the module is reported where
+            // this file imports the macro.
+            if report {
+                for mut diagnostic in contract_diagnostics(&macro_) {
+                    diagnostic.start = import.span.start;
+                    diagnostic.end = import.span.end;
+                    loaded.diagnostics.push(diagnostic);
+                }
             }
             if report && macro_.shadows_core && !core_shadow_valid(&macro_) {
                 loaded.diagnostics.push(Diagnostic {
@@ -3791,6 +3820,7 @@ fn rules_in_source(source: &str, body: &Syntax) -> Vec<Rule> {
                 expect,
                 refines: refines_after(source, children, group_index(children, pattern_group)),
                 literal_alias: literal_alias_before(children, index),
+                contracts: contracts_after(children, group_index(children, pattern_group)),
             });
         }
     }
@@ -3839,6 +3869,198 @@ fn group_index(nodes: &[Syntax], group: &Syntax) -> usize {
 }
 
 /// `refine` clauses between a class rule's pattern and the next `rule`.
+/// `bind ...` clauses between a rule's pattern and its `=>`.
+fn contracts_after(nodes: &[Syntax], group_at: usize) -> Vec<Contract> {
+    let mut out = Vec::new();
+    let mut index = group_at + 1;
+    while index < nodes.len() && !is_arrow(nodes, index) && !token_at(nodes, index, "rule") {
+        if token_at(nodes, index, "bind") {
+            let (contract, next) = contract_at(nodes, index);
+            out.push(contract);
+            index = next.max(index + 1);
+            continue;
+        }
+        index += 1;
+    }
+    out
+}
+
+/// `$root.field.field` at `index`, and the index after it.
+fn capture_path_at(nodes: &[Syntax], index: usize) -> Option<((String, Vec<String>), usize)> {
+    let root = hole_name_at(nodes, index)?;
+    let mut fields = Vec::new();
+    let mut next = index + 2;
+    while operator_is(nodes.get(next), ".") {
+        match nodes.get(next + 1) {
+            Some(Syntax::Token { raw, .. }) => fields.push(raw.clone()),
+            _ => break,
+        }
+        next += 2;
+    }
+    Some(((root, fields), next))
+}
+
+fn contract_at(nodes: &[Syntax], index: usize) -> (Contract, usize) {
+    let start = node_start(&nodes[index]);
+    let mut end = node_end(&nodes[index]);
+    let mut cursor = index + 1;
+    // `bind #join($name, suffix: "Signal") in ...` binds a generated name.
+    // The reader may keep `#` and `join` apart.
+    if operator_is(nodes.get(cursor), "#") && token_at(nodes, cursor + 1, "join") {
+        cursor += 1;
+    }
+    let join_word = token_at(nodes, cursor, "#join") || token_at(nodes, cursor, "join");
+    let binder = if join_word && group_is(nodes.get(cursor + 1), Delimiter::Paren) {
+        let path = match nodes.get(cursor + 1) {
+            Some(Syntax::Group { children, .. }) => {
+                capture_path_at(children, 0).map(|(path, _)| path)
+            }
+            _ => None,
+        };
+        cursor += 2;
+        path
+    } else if let Some((path, next)) = capture_path_at(nodes, cursor) {
+        cursor = next;
+        Some(path)
+    } else {
+        None
+    };
+    let mut region = None;
+    if binder.is_some() && token_at(nodes, cursor, "in") {
+        cursor += 1;
+        if token_at(nodes, cursor, "following") {
+            region = Some(None);
+            cursor += 1;
+        } else if let Some((path, next)) = capture_path_at(nodes, cursor) {
+            region = Some(Some(path));
+            cursor = next;
+        }
+    }
+    let mut kind = None;
+    let mut space = None;
+    if token_at(nodes, cursor, "as") {
+        let word = |at: usize, allowed: &[&str]| match nodes.get(at) {
+            Some(Syntax::Token { raw, .. }) if allowed.contains(&raw.as_str()) => Some(raw.clone()),
+            _ => None,
+        };
+        kind = word(cursor + 1, &["lexical", "recursive", "sequential"]);
+        space = word(cursor + 2, &["value", "type", "namespace", "label"]);
+    }
+    // The clause runs to its `;`, or to the next clause or the `=>`.
+    while cursor < nodes.len()
+        && !operator_is(nodes.get(cursor), ";")
+        && !is_arrow(nodes, cursor)
+        && !token_at(nodes, cursor, "bind")
+        && !token_at(nodes, cursor, "refine")
+        && !token_at(nodes, cursor, "expect")
+        && !token_at(nodes, cursor, "rule")
+    {
+        end = node_end(&nodes[cursor]);
+        cursor += 1;
+    }
+    (
+        Contract {
+            binder,
+            region,
+            kind,
+            space,
+            span: Span {
+                start: u32_at(start),
+                end: u32_at(end),
+            },
+        },
+        cursor,
+    )
+}
+
+/// Upstream `categoryAllowsSpace`.
+fn category_allows_space(category: &str, space: &str) -> bool {
+    match category {
+        "expr" | "binding" => space == "value",
+        "stmt" => space == "value" || space == "label",
+        "type" => space == "type" || space == "namespace",
+        _ => true,
+    }
+}
+
+/// SWR3002 / SWR3003 / SWR3005 for the binding contracts of `macro_`.
+/// Each contract is reported at its `bind` clause.
+fn contract_diagnostics(macro_: &Macro) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for rule in &macro_.rules {
+        let mut holes = Vec::new();
+        pattern_holes(&rule.pattern, &mut holes);
+        for contract in &rule.contracts {
+            let known =
+                |path: &(String, Vec<String>)| holes.iter().any(|(name, _)| *name == path.0);
+            let region_ok = match &contract.region {
+                Some(None) => true,
+                Some(Some(path)) => known(path),
+                None => false,
+            };
+            let diagnostic = |message: String| Diagnostic {
+                message,
+                start: contract.span.start,
+                end: contract.span.end,
+                severity: Severity::Error,
+                ..Default::default()
+            };
+            let Some(binder) = contract.binder.as_ref().filter(|binder| known(binder)) else {
+                out.push(diagnostic(
+                    "SWR3002: Malformed declarative binding contract.".to_owned(),
+                ));
+                continue;
+            };
+            if !region_ok || contract.kind.is_none() || contract.space.is_none() {
+                out.push(diagnostic(
+                    "SWR3002: Malformed declarative binding contract.".to_owned(),
+                ));
+                continue;
+            }
+            // A binder is an identifier or binding capture, or a field path
+            // into a syntax class (whose fields are checked by the class).
+            let binder_kind = holes
+                .iter()
+                .find(|(name, _)| *name == binder.0)
+                .map(|(_, kind)| kind);
+            let direct = matches!(
+                binder_kind,
+                Some(HoleKind::Ident | HoleKind::Binding | HoleKind::Class(_))
+            );
+            if !direct {
+                out.push(diagnostic(format!(
+                    "SWR3003: Invalid binding-contract path ${}.",
+                    binder.0
+                )));
+                continue;
+            }
+            let space = contract.space.as_deref().unwrap_or("");
+            if !category_allows_space(&macro_.category, space) {
+                out.push(diagnostic(format!(
+                    "SWR3005: Binding space {space} is invalid for this macro category."
+                )));
+            }
+        }
+    }
+    out
+}
+
+fn pattern_holes(pattern: &[Pat], out: &mut Vec<(String, HoleKind)>) {
+    for pat in pattern {
+        match pat {
+            Pat::Hole { name, kind, .. } => out.push((name.clone(), kind.clone())),
+            Pat::Group { inner, .. } => pattern_holes(inner, out),
+            Pat::Rep { inner, .. } => pattern_holes(inner, out),
+            Pat::Choice(alternatives) => {
+                for alternative in alternatives {
+                    pattern_holes(alternative, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn refines_after(source: &str, nodes: &[Syntax], group_at: usize) -> Vec<Refine> {
     let mut out = Vec::new();
     let mut index = group_at + 1;

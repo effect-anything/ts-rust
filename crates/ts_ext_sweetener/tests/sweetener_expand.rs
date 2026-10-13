@@ -865,6 +865,44 @@ fn parameter_misuse_diagnostics() {
     assert_eq!(&code[at..at + 1], "%");
 }
 
+/// `bind` clauses are read as upstream's binding contracts and checked: an
+/// unknown capture or missing part is SWR3002, a binder that is not an
+/// identifier, binding or class capture is SWR3003, and a space the macro
+/// category cannot bind is SWR3005. Well-formed contracts are silent.
+#[test]
+fn binding_contracts_are_checked() {
+    let code = "export syntax a:expr {\n  rule { a $x:expr }\n  bind $y in following as lexical value;\n  => { $x }\n}\n\
+export syntax b:expr {\n  rule { b $x:ident $v:expr }\n  bind $x in $v as lexical type;\n  => { $v }\n}\n\
+export syntax c:stmt {\n  rule { c $x:expr $v:expr }\n  bind $x in $v as lexical value;\n  => { $v; }\n}\n\
+export syntax d:item {\n  rule { d $x:ident $v:expr }\n  bind $x in following as recursive value;\n  bind $x in $v as sequential\n  => { const $x = $v; }\n}\n";
+    let out = expand(ExpandRequest {
+        filename: "bind.sts",
+        code,
+        phase: Phase::Check,
+    });
+    let found: Vec<(&str, &str)> = out
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            (
+                &diagnostic.message[..7],
+                &code[diagnostic.start as usize..diagnostic.start as usize + 7],
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("SWR3002", "bind $y"),
+            ("SWR3005", "bind $x"),
+            ("SWR3003", "bind $x"),
+            ("SWR3002", "bind $x"),
+        ],
+        "{:?}",
+        out.diagnostics
+    );
+}
+
 /// Hygiene asks the output, as upstream does: a binder the user wrote inside
 /// input a macro consumed (and did not print again) does not force a rename,
 /// one still printed does.
