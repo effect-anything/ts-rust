@@ -114,11 +114,148 @@ pub(crate) fn token_origins(code: &str, segments: &[Segment]) -> Vec<TokenOrigin
     out
 }
 
+/// Index pairs of one longest common subsequence of two token sequences.
+///
+/// Myers' O((N+M)D) shortest edit script. The forward trace is the same
+/// greedy walk the quadratic DP used: on a tie between deleting an old
+/// token and inserting a new one, delete. Two LCS of equal length therefore
+/// pick the same pairs the table produced, including when a token repeats.
+fn lcs_pairs(
+    old: &str,
+    new: &str,
+    old_tokens: &[(usize, usize)],
+    new_tokens: &[(usize, usize)],
+) -> Vec<(usize, usize)> {
+    let same = |i: usize, j: usize| {
+        let (a0, a1) = old_tokens[i];
+        let (b0, b1) = new_tokens[j];
+        old[a0..a1] == new[b0..b1]
+    };
+    let (n, m) = (old_tokens.len(), new_tokens.len());
+    if n == 0 || m == 0 {
+        return Vec::new();
+    }
+    // Furthest `i` on each diagonal k = i - j. `trace[d][k]` is the snake
+    // start `(i, j, inserted)` reached at edit distance d. Both are `Vec`s
+    // indexed by `k + d_offset`, so a negative diagonal never underflows,
+    // and the trace is one row per distance rather than one entry per point.
+    let max_d = n + m;
+    let span = max_d * 2 + 3;
+    let shift = max_d + 1;
+    let slot = |k: isize| (k + shift as isize) as usize;
+    let mut v = vec![None; span];
+    let mut trace: Vec<Vec<Option<(usize, usize, bool)>>> = Vec::with_capacity(max_d + 1);
+    let mut found = None;
+    for d in 0..=max_d {
+        let snapshot = v.clone();
+        let d_i = d as isize;
+        let mut row = vec![None; span];
+        let mut k = -d_i;
+        while k <= d_i {
+            let left = snapshot.get(slot(k - 1)).and_then(|p| *p);
+            let above = snapshot.get(slot(k + 1)).and_then(|p| *p);
+            // An unreached side is not a candidate. A tie between two
+            // reached sides deletes the old token, as the DP's `>=` does.
+            let down = above.is_some()
+                && (left.is_none()
+                    || d == 0
+                    || k == -d_i
+                    || (k != d_i && left.unwrap() > above.unwrap()));
+            let mut i: usize = if down {
+                above.unwrap()
+            } else {
+                left.map_or(0, |x| x + 1)
+            };
+            // j = i - k by the diagonal. A step that would pass the end of
+            // a sequence is clamped back, so the snake starts inside both.
+            if i as isize - k < 0 {
+                i = (k.max(0)) as usize;
+            } else if i as isize - k > m as isize {
+                i = (m as isize + k) as usize;
+            }
+            let j = (i as isize - k) as usize;
+            let (start_i, start_j) = (i, j);
+            let mut j = j;
+            while i < n && j < m && same(i, j) {
+                i += 1;
+                j += 1;
+            }
+            v[slot(k)] = Some(i);
+            row[slot(k)] = Some((start_i, start_j, down));
+            if i >= n && j >= m {
+                found = Some(d);
+                break;
+            }
+            k += 2;
+        }
+        trace.push(row);
+        if found.is_some() {
+            break;
+        }
+    }
+    let found = found.unwrap_or(max_d);
+
+    // Walk back one distance at a time. The row for that distance has the
+    // snake start of the diagonal we are on; the step before it moves to
+    // the previous distance.
+    let mut edits_rev: Vec<u8> = Vec::new();
+    let (mut i, mut j) = (n, m);
+    for d in (0..=found).rev() {
+        let k = i as isize - j as isize;
+        let Some((start_i, start_j, down)) = trace[d][slot(k)] else {
+            break;
+        };
+        while i > start_i && j > start_j {
+            i -= 1;
+            j -= 1;
+            if same(i, j) {
+                edits_rev.push(0);
+            }
+        }
+        if d == 0 {
+            break;
+        }
+        if down && j > 0 {
+            edits_rev.push(2);
+            j -= 1;
+        } else if i > 0 {
+            edits_rev.push(1);
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    while i > 0 && j > 0 {
+        i -= 1;
+        j -= 1;
+        if same(i, j) {
+            edits_rev.push(0);
+        }
+    }
+    edits_rev.reverse();
+
+    let mut pairs = Vec::new();
+    let (mut oi, mut ni) = (0usize, 0usize);
+    for edit in edits_rev {
+        match edit {
+            0 => {
+                pairs.push((oi, ni));
+                oi += 1;
+                ni += 1;
+            }
+            1 => oi += 1,
+            _ => ni += 1,
+        }
+    }
+    pairs
+}
+
 /// Carry `pieces` (ranges of `old` that copy the source) to `new`, which a
 /// rewrite produced from `old`. Tokens the rewrite left alone keep their
 /// origin; a token it changed or inserted has none. The tokens are aligned
-/// by the rewrite's own diff (common prefix and suffix, then a longest
-/// common subsequence), not by searching the source for a spelling.
+/// by the rewrite's own diff (common prefix and suffix, then Myers'
+/// shortest edit script, which is a longest common subsequence), not by
+/// searching the source for a spelling.
 pub(crate) fn carry(
     old: &str,
     new: &str,
@@ -165,30 +302,9 @@ pub(crate) fn carry(
     let mut pairs: Vec<(usize, usize)> = (0..prefix).map(|i| (i, i)).collect();
     let old_mid = &old_tokens[prefix..old_tokens.len() - suffix];
     let new_mid = &new_tokens[prefix..new_tokens.len() - suffix];
-    let (n, m) = (old_mid.len(), new_mid.len());
-    if n > 0 && m > 0 && n.saturating_mul(m) <= 4_000_000 {
-        // LCS table over the middle, then walk it forward.
-        let mut table = vec![0u32; (n + 1) * (m + 1)];
-        for i in (0..n).rev() {
-            for j in (0..m).rev() {
-                table[i * (m + 1) + j] = if same(old_mid[i], new_mid[j]) {
-                    table[(i + 1) * (m + 1) + j + 1] + 1
-                } else {
-                    table[(i + 1) * (m + 1) + j].max(table[i * (m + 1) + j + 1])
-                };
-            }
-        }
-        let (mut i, mut j) = (0, 0);
-        while i < n && j < m {
-            if same(old_mid[i], new_mid[j]) {
-                pairs.push((prefix + i, prefix + j));
-                i += 1;
-                j += 1;
-            } else if table[(i + 1) * (m + 1) + j] >= table[i * (m + 1) + j + 1] {
-                i += 1;
-            } else {
-                j += 1;
-            }
+    if !old_mid.is_empty() && !new_mid.is_empty() {
+        for (oi, ni) in lcs_pairs(old, new, old_mid, new_mid) {
+            pairs.push((prefix + oi, prefix + ni));
         }
     }
     for k in 0..suffix {
@@ -414,4 +530,154 @@ pub fn retarget_segments(
         merged.push(piece);
     }
     merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{carry, lcs_pairs, retarget_segments, tokens};
+
+    /// The quadratic DP this replaced: common-subsequence lengths filled
+    /// from the end, then a forward walk that deletes an old token whenever
+    /// that score ties an insertion. Tests compare Myers against it.
+    fn dp_pairs(old: &[String], new: &[String]) -> Vec<(usize, usize)> {
+        let (n, m) = (old.len(), new.len());
+        let mut table = vec![0u32; (n + 1) * (m + 1)];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                table[i * (m + 1) + j] = if old[i] == new[j] {
+                    table[(i + 1) * (m + 1) + j + 1] + 1
+                } else {
+                    table[(i + 1) * (m + 1) + j].max(table[i * (m + 1) + j + 1])
+                };
+            }
+        }
+        let mut pairs = Vec::new();
+        let (mut i, mut j) = (0, 0);
+        while i < n && j < m {
+            if old[i] == new[j] {
+                pairs.push((i, j));
+                i += 1;
+                j += 1;
+            } else if table[(i + 1) * (m + 1) + j] >= table[i * (m + 1) + j + 1] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+        pairs
+    }
+
+    fn spellings(text: &str) -> Vec<String> {
+        tokens(text)
+            .into_iter()
+            .map(|(a, b)| text[a..b].to_owned())
+            .collect()
+    }
+
+    fn assert_matches_dp(old: &str, new: &str) {
+        let old_tokens = tokens(old);
+        let new_tokens = tokens(new);
+        let pairs = lcs_pairs(old, new, &old_tokens, &new_tokens);
+        let want = dp_pairs(&spellings(old), &spellings(new));
+        assert_eq!(pairs, want, "myers {pairs:?} != dp {want:?}");
+        for &(i, j) in &pairs {
+            let (a0, a1) = old_tokens[i];
+            let (b0, b1) = new_tokens[j];
+            assert_eq!(&old[a0..a1], &new[b0..b1]);
+        }
+        // Strictly increasing on both sides: a real alignment, not a bag.
+        for w in pairs.windows(2) {
+            assert!(w[0].0 < w[1].0 && w[0].1 < w[1].1);
+        }
+    }
+
+    #[test]
+    fn diff_edges_match_the_quadratic_walk() {
+        // Empty on either side, and both empty.
+        assert_matches_dp("", "");
+        assert_matches_dp("", "a b");
+        assert_matches_dp("a b", "");
+        // Identical, including one token and whitespace-only.
+        assert_matches_dp("a b c", "a b c");
+        assert_matches_dp("only", "only");
+        assert_matches_dp("  \n", " \t");
+        // Fully disjoint: no token survives.
+        assert_matches_dp("a b c", "x y z");
+        assert_matches_dp("foo", "bar baz");
+        // A repeated token has more than one LCS. The walk must pick the
+        // same one the table did: delete the old token on a tie.
+        assert_matches_dp("a a", "a");
+        assert_matches_dp("a", "a a");
+        assert_matches_dp("a b a", "a a");
+        assert_matches_dp("a x a y a", "a a a");
+        assert_matches_dp("a b a b a", "b a b");
+        // A change in the middle, with a shared prefix and suffix.
+        assert_matches_dp("a b c d", "a x c d");
+        assert_matches_dp("a b c", "a b c d e");
+        assert_matches_dp("x y a b", "a b");
+    }
+
+    #[test]
+    fn repeated_tokens_keep_the_dp_origin() {
+        // `a` occurs three times. The first and the last are the ones the
+        // DP keeps; the middle `a` is the insertion, so it gets no origin.
+        let kept = carry("a b a", "a a a", &[(0, 5, 10)]);
+        assert_eq!(kept, vec![(0, 1, 10), (4, 5, 14)]);
+    }
+
+    #[test]
+    fn retarget_edges() {
+        // Unchanged text is unchanged segments.
+        let same = [(0, 5, 0, 5, 0)];
+        assert_eq!(retarget_segments("a b c", "a b c", &same), same);
+        // A disjoint rewrite drops the verbatim copy and keeps an atom
+        // over the original range.
+        assert_eq!(
+            retarget_segments("a b", "x y", &[(0, 3, 7, 10, 0)]),
+            vec![(0, 3, 7, 10, 1)]
+        );
+        // Nothing to retarget.
+        assert!(retarget_segments("a", "b", &[]).is_empty());
+        // Empty rewrite.
+        assert!(retarget_segments("a b", "", &[(0, 3, 0, 3, 0)]).is_empty());
+    }
+
+    /// Large inputs. `cargo test -- --ignored` runs it; a normal test run
+    /// only checks that it compiles. A few hundred tokens with an edit in
+    /// every one used to allocate an N*M table; Myers keeps a row per edit
+    /// distance and finishes it in well under a second.
+    #[test]
+    #[ignore = "large-input timing of the Myers token diff"]
+    fn myers_large_input_is_fast() {
+        let n = 600;
+        // One repeated token, so the common prefix and suffix are one each
+        // and the middle is a long run of equal tokens with a few edits.
+        // The edit distance stays small while the sequence does not.
+        let mut old = "a ".repeat(n);
+        for i in (0..n).step_by(n / 20) {
+            let at = i * 2;
+            old.replace_range(at..at + 1, "b");
+        }
+        let mut new_text = "a ".repeat(n);
+        for i in (10..n).step_by(n / 20) {
+            let at = i * 2;
+            new_text.replace_range(at..at + 1, "c");
+        }
+        let start = std::time::Instant::now();
+        let kept = carry(&old, &new_text, &[(0, old.len(), 0)]);
+        let elapsed = start.elapsed();
+        // Adjacent copies of `a` join into one piece, so the kept tokens
+        // come back as a handful of runs rather than one entry each. What
+        // matters is that the runs cover most of the text.
+        let covered: usize = kept.iter().map(|(s, e, _)| e - s).sum();
+        assert!(
+            covered > old.len() / 2,
+            "covered {covered} of {}",
+            old.len()
+        );
+        assert!(
+            elapsed.as_millis() < 1_000,
+            "myers took {elapsed:?} on {n} tokens"
+        );
+    }
 }
