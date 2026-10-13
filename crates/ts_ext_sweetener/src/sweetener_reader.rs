@@ -124,6 +124,7 @@ pub fn read_syntax(source: &str) -> ReadSyntax {
         bytes: source.as_bytes(),
         index: 0,
         diagnostics: Vec::new(),
+        open: Vec::new(),
     };
     let children = reader.read_until(None);
     ReadSyntax {
@@ -137,6 +138,8 @@ struct Reader<'a> {
     bytes: &'a [u8],
     index: usize,
     diagnostics: Vec<Diagnostic>,
+    /// Delimiters of the enclosing open groups, innermost last.
+    open: Vec<Delimiter>,
 }
 
 impl<'a> Reader<'a> {
@@ -149,7 +152,10 @@ impl<'a> Reader<'a> {
             }
             let ch = self.bytes[self.index] as char;
             if let Some(delimiter) = Delimiter::from_close(ch) {
-                if stop == Some(delimiter) {
+                // A closer that belongs to an enclosing group ends this one
+                // too: upstream reports the inner frame's missing closer and
+                // lets the outer frame take the token.
+                if stop == Some(delimiter) || self.open.contains(&delimiter) {
                     break;
                 }
                 let start = self.index;
@@ -183,7 +189,10 @@ impl<'a> Reader<'a> {
     fn read_group(&mut self, delimiter: Delimiter) -> Syntax {
         let open_at = self.index;
         self.index += 1;
+        self.open.push(delimiter);
         let mut children = self.read_until(Some(delimiter));
+        self.open.pop();
+        let outer_closer = self.index < self.bytes.len();
         let close = if self.index < self.bytes.len()
             && self.bytes[self.index] as char == delimiter.close()
         {
@@ -208,7 +217,9 @@ impl<'a> Reader<'a> {
         // statement on the next line is still its own item. The line break
         // in front of a later child is that boundary.
         let mut end = close.map_or(self.index, |close| close.end as usize);
-        if close.is_none() {
+        if close.is_none() && outer_closer {
+            end = children.last().map_or(open_at + 1, node_span_end);
+        } else if close.is_none() {
             let mut prev_end = open_at + 1;
             let mut split_at = None;
             for (at, child) in children.iter().enumerate() {
@@ -517,4 +528,16 @@ pub fn slice<'a>(source: &'a str, node: &Syntax) -> &'a str {
         | Syntax::Group { span, .. } => (span.start as usize, span.end as usize),
     };
     source.get(start..end).unwrap_or("")
+}
+
+#[cfg(test)]
+mod outer_closer_tests {
+    use super::read_syntax;
+
+    #[test]
+    fn reader_outer_closer_ends_unclosed_inner_group() {
+        let read = read_syntax("f { g(a, b }\nh()");
+        let codes: Vec<&str> = read.diagnostics.iter().map(|d| &d.message[..7]).collect();
+        assert_eq!(codes, vec!["SWR1003"]);
+    }
 }
