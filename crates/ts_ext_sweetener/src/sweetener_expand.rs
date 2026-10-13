@@ -73,14 +73,17 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
                     "SWR4002: Syntax {} cannot shadow a core {} form.",
                     macro_.name, macro_.category
                 ),
-                start: 0,
-                end: 0,
+                start: macro_.head.start,
+                end: macro_.head.end,
             });
         }
         if local_dispatchable(&macro_) {
             push_macro(&mut loaded.macros, macro_);
         }
     }
+    loaded
+        .diagnostics
+        .extend(malformed_templates(&read.children));
     loaded
         .classes
         .extend(collect_classes(source, &read.children));
@@ -124,12 +127,289 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
         printer.out.clear();
         printer.segments.clear();
     }
+    // Warnings come last so they never count as a failed expansion above.
+    printer
+        .diagnostics
+        .extend(unread_items(source, &read.children));
     Expansion {
         code: printer.out,
         segments: printer.segments,
         diagnostics: printer.diagnostics,
         dependencies: printer.dependencies,
     }
+}
+
+/// SWR2016: templates of this file's own definitions that upstream's
+/// template parser refuses -- a `$( ... )` repetition with no `*`/`+`, and
+/// an `#if` whose predicate is not exactly `present $capture`.
+fn malformed_templates(nodes: &[Syntax]) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < nodes.len() {
+        if token_at(nodes, index, "syntax") || token_at(nodes, index, "operator") {
+            let mut body = index + 1;
+            while body < nodes.len()
+                && !operator_is(nodes.get(body), ";")
+                && !group_is(nodes.get(body), Delimiter::Brace)
+            {
+                body += 1;
+            }
+            if let Some(Syntax::Group { children, .. }) = nodes.get(body) {
+                if group_is(nodes.get(body), Delimiter::Brace) {
+                    rule_templates(children, &mut out);
+                }
+            }
+            index = body + 1;
+            continue;
+        }
+        index += 1;
+    }
+    out
+}
+
+/// Each `=> { template }` among a definition body's rules.
+fn rule_templates(nodes: &[Syntax], out: &mut Vec<Diagnostic>) {
+    for index in 0..nodes.len() {
+        if is_arrow(nodes, index) {
+            let template = (index + 1..nodes.len())
+                .find(|at| !matches!(nodes[*at], Syntax::Operator { ref raw, .. } if raw == ">"));
+            if let Some(Syntax::Group {
+                delimiter: Delimiter::Brace,
+                children,
+                ..
+            }) = template.and_then(|at| nodes.get(at))
+            {
+                check_template(children, out);
+            }
+        }
+    }
+}
+
+fn malformed(message: &str, span: Span) -> Diagnostic {
+    Diagnostic {
+        message: format!("SWR2016: Malformed template: {message}."),
+        start: span.start,
+        end: span.end,
+    }
+}
+
+fn syntax_span(node: &Syntax) -> Span {
+    match node {
+        Syntax::Token { span, .. }
+        | Syntax::Comment { span, .. }
+        | Syntax::String { span, .. }
+        | Syntax::Operator { span, .. }
+        | Syntax::Group { span, .. } => *span,
+    }
+}
+
+fn check_template(nodes: &[Syntax], out: &mut Vec<Diagnostic>) {
+    let mut index = 0;
+    while index < nodes.len() {
+        // `#syntax { ... }` holds a definition, not a template.
+        if token_at(nodes, index, "#syntax")
+            || (operator_is(nodes.get(index), "#") && token_at(nodes, index + 1, "syntax"))
+        {
+            index += if token_at(nodes, index, "#syntax") {
+                2
+            } else {
+                3
+            };
+            continue;
+        }
+        let if_at = if token_at(nodes, index, "#if") {
+            Some(index + 1)
+        } else if operator_is(nodes.get(index), "#") && token_at(nodes, index + 1, "if") {
+            Some(index + 2)
+        } else {
+            None
+        };
+        if let Some(pred_at) = if_at {
+            if let Some(Syntax::Group {
+                delimiter: Delimiter::Paren,
+                children,
+                span,
+                ..
+            }) = nodes.get(pred_at)
+            {
+                let whole = token_at(children, 0, "present")
+                    && read_var_path(children, 1).is_some_and(|(_, _, next)| {
+                        children[next.min(children.len())..]
+                            .iter()
+                            .all(|node| matches!(node, Syntax::Comment { .. }))
+                    });
+                if !whole {
+                    let at = (0..children.len())
+                        .find(|at| dollar_at(children, *at))
+                        .map_or(*span, |at| syntax_span(&children[at]));
+                    out.push(malformed("conditional requires present $capture", at));
+                }
+            }
+        }
+        if dollar_at(nodes, index) && group_is(nodes.get(index + 1), Delimiter::Paren) {
+            let mut quantifier = index + 2;
+            if !operator_is(nodes.get(quantifier), "*") && !operator_is(nodes.get(quantifier), "+")
+            {
+                quantifier += 1;
+            }
+            if !operator_is(nodes.get(quantifier), "*") && !operator_is(nodes.get(quantifier), "+")
+            {
+                out.push(malformed(
+                    "repetition requires * or +",
+                    syntax_span(&nodes[index]),
+                ));
+            }
+        }
+        if let Syntax::Group { children, .. } = &nodes[index] {
+            check_template(children, out);
+        }
+        index += 1;
+    }
+}
+
+/// Words a binding can never be spelled with (TypeScript reserved words).
+const RESERVED_BINDING_WORDS: &[&str] = &[
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "new",
+    "null",
+    "return",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+];
+
+/// SWR4025: a top-level `let`/`const`/`var` item that upstream's reader cannot
+/// read and passes through as written (legacy sweet.js `let x = macro { ... }`
+/// blocks are the common case). Two failures are recognised, as upstream
+/// reports them:
+/// - the binding is a reserved word or an operator group (`let function = ...`,
+///   `let (+) = ...`): "variable binding";
+/// - the initializer is a word directly followed by a `{` group on the same
+///   line (`let go = macro {`): "';' or automatic terminator".
+fn unread_items(source: &str, nodes: &[Syntax]) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < nodes.len() {
+        let at_item_start = index == 0
+            || matches!(nodes.get(index - 1), Some(Syntax::Operator { raw, .. }) if raw == ";")
+            || matches!(
+                nodes.get(index - 1),
+                Some(Syntax::Group {
+                    delimiter: Delimiter::Brace,
+                    ..
+                }) | Some(Syntax::Comment { .. })
+            )
+            || line_break_between(source, nodes, index);
+        if !at_item_start
+            || !["let", "const", "var"]
+                .iter()
+                .any(|word| token_at(nodes, index, word))
+        {
+            index += 1;
+            continue;
+        }
+        let head = index;
+        let mut binding = head + 1;
+        skip_comments(nodes, &mut binding);
+        let binding_node = nodes.get(binding);
+        let reserved = matches!(binding_node, Some(Syntax::Token { raw, .. }) if RESERVED_BINDING_WORDS.contains(&raw.as_str()))
+            || matches!(
+                binding_node,
+                Some(Syntax::Group {
+                    delimiter: Delimiter::Paren,
+                    ..
+                })
+            );
+        let failure = if reserved {
+            binding_node.map(|node| (node_start(node), "variable binding"))
+        } else if matches!(binding_node, Some(Syntax::Token { .. }))
+            && operator_is(nodes.get(binding + 1), "=")
+            && matches!(nodes.get(binding + 2), Some(Syntax::Token { raw, .. }) if token_kind(raw) == Some("identifier"))
+            && matches!(
+                nodes.get(binding + 3),
+                Some(Syntax::Group {
+                    delimiter: Delimiter::Brace,
+                    ..
+                })
+            )
+            && !line_break_between(source, nodes, binding + 3)
+        {
+            nodes
+                .get(binding + 3)
+                .map(|node| (node_start(node), "';' or automatic terminator"))
+        } else {
+            None
+        };
+        let Some((stopped, expected)) = failure else {
+            index += 1;
+            continue;
+        };
+        // The item runs through its first `{` group (the macro body), or to `;`.
+        let mut end = head + 1;
+        while end < nodes.len() {
+            match &nodes[end] {
+                Syntax::Group {
+                    delimiter: Delimiter::Brace,
+                    ..
+                } => break,
+                Syntax::Operator { raw, .. } if raw == ";" => break,
+                _ => end += 1,
+            }
+        }
+        let end = end.min(nodes.len() - 1);
+        out.push(Diagnostic {
+            message: format!(
+                "SWR4025: Sweetener could not read this item, so it was passed through as written and no macro in it was expanded. Its reader expected {expected}. TypeScript may well accept the item as written -- a reader that cannot read it is a gap in Sweetener rather than a mistake here."
+            ),
+            start: u32::try_from(node_start(&nodes[head])).unwrap_or(0),
+            end: u32::try_from(node_end(&nodes[end])).unwrap_or(0),
+        });
+        let _ = stopped;
+        index = end + 1;
+    }
+    out
+}
+
+/// Whether a line break separates `nodes[index]` from the node before it.
+fn line_break_between(source: &str, nodes: &[Syntax], index: usize) -> bool {
+    let (Some(prev), Some(node)) = (
+        index.checked_sub(1).and_then(|i| nodes.get(i)),
+        nodes.get(index),
+    ) else {
+        return false;
+    };
+    source
+        .get(node_end(prev)..node_start(node))
+        .is_some_and(|gap| gap.contains('\n'))
 }
 
 struct Printer<'a> {
@@ -1749,6 +2029,7 @@ impl<'a> Printer<'a> {
                 category: "expr".to_owned(),
                 operator: false,
                 shadows_core: false,
+                head: Span { start: 0, end: 0 },
             });
         }
     }
@@ -1860,6 +2141,9 @@ struct Macro {
     operator: bool,
     /// The definition wrote `shadows core`.
     shadows_core: bool,
+    /// The definition keyword (`syntax`/`operator`), where upstream reports
+    /// a definition-level diagnostic. Empty for a synthesized macro.
+    head: Span,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2037,7 +2321,16 @@ fn load_macros(
         .unwrap_or_else(|| PathBuf::from("."));
     let mut seen = std::collections::HashSet::<PathBuf>::new();
     for import in imports {
-        load_syntax_module(&mut loaded, &base, &base, import, &mut seen, source, true);
+        load_syntax_module(
+            &mut loaded,
+            &base,
+            &base,
+            Path::new(filename),
+            import,
+            &mut seen,
+            source,
+            true,
+        );
     }
     let _ = user_names;
     loaded
@@ -2050,12 +2343,12 @@ fn load_syntax_module(
     loaded: &mut Loaded,
     user_dir: &Path,
     from_dir: &Path,
+    importer: &Path,
     import: &SyntaxImport,
     seen: &mut std::collections::HashSet<PathBuf>,
     source: &str,
     report: bool,
 ) {
-    let _ = source;
     let Some(body) = specifier_body(&import.specifier) else {
         return;
     };
@@ -2069,15 +2362,42 @@ fn load_syntax_module(
         if !report {
             return;
         }
-        for name in &import.names {
-            loaded.diagnostics.push(Diagnostic {
-                message: format!(
-                    "SWR4001: Sweetener macro error: macro `{name}` was imported for syntax but its module could not be read"
-                ),
-                start: import.span.start,
-                end: import.span.end,
-            });
+        // Upstream reports once per import, at its first binding, naming
+        // the importer by its absolute path.
+        let importer_name = importer
+            .canonicalize()
+            .unwrap_or_else(|_| importer.to_path_buf());
+        let mut start = import.span.start;
+        let mut end = import.span.end;
+        if user_dir == from_dir {
+            if let (Some(first), Some(text)) = (
+                import.names.first(),
+                source.get(import.span.start as usize..).map(|rest| {
+                    let close = rest.find('}').unwrap_or(rest.len());
+                    &rest[..close]
+                }),
+            ) {
+                let first = import
+                    .aliases
+                    .iter()
+                    .find(|(_, local)| local == first)
+                    .map_or(first.as_str(), |(exported, _)| exported.as_str());
+                let open = text.find('{').unwrap_or(0);
+                if let Some(at) = text[open..].find(first).map(|at| at + open) {
+                    start = import.span.start + u32::try_from(at).unwrap_or(0);
+                    end = start + u32::try_from(first.len()).unwrap_or(0);
+                }
+            }
         }
+        loaded.diagnostics.push(Diagnostic {
+            message: format!(
+                "SWR5002: Cannot resolve macro module {} from {}.",
+                body,
+                importer_name.display()
+            ),
+            start,
+            end,
+        });
         return;
     };
     if let Ok(canonical) = path.canonicalize() {
@@ -2181,7 +2501,16 @@ fn load_syntax_module(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| from_dir.to_path_buf());
     for nested in syntax_imports(&read.children) {
-        load_syntax_module(loaded, user_dir, &nested_dir, &nested, seen, source, true);
+        load_syntax_module(
+            loaded,
+            user_dir,
+            &nested_dir,
+            &path,
+            &nested,
+            seen,
+            source,
+            true,
+        );
     }
     merge_runtime_imports(
         &mut loaded.runtime_imports,
@@ -2654,6 +2983,10 @@ fn collect_macros(source: &str, nodes: &[Syntax], out: &mut HashMap<String, Macr
         let operator = token_at(nodes, index, "operator");
         let syntax = token_at(nodes, index, "syntax");
         if operator || syntax {
+            let head = match &nodes[index] {
+                Syntax::Token { span, .. } => *span,
+                _ => Span { start: 0, end: 0 },
+            };
             index += 1;
             let Some(name) = macro_name_at(nodes, &mut index) else {
                 continue;
@@ -2709,6 +3042,7 @@ fn collect_macros(source: &str, nodes: &[Syntax], out: &mut HashMap<String, Macr
                         category: position.clone().unwrap_or_else(|| "expr".to_owned()),
                         operator,
                         shadows_core,
+                        head,
                     });
                 }
             }

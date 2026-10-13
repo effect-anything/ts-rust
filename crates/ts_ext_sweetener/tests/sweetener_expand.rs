@@ -538,3 +538,98 @@ const s = [shape(x => x), shape(a + b), shape(a ? b : c), shape(y = 2)];\n\
         assert!(out.code.contains(line), "missing {line}:\n{}", out.code);
     }
 }
+
+fn codes(out: &ts_ext_sweetener::Expansion) -> Vec<String> {
+    out.diagnostics
+        .iter()
+        .map(|d| d.message.split(':').next().unwrap_or("").to_owned())
+        .collect()
+}
+
+/// SWR2016 at the `$` of a repetition with no quantifier and at the capture
+/// of an `#if` that is not `present $capture`; SWR4002 at the definition.
+#[test]
+fn definition_diagnostics_point_where_upstream_does() {
+    let code = "\
+export syntax twice:expr {\n\
+  rule { twice($($x:expr),*) } => { [$($x),] }\n\
+}\n\
+export syntax maybe:expr {\n\
+  rule { maybe $($x:expr)* } => { #if(absent $x) { 1 } #else { 2 } }\n\
+}\n\
+export syntax hello:expr shadows core {\n\
+  rule { hello } => { 1 }\n\
+}\n";
+    let out = expand(ExpandRequest {
+        filename: "malformed.sts",
+        code,
+        phase: Phase::Check,
+    });
+    let find = |needle: &str| {
+        out.diagnostics
+            .iter()
+            .filter(|d| d.message.contains(needle))
+            .map(|d| d.start as usize)
+            .collect::<Vec<_>>()
+    };
+    let repetition = code.find("$($x),]").unwrap();
+    assert_eq!(find("repetition requires * or +"), vec![repetition]);
+    let conditional = code.find("$x) { 1 }").unwrap();
+    assert_eq!(
+        find("conditional requires present $capture"),
+        vec![conditional]
+    );
+    let definition = code.find("syntax hello").unwrap();
+    assert_eq!(find("SWR4002"), vec![definition]);
+}
+
+/// A `for syntax` import of a file that does not exist is SWR5002 at the
+/// first imported name.
+#[test]
+fn unresolved_syntax_module_is_swr5002() {
+    let code = "import { foo } from \"./missing-module.sts\" for syntax;\nconst a = 1;\n";
+    let out = expand(ExpandRequest {
+        filename: "/nonexistent-dir/user.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert_eq!(codes(&out), vec!["SWR5002"]);
+    assert_eq!(out.diagnostics[0].start as usize, code.find("foo").unwrap());
+    assert!(
+        out.diagnostics[0]
+            .message
+            .contains("Cannot resolve macro module ./missing-module.sts from"),
+        "{}",
+        out.diagnostics[0].message
+    );
+}
+
+/// Legacy `let name = macro { ... }` items are passed through with the
+/// SWR4025 warning, as upstream's reader cannot read them.
+#[test]
+fn unread_legacy_items_warn_swr4025() {
+    let code = "\
+let function = macro {\n  rule { $x } => { $x }\n}\n\
+let go = macro {\n  rule { $x } => { $x }\n}\n\
+let ok = 1;\n";
+    let out = expand(ExpandRequest {
+        filename: "legacy.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert_eq!(codes(&out), vec!["SWR4025", "SWR4025"]);
+    assert!(
+        out.diagnostics[0]
+            .message
+            .contains("expected variable binding")
+    );
+    assert!(
+        out.diagnostics[1]
+            .message
+            .contains("expected ';' or automatic terminator")
+    );
+    assert_eq!(
+        out.diagnostics[1].start as usize,
+        code.find("let go").unwrap()
+    );
+}
