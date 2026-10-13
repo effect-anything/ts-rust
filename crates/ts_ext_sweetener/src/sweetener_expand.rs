@@ -59,8 +59,32 @@ use super::sweetener_reader::{self, Delimiter, Span, Syntax};
 /// is left as written; the rest of the file still expands.
 #[must_use]
 pub fn expand(request: ExpandRequest<'_>) -> Expansion {
+    OWNER_FILTER.with(|filter| filter.borrow_mut().take());
     let first = expand_pass(&request, None);
+    // Runtime imports belong to the module that needs them. Upstream prints
+    // them only for modules whose macros this file invoked, which is known
+    // once the file has been expanded; a module none of whose macros ran
+    // leaves its imports out.
+    let invoked = INVOKED_OWNERS.with(|set| set.borrow().clone());
+    let unused_owner =
+        IMPORT_OWNERS.with(|set| set.borrow().iter().any(|owner| !invoked.contains(owner)));
+    if unused_owner {
+        OWNER_FILTER.with(|filter| *filter.borrow_mut() = Some(invoked));
+    }
+    let out = expand_again(&request, first, unused_owner);
+    OWNER_FILTER.with(|filter| filter.borrow_mut().take());
+    out
+}
+
+fn expand_again(
+    request: &ExpandRequest<'_>,
+    first: (Expansion, Vec<(usize, usize, Vec<String>)>),
+    imports_changed: bool,
+) -> Expansion {
     if first.1.is_empty() {
+        if imports_changed {
+            return expand_pass(request, None).0;
+        }
         return first.0;
     }
     // Upstream decides hygiene on the printed program: a name is
@@ -69,7 +93,7 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     // in the output, so its binders do not force a rename. Its captures are
     // printed again and still count.
     let names = output_user_names(request.code, &first.1);
-    expand_pass(&request, Some(names)).0
+    expand_pass(request, Some(names)).0
 }
 
 /// User binders still present in the output: the source outside consumed
@@ -170,6 +194,7 @@ fn expand_pass(
     super::sweetener_scoped::clear_unused();
     BUDGET.with(|budget| budget.borrow_mut().take());
     super::sweetener_budget::reset();
+    INVOKED_OWNERS.with(|set| set.borrow_mut().clear());
     if let Err(message) = super::sweetener_budget::charge(
         super::sweetener_budget::Kind::InputTokens,
         super::sweetener_budget::count_tokens(source),
@@ -296,7 +321,19 @@ fn expand_pass(
         pending_captures: None,
         consumed: Vec::new(),
         classes: share_list(loaded.classes),
-        runtime_imports: loaded.runtime_imports,
+        runtime_imports: {
+            IMPORT_OWNERS.with(|set| {
+                let mut set = set.borrow_mut();
+                set.clear();
+                set.extend(
+                    loaded
+                        .runtime_imports
+                        .iter()
+                        .flat_map(|import| import.owners.iter().cloned()),
+                );
+            });
+            loaded.runtime_imports
+        },
         hygiene: HashMap::new(),
         channel_renames: HashMap::new(),
         context_rejected: Vec::new(),
@@ -1506,6 +1543,7 @@ impl<'a> Printer<'a> {
                         self.printing_core = true;
                     }
                     self.note_captures(&matched.captures);
+                    note_invoked(rule.owner.as_deref());
                     let replacement = instantiate(
                         self.source,
                         &rule.template,
@@ -1540,6 +1578,7 @@ impl<'a> Printer<'a> {
                     self.printing_core = true;
                 }
                 self.note_captures(&captures);
+                note_invoked(rule.owner.as_deref());
                 let mut replacement =
                     instantiate(self.source, &rule.template, &captures, &self.classes);
                 // The rule's trailing `;` is the statement terminator. Emit it
@@ -1622,6 +1661,7 @@ impl<'a> Printer<'a> {
                 self.printing_core = true;
             }
             self.note_captures(&captures);
+            note_invoked(rule.owner.as_deref());
             let replacement = instantiate(self.source, &rule.template, &captures, &self.classes);
             let expanded = self.expand_replacement(&replacement);
             self.printing_core = was_core;
@@ -1696,6 +1736,7 @@ impl<'a> Printer<'a> {
                     self.printing_core = true;
                 }
                 self.note_captures(&matched.captures);
+                note_invoked(rule.owner.as_deref());
                 let replacement = instantiate(
                     self.source,
                     &rule.template,
@@ -1811,6 +1852,7 @@ impl<'a> Printer<'a> {
                 ) {
                     note_budget(message);
                 }
+                note_invoked(rule.owner.as_deref());
                 let (mut replacement, protected) = instantiate_marked(
                     self.source,
                     &rule.template,
@@ -2359,7 +2401,14 @@ impl<'a> Printer<'a> {
             return;
         }
         let mut lines = String::new();
+        let filter = OWNER_FILTER.with(|filter| filter.borrow().clone());
         for import in &self.runtime_imports {
+            if let Some(filter) = &filter
+                && !import.owners.is_empty()
+                && !import.owners.iter().any(|owner| filter.contains(owner))
+            {
+                continue;
+            }
             let mut parts = Vec::new();
             for binding in &import.bindings {
                 let printed = fresh_name(&binding.local, &self.user_names, &self.hygiene);
@@ -3260,6 +3309,8 @@ struct Rule {
     contexts: Vec<(String, Span)>,
     /// The rule's pattern group, when this file defines the rule.
     origin: Option<Span>,
+    /// The macro module that defines the rule; `None` for this file.
+    owner: Option<Rc<str>>,
 }
 
 /// One declarative binding contract, upstream's `BindingContract`:
@@ -3422,6 +3473,9 @@ struct Loaded {
 struct RuntimeImport {
     specifier: String,
     bindings: Vec<ImportBinding>,
+    /// The macro modules that need this import. Upstream synthesizes a
+    /// module's imports only when one of its macros was invoked.
+    owners: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -3662,6 +3716,12 @@ fn load_syntax_module_body(
     let read = sweetener_reader::read_syntax(&text);
     let mut found = HashMap::<String, Macro>::new();
     collect_macros(&text, &read.children, &mut found);
+    let owner: Rc<str> = Rc::from(path.display().to_string());
+    for macro_ in found.values_mut() {
+        for rule in &mut macro_.rules {
+            rule.owner = Some(owner.clone());
+        }
+    }
     loaded
         .classes
         .extend(collect_classes(&text, &read.children));
@@ -3963,6 +4023,7 @@ fn rebase_runtime_imports(
         .into_iter()
         .map(|mut import| {
             import.specifier = rebase_specifier(user_dir, macro_file, &import.specifier);
+            import.owners = vec![macro_file.display().to_string()];
             import
         })
         .collect()
@@ -4572,6 +4633,7 @@ fn rules_in_source(source: &str, body: &Syntax) -> Vec<Rule> {
                 contracts: contracts_after(children, group_index(children, pattern_group)),
                 contexts,
                 origin: Some(node_span(pattern_group)),
+                owner: None,
             });
         }
     }
@@ -11248,6 +11310,27 @@ fn compiled_accepts_bare(definitions: &[&Macro]) -> bool {
         .any(|macro_| macro_.rules.iter().any(|rule| rule.pattern.len() <= 1))
 }
 
+thread_local! {
+    /// Macro modules whose rules this pass instantiated.
+    static INVOKED_OWNERS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+    /// Set for a pass that knows which modules were invoked: only their
+    /// runtime imports are printed.
+    static OWNER_FILTER: std::cell::RefCell<Option<std::collections::HashSet<String>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Every module some runtime import of this pass belongs to.
+    static IMPORT_OWNERS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+fn note_invoked(owner: Option<&str>) {
+    if let Some(owner) = owner {
+        INVOKED_OWNERS.with(|set| {
+            set.borrow_mut().insert(owner.to_owned());
+        });
+    }
+}
+
 fn note_budget(message: String) {
     BUDGET.with(|budget| {
         budget.borrow_mut().get_or_insert(message);
@@ -12720,6 +12803,7 @@ fn value_import_at(nodes: &[Syntax], index: usize) -> Option<RuntimeImport> {
     Some(RuntimeImport {
         specifier,
         bindings,
+        owners: Vec::new(),
     })
 }
 
@@ -12742,6 +12826,7 @@ fn runtime_used_by(imports: &[RuntimeImport], macros: &[Macro]) -> Vec<RuntimeIm
             out.push(RuntimeImport {
                 specifier: import.specifier.clone(),
                 bindings,
+                owners: import.owners.clone(),
             });
         }
     }
@@ -12844,6 +12929,11 @@ fn merge_runtime_imports(into: &mut Vec<RuntimeImport>, more: Vec<RuntimeImport>
             .iter_mut()
             .find(|found| found.specifier == import.specifier)
         {
+            for owner in import.owners {
+                if !existing.owners.contains(&owner) {
+                    existing.owners.push(owner);
+                }
+            }
             for binding in import.bindings {
                 if !existing
                     .bindings

@@ -1313,6 +1313,50 @@ fn rule_failures_carry_related_locations() {
 }
 
 #[test]
+fn runtime_imports_only_for_invoked_modules() {
+    let dir = std::env::temp_dir().join(format!("swr-runtime-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("used.sts"),
+        "import { helper } from \"./used-rt.ts\";\nexport syntax wrap:expr {\n  rule { wrap($x:expr) } => { helper($x) }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("idle.sts"),
+        "import { other } from \"./idle-rt.ts\";\nexport syntax nap:expr {\n  rule { nap($x:expr) } => { other($x) }\n}\n",
+    )
+    .unwrap();
+    let filename = dir.join("main.sts");
+    let run = |code: &str| {
+        expand(ExpandRequest {
+            filename: filename.to_str().unwrap(),
+            code,
+            phase: Phase::Check,
+        })
+        .code
+    };
+    let imports = "import { wrap } from \"./used.sts\" for syntax;\nimport { nap } from \"./idle.sts\" for syntax;\n";
+    let code = run(&format!("{imports}const a = wrap(1);\n"));
+    assert!(
+        code.contains("import { helper } from \"./used-rt.ts\";"),
+        "{code}"
+    );
+    assert!(!code.contains("idle-rt"), "{code}");
+    assert!(code.contains("const a = helper(1);"), "{code}");
+    let code = run(&format!("{imports}const a = 1;\n"));
+    assert!(
+        !code.contains("used-rt") && !code.contains("idle-rt"),
+        "{code}"
+    );
+    let code = run(&format!("{imports}const a = wrap(1);\nconst b = nap(2);\n"));
+    assert!(
+        code.contains("used-rt") && code.contains("idle-rt"),
+        "{code}"
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn macro_module_import_diagnostics() {
     let dir = std::env::temp_dir().join(format!("swr500x-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
