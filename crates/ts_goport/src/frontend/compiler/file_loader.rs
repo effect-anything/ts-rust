@@ -4066,6 +4066,7 @@ export const a: T | Dep | number = x + (h as never);
                     start: 0,
                     length: 1,
                     code: 9001,
+                    category: None,
                 });
             }
             if params.content.contains("@supp") {

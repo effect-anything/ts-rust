@@ -186,6 +186,7 @@ fn transform(
                 start: token_start as i32,
                 length: (line_end - token_start) as i32,
                 code: UNCLOSED_INTERPOLATION_CODE,
+                category: None,
             });
             pos = line_end;
             continue;

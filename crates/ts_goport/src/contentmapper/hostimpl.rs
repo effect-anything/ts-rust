@@ -769,6 +769,9 @@ pub struct Diagnostic {
     pub start: i32,
     pub length: i32,
     pub code: i32,
+    // PORT: ts-rust extension. Optional TypeScript `DiagnosticCategory`
+    // (0 warning, 1 error, 2 suggestion, 3 message); absent means error, as in Go.
+    pub category: Option<i32>,
 }
 
 impl MarshalerTo for Diagnostic {
@@ -779,6 +782,9 @@ impl MarshalerTo for Diagnostic {
         marshal_field(enc, first, "start", &self.start)?;
         marshal_field(enc, first, "length", &self.length)?;
         marshal_field(enc, first, "code", &self.code)?;
+        if let Some(category) = &self.category {
+            marshal_field(enc, first, "category", category)?;
+        }
         write_object_end(enc);
         Ok(())
     }
@@ -795,6 +801,11 @@ impl UnmarshalerFrom for Diagnostic {
                 "start" => json_unmarshal_decode(dec, &mut self.start)?,
                 "length" => json_unmarshal_decode(dec, &mut self.length)?,
                 "code" => json_unmarshal_decode(dec, &mut self.code)?,
+                "category" => {
+                    let mut category = 0i32;
+                    json_unmarshal_decode(dec, &mut category)?;
+                    self.category = Some(category);
+                }
                 _ => return Ok(false),
             }
             Ok(true)
@@ -2707,12 +2718,23 @@ fn decode_transform_result(
             Node::NIL,
             TextRange::new(start, end),
             diagnostic_source,
-            crate::diagnostics::Category::Error,
+            mapper_diagnostic_category(d.category),
             d.code,
             &d.message_text,
         ));
     }
     Ok(result)
+}
+
+// PORT: ts-rust extension. Maps the optional protocol category; anything
+// absent or unknown stays an error, as Go reports every mapper diagnostic.
+fn mapper_diagnostic_category(category: Option<i32>) -> crate::diagnostics::Category {
+    match category {
+        Some(0) => crate::diagnostics::Category::Warning,
+        Some(2) => crate::diagnostics::Category::Suggestion,
+        Some(3) => crate::diagnostics::Category::Message,
+        _ => crate::diagnostics::Category::Error,
+    }
 }
 
 // Go: contentmapper/hostimpl.go:1172 decodeMappedOutput
@@ -3179,6 +3201,7 @@ mod tests {
                             start: 0,
                             length: 3.min(length),
                             code: 9999,
+                            category: None,
                         }],
                         ..Default::default()
                     })))
@@ -3317,6 +3340,7 @@ mod tests {
                             start: emoji_length,
                             length: text_length - emoji_length,
                             code: 1001,
+                            category: None,
                         }],
                         ..Default::default()
                     })))
@@ -5151,5 +5175,19 @@ mod tests {
         assert_eq!(spawner.closes.load(Ordering::SeqCst), 1);
         release();
         let _ = r.close();
+    }
+}
+
+#[cfg(test)]
+mod mapper_category_tests {
+    use super::*;
+
+    #[test]
+    fn mapper_diagnostic_category_defaults_to_error() {
+        use crate::diagnostics::Category;
+        assert_eq!(mapper_diagnostic_category(None), Category::Error);
+        assert_eq!(mapper_diagnostic_category(Some(1)), Category::Error);
+        assert_eq!(mapper_diagnostic_category(Some(0)), Category::Warning);
+        assert_eq!(mapper_diagnostic_category(Some(9)), Category::Error);
     }
 }

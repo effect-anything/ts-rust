@@ -25,6 +25,7 @@ impl MapperHandler for DiagnosticCodeCollisionHandler {
                         length: "foo".len() as i32,
                         code: diag::Function_must_have_an_explicit_return_type_annotation_with_isolatedDeclarations
                             .code() as i32,
+                        category: None,
                     }],
                     ..TransformResult::default()
                 })
