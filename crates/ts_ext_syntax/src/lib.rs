@@ -13,12 +13,12 @@ pub mod session;
 
 pub use ts_ext_sweetener::{
     Diagnostic, ExpandRequest, Expansion, ExpansionTrace, Phase, RelatedLocation, ResourceBudget,
-    Segment, SegmentKind, Severity, TokenOrigin, expand, expand_with_budget, sweetener_matches,
-    unchanged,
+    Segment, SegmentKind, Severity, TokenOrigin, expand, expand_with_budget, retarget_segments,
+    sweetener_matches, unchanged,
 };
 pub use ts_ext_typegpu::structure;
 
 pub mod protocol;
-pub use session::{SessionDiagnostic, TransformSession, Transformed};
+pub use session::{SessionDiagnostic, TransformSession, Transformed, v3_source_map};
 
 mod node;

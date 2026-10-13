@@ -210,6 +210,7 @@ pub fn expand_with_budget(request: ExpandRequest<'_>, budget: ResourceBudget) ->
 }
 
 pub use sweetener_budget::ResourceBudget;
+pub use sweetener_origins::retarget_segments;
 
 #[must_use]
 pub fn unchanged(code: &str) -> Expansion {

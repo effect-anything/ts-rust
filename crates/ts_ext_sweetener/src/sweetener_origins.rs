@@ -300,3 +300,107 @@ pub(crate) fn refine_segments(segments: &[Segment], fine: &[(u32, u32, u32)]) ->
     }
     out
 }
+
+/// Move span-map tuples `[virtual start, virtual end, original start,
+/// original end, kind]` (kind `0` verbatim, `1` atom) from `old` to `new`,
+/// a later rewrite of the same text. A verbatim range keeps exact bytes
+/// wherever the rewrite left its tokens alone. Text the rewrite changed
+/// becomes an atom over the original ranges the old text there mapped to,
+/// so no offset is left pointing at the wrong place.
+#[must_use]
+pub fn retarget_segments(
+    old: &str,
+    new: &str,
+    segments: &[(i32, i32, i32, i32, i32)],
+) -> Vec<(i32, i32, i32, i32, i32)> {
+    if old == new {
+        return segments.to_vec();
+    }
+    let to_usize = |value: i32| usize::try_from(value).unwrap_or(0);
+    let to_i32 = |value: usize| i32::try_from(value).unwrap_or(i32::MAX);
+    // Identity copy of the whole old text, carried into the new text: an
+    // old-to-new correspondence for every byte the rewrite kept.
+    let kept = carry(old, new, &[(0, old.len(), 0)]);
+    let mut out = Vec::new();
+    // Old virtual range -> original range of what was there.
+    let original_of = |from: usize, to: usize| -> Option<(i32, i32, bool)> {
+        let mut low: Option<i32> = None;
+        let mut high = 0;
+        let mut exact = true;
+        for &(vs, ve, os, oe, kind) in segments {
+            let (vs, ve) = (to_usize(vs), to_usize(ve));
+            let lo = from.max(vs);
+            let hi = to.min(ve);
+            if lo >= hi && !(from == to && vs <= from && from < ve) {
+                continue;
+            }
+            let (s, e) = if kind == 0 {
+                (os + to_i32(lo - vs), os + to_i32(hi.max(lo) - vs))
+            } else {
+                exact = false;
+                (os, oe)
+            };
+            low = Some(low.map_or(s, |low: i32| low.min(s)));
+            high = high.max(e);
+        }
+        low.map(|low| (low, high.max(low), exact))
+    };
+    let mut new_cursor = 0usize;
+    let mut old_cursor = 0usize;
+    let push_gap =
+        |out: &mut Vec<_>, new_from: usize, new_to: usize, old_from: usize, old_to: usize| {
+            if new_from >= new_to {
+                return;
+            }
+            if let Some((s, e, _)) = original_of(old_from, old_to) {
+                out.push((to_i32(new_from), to_i32(new_to), s, e, 1));
+            }
+        };
+    for &(ns, ne, os) in &kept {
+        let os = os as usize;
+        let oe = os + (ne - ns);
+        push_gap(&mut out, new_cursor, ns, old_cursor, os);
+        // The kept run, split where the old segments split it.
+        for &(vs, ve, gs, ge, kind) in segments {
+            let (vs, ve) = (to_usize(vs), to_usize(ve));
+            let lo = os.max(vs);
+            let hi = oe.min(ve);
+            if lo >= hi {
+                continue;
+            }
+            let virtual_from = to_i32(ns + (lo - os));
+            let virtual_to = to_i32(ns + (hi - os));
+            if kind == 0 {
+                out.push((
+                    virtual_from,
+                    virtual_to,
+                    gs + to_i32(lo - vs),
+                    gs + to_i32(hi - vs),
+                    0,
+                ));
+            } else {
+                out.push((virtual_from, virtual_to, gs, ge, kind));
+            }
+        }
+        new_cursor = ne;
+        old_cursor = oe;
+    }
+    push_gap(&mut out, new_cursor, new.len(), old_cursor, old.len());
+    out.sort_unstable();
+    // Adjacent pieces of one atom are one atom again.
+    let mut merged: Vec<(i32, i32, i32, i32, i32)> = Vec::with_capacity(out.len());
+    for piece in out {
+        if let Some(last) = merged.last_mut()
+            && last.1 == piece.0
+            && last.4 == piece.4
+            && ((piece.4 == 1 && last.2 == piece.2 && last.3 == piece.3)
+                || (piece.4 == 0 && last.3 == piece.2))
+        {
+            last.1 = piece.1;
+            last.3 = piece.3.max(last.3);
+            continue;
+        }
+        merged.push(piece);
+    }
+    merged
+}

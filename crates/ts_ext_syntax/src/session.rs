@@ -9,7 +9,7 @@
 //! - Any other file: that session only. Check leaves operators alone.
 //!   Build rewrites them to `__tsover_*` and then wraps marked functions.
 
-use crate::{expand, sweetener_matches, ExpandRequest, Phase};
+use crate::{ExpandRequest, Phase, expand, sweetener_matches};
 
 /// What the caller will do with the text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -165,6 +165,7 @@ fn sweetener_then_typegpu(session: &TransformSession, path: &str, code: &str) ->
         session,
         session.phase,
         path,
+        code,
         &expanded.code,
         &expanded,
         code != expanded.code,
@@ -177,6 +178,7 @@ fn typegpu_only(session: &TransformSession, path: &str, code: &str) -> Transform
         session.phase,
         path,
         code,
+        code,
         &crate::unchanged(code),
         false,
     )
@@ -186,6 +188,7 @@ fn apply_typegpu(
     session: &TransformSession,
     phase: TransformPhase,
     path: &str,
+    source: &str,
     code: &str,
     first: &crate::Expansion,
     already_changed: bool,
@@ -209,30 +212,38 @@ fn apply_typegpu(
     }
     .transform(path, code);
     if phase == TransformPhase::Build {
-        let mappings = mappings_json(&first.span_map_segments());
+        let output = rewrite_specifiers(&gpu.code);
+        let segments = crate::retarget_segments(code, &gpu.code, &first.span_map_segments());
+        let segments = crate::retarget_segments(&gpu.code, &output, &segments);
+        let mappings = mappings_json(&segments);
+        let source_map = v3_source_map(path, source, &output, &segments);
         let mut diagnostics = diagnostics_of(first);
         diagnostics.extend(author_diagnostics(first, gpu.diagnostics));
         return Transformed {
             changed: already_changed || gpu.changed,
             extension,
-            source_map: source_map_json(path, &mappings),
+            source_map,
             mappings,
             diagnostics,
-            code: rewrite_specifiers(&gpu.code),
+            code: output,
         };
     }
     let Some(rewritten) = gpu.rewrite else {
         let changed = already_changed || !first.diagnostics.is_empty() || gpu.code != code;
-        let mappings = mappings_json(&first.span_map_segments());
+        let output = rewrite_specifiers(&gpu.code);
+        let segments = crate::retarget_segments(code, &gpu.code, &first.span_map_segments());
+        let segments = crate::retarget_segments(&gpu.code, &output, &segments);
+        let mappings = mappings_json(&segments);
+        let source_map = v3_source_map(path, source, &output, &segments);
         let mut diagnostics = diagnostics_of(first);
         diagnostics.extend(author_diagnostics(first, gpu.diagnostics));
         return Transformed {
             changed,
             extension,
-            source_map: source_map_json(path, &mappings),
+            source_map,
             mappings,
             diagnostics,
-            code: rewrite_specifiers(&gpu.code),
+            code: output,
         };
     };
     let mut segments = compose(first, &rewritten);
@@ -248,11 +259,14 @@ fn apply_typegpu(
         segment.0 = segment.0.wrapping_add(shift);
         segment.1 = segment.1.wrapping_add(shift);
     }
+    let output = rewrite_specifiers(&gpu.code);
+    let segments = crate::retarget_segments(&gpu.code, &output, &segments);
     let mappings = mappings_json(&segments);
+    let source_map = v3_source_map(path, source, &output, &segments);
     Transformed {
         changed: true,
         extension,
-        source_map: source_map_json(path, &mappings),
+        source_map,
         mappings,
         diagnostics: {
             let mut diagnostics = diagnostics_of(first);
@@ -268,7 +282,7 @@ fn apply_typegpu(
             }));
             diagnostics
         },
-        code: rewrite_specifiers(&gpu.code),
+        code: output,
     }
 }
 
@@ -477,12 +491,146 @@ pub fn source_map_json(file: &str, mappings: &str) -> String {
     )
 }
 
+/// A Source Map v3 from `output` back to `source`, with real VLQ
+/// `mappings` so any consumer (bundlers, devtools, `source-map`) can read
+/// it. A verbatim range maps every token start, plus every line start
+/// inside it, to its exact original position. An atom maps its start (and
+/// its line starts) to the start of the original range that produced it.
+/// The raw spanmap tuples stay under `segments` for composing tools.
+#[must_use]
+pub fn v3_source_map(
+    file: &str,
+    source: &str,
+    output: &str,
+    segments: &[(i32, i32, i32, i32, i32)],
+) -> String {
+    let segment_json = mappings_json(segments);
+    let source_lines = line_starts(source);
+    let output_lines = line_starts(output);
+    let position = |lines: &[usize], offset: usize| -> (usize, usize) {
+        let line = lines
+            .partition_point(|&start| start <= offset)
+            .saturating_sub(1);
+        (line, offset - lines[line])
+    };
+    // (output offset, original offset), sorted by output.
+    let mut points: Vec<(usize, usize)> = Vec::new();
+    for &(vs, ve, os, _, kind) in segments {
+        let (Ok(vs), Ok(ve), Ok(os)) = (
+            usize::try_from(vs),
+            usize::try_from(ve),
+            usize::try_from(os),
+        ) else {
+            continue;
+        };
+        if ve > output.len() || vs >= ve {
+            continue;
+        }
+        let bytes = output.as_bytes();
+        let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$';
+        for at in vs..ve {
+            let byte = bytes[at];
+            if byte.is_ascii_whitespace() || !output.is_char_boundary(at) {
+                continue;
+            }
+            let starts_line = at == 0 || bytes[at - 1] == b'\n';
+            let starts_token = at == vs || !(is_word(byte) && is_word(bytes[at - 1]));
+            let point = if kind == 0 {
+                starts_token || starts_line
+            } else {
+                at == vs || starts_line
+            };
+            if !point {
+                continue;
+            }
+            let original = if kind == 0 { os + (at - vs) } else { os };
+            if original <= source.len() {
+                points.push((at, original));
+            }
+        }
+    }
+    points.sort_unstable();
+    points.dedup_by_key(|point| point.0);
+    let mut mappings = String::new();
+    let mut line = 0usize;
+    let (mut prev_col, mut prev_src_line, mut prev_src_col) = (0i64, 0i64, 0i64);
+    let mut first_on_line = true;
+    for (out_at, original) in points {
+        let (out_line, _) = position(&output_lines, out_at);
+        while line < out_line {
+            mappings.push(';');
+            line += 1;
+            prev_col = 0;
+            first_on_line = true;
+        }
+        if !first_on_line {
+            mappings.push(',');
+        }
+        first_on_line = false;
+        let (src_line, _) = position(&source_lines, original);
+        let col = utf16_column(output, output_lines[out_line], out_at);
+        let src_col_utf16 = utf16_column(source, source_lines[src_line], original);
+        vlq(&mut mappings, col - prev_col);
+        vlq(&mut mappings, 0);
+        vlq(&mut mappings, src_line as i64 - prev_src_line);
+        vlq(&mut mappings, src_col_utf16 - prev_src_col);
+        prev_col = col;
+        prev_src_line = src_line as i64;
+        prev_src_col = src_col_utf16;
+    }
+    format!(
+        r#"{{"version":3,"file":{},"sources":[{}],"sourcesContent":[{}],"names":[],"mappings":"{mappings}","segments":{segment_json}}}"#,
+        json_string(file),
+        json_string(file),
+        json_string(source),
+    )
+}
+
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(text.match_indices('\n').map(|(at, _)| at + 1));
+    starts
+}
+
+/// Source map columns count UTF-16 code units.
+fn utf16_column(text: &str, line_start: usize, at: usize) -> i64 {
+    let mut end = at.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[line_start..end].encode_utf16().count() as i64
+}
+
+fn vlq(out: &mut String, value: i64) {
+    const DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut rest = if value < 0 {
+        ((-value) << 1) | 1
+    } else {
+        value << 1
+    };
+    loop {
+        let mut digit = rest & 31;
+        rest >>= 5;
+        if rest > 0 {
+            digit |= 32;
+        }
+        out.push(DIGITS[digit as usize] as char);
+        if rest == 0 {
+            break;
+        }
+    }
+}
+
 fn json_string(value: &str) -> String {
     let mut out = String::from("\"");
     for ch in value.chars() {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", ch as u32)),
             ch => out.push(ch),
         }
     }
@@ -508,7 +656,7 @@ pub fn mappings_json(segments: &[(i32, i32, i32, i32, i32)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose, TransformSession};
+    use super::{TransformSession, compose};
 
     #[test]
     fn ordinary_file_runs_typegpu_only() {
