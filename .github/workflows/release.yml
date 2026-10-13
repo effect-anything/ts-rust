@@ -225,6 +225,45 @@ jobs:
           name: tsc-${{ matrix.platform }}
           path: ${{ runner.temp }}/out/tsc${{ matrix.exe }}
           if-no-files-found: error
+      # tsc-ext (crates/ts_ext_syntax): the content mapper and Sweetener CLI (the tsc-ext bin of
+      # @effect-x/tsc), and the Node addon of the package's API. Same platforms as the tsc; no PGO.
+      # The binary links like the tsc (static on Linux, crt-static on Windows). The addon is loaded
+      # by Node, a glibc process on Linux, so it builds for the -gnu target, and a cdylib is not
+      # linked static anywhere.
+      - name: Build tsc-ext
+        env:
+          EXE: ${{ matrix.exe }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          out="$RUNNER_TEMP/ext"
+          mkdir -p "$out"
+          (
+            case $RUNNER_OS in
+              Linux) export RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" ;;
+              Windows) export RUSTFLAGS="-C target-feature=+crt-static" ;;
+            esac
+            cargo build --release --locked -p ts_ext_syntax --bin tsc-ext --target "$TARGET"
+          )
+          cp "target/$TARGET/release/tsc-ext$EXE" "$out/"
+          addon_target=$TARGET
+          if [[ $RUNNER_OS == Linux ]]; then
+            addon_target=${TARGET/-musl/-gnu}
+            rustup target add "$addon_target"
+          fi
+          cargo build --release --locked -p ts_ext_syntax --lib --target "$addon_target"
+          case $RUNNER_OS in
+            Linux) lib=libts_ext_syntax.so ;;
+            macOS) lib=libts_ext_syntax.dylib ;;
+            Windows) lib=ts_ext_syntax.dll ;;
+          esac
+          cp "target/$addon_target/release/$lib" "$out/tsc-ext.node"
+          "$out/tsc-ext$EXE" help
+          node -e 'const m = { exports: {} }; process.dlopen(m, process.argv[1]); if (typeof m.exports.transformNative !== "function") process.exit(1)' "$out/tsc-ext.node"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tsc-ext-${{ matrix.platform }}
+          path: ${{ runner.temp }}/ext
+          if-no-files-found: error
 
   package:
     needs: [version, build]
@@ -270,12 +309,17 @@ jobs:
           NPM_PACK_GO_DIR: ${{ github.workspace }}/go-pin/${{ steps.pin.outputs.subdir }}
         run: |
           bins="$RUNNER_TEMP/bins"
-          chmod +x "$bins"/tsc-*/tsc "$bins"/tsc-*/tsc.exe
+          chmod +x "$bins"/tsc-*/tsc "$bins"/tsc-*/tsc.exe "$bins"/tsc-ext-*/tsc-ext "$bins"/tsc-ext-*/tsc-ext.exe
+          # tsc-ext (bins/tsc-ext-<platform>: tsc-ext and tsc-ext.node) for every tsc platform.
+          ext=()
+          for platform in linux-x64 linux-arm64 darwin-arm64 darwin-x64 win32-x64 win32-arm64; do
+            ext+=(--ext "$platform=$bins/tsc-ext-$platform")
+          done
           scripts/goport/npm-pack.sh --name @effect-x/tsc --package-version "$VERSION" \
             --also "linux-arm64=$bins/tsc-linux-arm64/tsc" --also "darwin-arm64=$bins/tsc-darwin-arm64/tsc" \
             --also "darwin-x64=$bins/tsc-darwin-x64/tsc" \
             --also "win32-x64=$bins/tsc-win32-x64/tsc.exe" --also "win32-arm64=$bins/tsc-win32-arm64/tsc.exe" \
-            "$RUNNER_TEMP/pkg" "$bins/tsc-linux-x64/tsc"
+            "${ext[@]}" "$RUNNER_TEMP/pkg" "$bins/tsc-linux-x64/tsc"
       # One archive per platform: the platform package's lib dir (tsc and the lib files, which a
       # noembed tsc reads next to it), LICENSE and NOTICE.txt. A .tar.gz, and a .zip for Windows.
       - name: Archives
@@ -368,6 +412,13 @@ jobs:
           $tsc --outDir out --declaration ok.ts
           cat out/ok.js out/ok.d.ts
           grep -q "export const x = 1;" out/ok.js
+          # tsc-ext: the bin, the Node API, and tsc through the contentMappers entry.
+          npx --no-install --package @effect-x/tsc tsc-ext help
+          printf 'export syntax twice:expr {\n  rule { twice($x:expr) } => { [$x, $x] }\n}\nexport const a = twice(1);\n' > m.sts
+          npx --no-install --package @effect-x/tsc tsc-ext sweetener --expand m.sts | grep -q "\[1, 1\]"
+          node --input-type=module -e 'import { Transformer } from "@effect-x/tsc"; const r = new Transformer({ tsconfig: false }).transformFile("m.sts"); if (!r.code.includes("[1, 1]") || r.hostPath !== "m.ts") process.exit(1)'
+          echo '{"compilerOptions":{"strict":true,"noEmit":true,"allowArbitraryExtensions":true},"include":["m.sts"],"contentMappers":[{"package":"@effect-x/tsc","extensions":[".sts"]}]}' > tsconfig.json
+          $tsc -p tsconfig.json
       - name: Archive check
         if: runner.os != 'Windows'
         run: |

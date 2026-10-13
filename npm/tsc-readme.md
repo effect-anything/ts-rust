@@ -56,6 +56,23 @@ allow it when VS Code asks:
 On Linux arm64, use `@effect-x/tsc-linux-arm64`. On macOS, use `@effect-x/tsc-darwin-arm64` (Apple silicon) or
 `@effect-x/tsc-darwin-x64` (Intel). On Windows, use `@effect-x/tsc-win32-x64` or `@effect-x/tsc-win32-arm64`.
 
+## Extensions: tsc-ext and the Node API
+
+The package also has the `tsc-ext` bin and a Node API for Sweetener (`.sts`, `.stsx`) and TypeGPU.
+Register the content mapper in tsconfig.json and run `tsc --runExternalCode`:
+
+```json
+"contentMappers": [{ "package": "@effect-x/tsc", "extensions": [".sts", ".stsx"],
+                     "options": { "typegpu": { "autoNaming": true } } }]
+```
+
+- `tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map]` prints the expansion; diagnostics
+  go to stderr.
+- `import { Transformer, formatDiagnostics } from "@effect-x/tsc"` for bundler plugins:
+  `new Transformer().transform(code, path)` returns `{ code, hostPath, dependencies, diagnostics,
+  map, changed, composeMap }`. The options are the tsconfig's, explicit ones override them.
+- TypeScript's version export moved from the package root to `@effect-x/tsc/version`.
+
 ## Platforms
 
 - Linux x64 (static, any distribution)
