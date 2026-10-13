@@ -88,9 +88,16 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     let stack = super::sweetener_budget::stack_bytes(&budget);
     let code = request.code;
     let (filename, phase) = (request.filename, request.phase);
-    if let Some(hit) = super::sweetener_cache::lookup_file(filename, code, phase, &budget) {
-        return hit;
-    }
+    // A hit, or the result of an identical expansion another thread (a
+    // project prewarm) is running now, instead of a second run of it.
+    let _claim = loop {
+        if let Some(hit) = super::sweetener_cache::lookup_file(filename, code, phase, &budget) {
+            return hit;
+        }
+        if let Some(claim) = super::sweetener_cache::claim(filename, code, phase, &budget) {
+            break claim;
+        }
+    };
     let cache_budget = budget.clone();
     let joined = std::thread::scope(|scope| {
         std::thread::Builder::new()
@@ -8242,11 +8249,14 @@ enum Cont<'a> {
 
 /// Whether `cont` can match at `cursor`. Matching commits inside the
 /// continuation itself, but every choice in it backtracks the same way.
+///
+/// Only success matters here. What a match captures never decides whether
+/// it succeeds (existing bindings only decide what is stored), so the probe
+/// matches into an empty scratch map instead of a copy of every capture.
 fn cont_ok(
     source: &str,
     nodes: &[Syntax],
     cursor: usize,
-    captures: &HashMap<String, Capture>,
     classes: &[SyntaxClass],
     cont: &Cont<'_>,
 ) -> bool {
@@ -8259,7 +8269,7 @@ fn cont_ok(
         }
         Cont::Seq(pats, then) => {
             let mut at = cursor;
-            let mut scratch = captures.clone();
+            let mut scratch = HashMap::new();
             match_pats_cont(
                 source,
                 nodes,
@@ -8272,7 +8282,7 @@ fn cont_ok(
                 then,
             )
             .is_some()
-                && cont_ok(source, nodes, at, &scratch, classes, then)
+                && cont_ok(source, nodes, at, classes, then)
         }
         Cont::Rep { inner, sep, then } => {
             let mut at = cursor;
@@ -8283,7 +8293,7 @@ fn cont_ok(
                 }
             } else if at > cursor || !inner.is_empty() {
                 let mut again = at;
-                let mut scratch = captures.clone();
+                let mut scratch = HashMap::new();
                 if match_pats_stop(
                     source,
                     nodes,
@@ -8300,7 +8310,7 @@ fn cont_ok(
                     return true;
                 }
             }
-            cont_ok(source, nodes, cursor, captures, classes, then)
+            cont_ok(source, nodes, cursor, classes, then)
         }
     }
 }
@@ -8352,7 +8362,7 @@ fn match_pats_cont(
                                 &rest,
                             )
                             .is_some()
-                                && cont_ok(source, nodes, tried, &taken, classes, &rest)
+                                && cont_ok(source, nodes, tried, classes, &rest)
                         })
                     })
                     .flatten();
@@ -8585,10 +8595,14 @@ fn match_pats_cont(
                 // Matching into the outer map overwrites `parameter`, so the
                 // last segment is the only one left. Each iteration matches
                 // on a copy and only its own holes are kept.
+                // A step's own holes are what it inserts minus the names
+                // bound before the repetition. Existing bindings only decide
+                // what a match stores, never whether it succeeds, so a step
+                // starts empty instead of from a copy of every capture.
+                let before: Vec<String> = captures.keys().cloned().collect();
                 loop {
                     let saved = *cursor;
-                    let mut one = captures.clone();
-                    let before: Vec<String> = one.keys().cloned().collect();
+                    let mut one = HashMap::new();
                     let follows = match pattern.get(pat_index + 1) {
                         Some(Pat::Lit(text))
                             if !text.chars().all(|ch| "!=<>&|?+-*/%^~.,;()".contains(ch)) =>
@@ -8627,7 +8641,7 @@ fn match_pats_cont(
                         // not need stays consumed.
                         *cursor = if sep.is_some()
                             && !many.is_empty()
-                            && !cont_ok(source, nodes, saved, captures, classes, &after_rep)
+                            && !cont_ok(source, nodes, saved, classes, &after_rep)
                         {
                             resume_next
                         } else {
@@ -8635,8 +8649,8 @@ fn match_pats_cont(
                         };
                         break;
                     }
-                    for key in before {
-                        one.remove(&key);
+                    for key in &before {
+                        one.remove(key);
                     }
                     // A literal's match position belongs to this step, and a
                     // row is only its holes.
@@ -8704,9 +8718,7 @@ fn match_pats_cont(
                 // $result:expr` leaves the last expression to `$result`.
                 if !(pat_index + 1 == pattern.len() && matches!(cont, Cont::Free)) {
                     let rest = Cont::Seq(&pattern[pat_index + 1..], cont);
-                    while !many.is_empty()
-                        && !cont_ok(source, nodes, *cursor, captures, classes, &rest)
-                    {
+                    while !many.is_empty() && !cont_ok(source, nodes, *cursor, classes, &rest) {
                         many.pop();
                         *cursor = row_starts.pop().unwrap_or(saved_start);
                     }

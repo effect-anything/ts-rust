@@ -7,6 +7,10 @@
 //! - `modules warm`: the file changed (a trailing comment), modules cached.
 //! - `memo hit`: the same file again, validated against its probes.
 //! - `build`: the build phase, cold.
+//!
+//! `--fingerprint <file>...` prints one hash of each file's whole expansion
+//! (code, segments, origins, traces, diagnostics) in both phases instead,
+//! to compare two builds of the expander for identical output.
 
 use std::time::{Duration, Instant};
 
@@ -40,6 +44,24 @@ fn main() {
     if let Some(at) = args.iter().position(|a| a == "--runs") {
         runs = args[at + 1].parse().expect("--runs N");
         args.drain(at..at + 2);
+    }
+    if let Some(at) = args.iter().position(|a| a == "--fingerprint") {
+        args.remove(at);
+        for file in &args {
+            let code = std::fs::read_to_string(file).expect("read");
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for phase in [Phase::Check, Phase::Build] {
+                clear_caches();
+                let out = expand(ExpandRequest {
+                    filename: file,
+                    code: &code,
+                    phase,
+                });
+                std::hash::Hash::hash(&format!("{out:?}"), &mut hasher);
+            }
+            println!("{:016x} {file}", std::hash::Hasher::finish(&hasher));
+        }
+        return;
     }
     println!(
         "| file | lines | bytes | cold ms | modules warm ms | memo hit ms | build cold ms | output bytes | diagnostics |"

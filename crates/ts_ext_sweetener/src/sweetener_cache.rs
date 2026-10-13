@@ -157,6 +157,59 @@ fn still_current(probes: &[Probe]) -> bool {
     probes.iter().all(Probe::still_holds)
 }
 
+fn in_flight() -> &'static (
+    Mutex<std::collections::HashSet<FileKey>>,
+    std::sync::Condvar,
+) {
+    static IN_FLIGHT: OnceLock<(
+        Mutex<std::collections::HashSet<FileKey>>,
+        std::sync::Condvar,
+    )> = OnceLock::new();
+    IN_FLIGHT.get_or_init(|| {
+        (
+            Mutex::new(std::collections::HashSet::new()),
+            std::sync::Condvar::new(),
+        )
+    })
+}
+
+/// This thread's right to expand one file; dropping it (stored or not)
+/// wakes the threads that waited for it.
+pub struct Claim(Option<FileKey>);
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        let Some(key) = self.0.take() else {
+            return;
+        };
+        let (set, ready) = in_flight();
+        if let Ok(mut set) = set.lock() {
+            set.remove(&key);
+        }
+        ready.notify_all();
+    }
+}
+
+/// Claim the expansion of this file, or wait while another thread expands
+/// the identical request and return `None` so the caller looks again.
+pub fn claim(filename: &str, code: &str, phase: Phase, budget: &ResourceBudget) -> Option<Claim> {
+    let key = file_key(filename, code, phase, budget);
+    let (set, ready) = in_flight();
+    let Ok(mut running) = set.lock() else {
+        return Some(Claim(None));
+    };
+    if running.insert(key.clone()) {
+        return Some(Claim(Some(key)));
+    }
+    while running.contains(&key) {
+        running = match ready.wait(running) {
+            Ok(running) => running,
+            Err(_) => return Some(Claim(None)),
+        };
+    }
+    None
+}
+
 /// A memoized expansion of this file, if every module it read is unchanged.
 pub fn lookup_file(
     filename: &str,
@@ -228,5 +281,30 @@ mod tests {
         );
         assert_eq!(*first, sweetener_reader::read_syntax(text));
         assert!(take_probes().is_empty());
+    }
+
+    /// A second request for a file being expanded waits for the first and
+    /// then looks again, instead of expanding it twice.
+    #[test]
+    fn an_identical_request_waits_for_the_running_expansion() {
+        let budget = ResourceBudget::default();
+        let code = "const claimed = 1;\n";
+        let first = claim("claim.sts", code, Phase::Check, &budget).expect("free");
+        let waiter = std::thread::spawn(move || {
+            let budget = ResourceBudget::default();
+            let started = std::time::Instant::now();
+            let second = claim("claim.sts", code, Phase::Check, &budget);
+            (second.is_none(), started.elapsed())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(first);
+        let (waited_then_looked_again, elapsed) = waiter.join().unwrap();
+        assert!(waited_then_looked_again);
+        assert!(
+            elapsed >= std::time::Duration::from_millis(90),
+            "{elapsed:?}"
+        );
+        // Nothing is running now: the next caller gets the claim.
+        assert!(claim("claim.sts", code, Phase::Check, &budget).is_some());
     }
 }
