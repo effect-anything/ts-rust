@@ -282,11 +282,14 @@ impl<'a> Reader<'a> {
                 raw: if doubled { "$$" } else { "$" }.to_owned(),
             };
         }
-        if is_ident_start(ch) {
-            self.index += 1;
-            while self.index < self.bytes.len() && is_ident_continue(self.bytes[self.index] as char)
-            {
-                self.index += 1;
+        let wide = self.source[start..].chars().next().unwrap_or(ch);
+        if is_ident_start(ch) || is_unicode_ident(wide) {
+            self.index += wide.len_utf8();
+            while let Some(next) = self.source[self.index..].chars().next() {
+                if !(is_ident_continue(next) || is_unicode_ident(next)) {
+                    break;
+                }
+                self.index += next.len_utf8();
             }
             return Syntax::Token {
                 span: span(start, self.index),
@@ -322,7 +325,7 @@ impl<'a> Reader<'a> {
                 raw: self.source[start..self.index].to_owned(),
             };
         }
-        self.index += 1;
+        self.index += wide.len_utf8();
         // Multi-character operator spellings Sweetener macros import.
         // Comparisons stay single characters so `$left:expr` can include them.
         let spelling = match ch {
@@ -502,6 +505,12 @@ fn u32_at(offset: usize) -> u32 {
 fn is_ident_start(ch: char) -> bool {
     // `$` starts a metavariable, not an identifier. `$name` is `$` then `name`.
     ch == '_' || ch.is_ascii_alphabetic()
+}
+
+/// JavaScript identifiers may use any Unicode letter or digit. Reading one
+/// byte at a time would split a character and slice inside it.
+fn is_unicode_ident(ch: char) -> bool {
+    !ch.is_ascii() && (ch.is_alphanumeric() || ch == '\u{200c}' || ch == '\u{200d}')
 }
 
 fn is_ident_continue(ch: char) -> bool {

@@ -1863,3 +1863,16 @@ const a = <ul>{when (x)}<li>a <b>c</b></li>{else}<br/>{end}{when (y)} <i/> {end}
         out.code
     );
 }
+
+#[test]
+fn unicode_identifiers_expand() {
+    let code = "export syntax pair:expr {\n  rule { pair($a:expr, $b:expr) } => { [$b, $a] }\n}\nconst ünï = 1, 名前 = 2;\nconst a = pair(ünï, 名前);\n";
+    let out = expand(ExpandRequest {
+        filename: "u.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(out.code.contains("[名前, ünï]"), "{}", out.code);
+    check_map(code, &out).unwrap();
+}

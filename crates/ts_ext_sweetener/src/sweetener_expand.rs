@@ -77,8 +77,29 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
             .ok()
             .map(|handle| handle.join())
     })
-    .and_then(Result::ok)
-    .unwrap_or_else(|| crate::unchanged(code))
+    .map_or_else(
+        || crate::unchanged(code),
+        |joined| joined.unwrap_or_else(|panic| internal_error(code, panic.as_ref())),
+    )
+}
+
+/// An expander bug must not pass the file through silently: the author
+/// would see their macros vanish with no reason. Keep the text and say so.
+fn internal_error(code: &str, panic: &(dyn std::any::Any + Send)) -> Expansion {
+    let detail = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("unknown panic");
+    let mut out = crate::unchanged(code);
+    out.diagnostics.push(crate::Diagnostic {
+        message: format!("Sweetener expansion failed with an internal error: {detail}"),
+        start: 0,
+        end: 0,
+        severity: crate::Severity::Error,
+        related: Vec::new(),
+    });
+    out
 }
 
 fn expand_here(request: ExpandRequest<'_>) -> Expansion {
