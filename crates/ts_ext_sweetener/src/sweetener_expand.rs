@@ -53,8 +53,8 @@ use crate::{Diagnostic, ExpandRequest, Expansion, Segment, SegmentKind};
 use super::sweetener_reader::{self, Delimiter, Span, Syntax};
 
 /// Expand `request` from the reader tree. A macro the reader can see but
-/// cannot expand is a Sweetener diagnostic at the failure token. A failed
-/// expansion prints no TypeScript for that file.
+/// cannot expand is a Sweetener diagnostic at the failure token. That item
+/// is left as written; the rest of the file still expands.
 #[must_use]
 pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     let source = request.code;
@@ -96,17 +96,9 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     printer.print_nodes(&read.children);
     printer.copy_until(source.len());
     printer.finish_fixture_tails();
-    // A macro or reader error is reported on the author token. The virtual
-    // file is empty, so the TypeScript parser does not also parse the
-    // Sweetener source. Other files are separate expansions.
-    if printer.failed || !printer.diagnostics.is_empty() {
-        return Expansion {
-            code: String::new(),
-            segments: Vec::new(),
-            diagnostics: printer.diagnostics,
-            dependencies: printer.dependencies,
-        };
-    }
+    // A macro the rules refuse, or a delimiter the reader cannot pair, is
+    // reported on the author token. The item that failed is already in
+    // `out` as written (verbatim). Other files are separate expansions.
     Expansion {
         code: printer.out,
         segments: printer.segments,
@@ -146,7 +138,9 @@ struct Printer<'a> {
     last_form_next: usize,
     /// Channel binders this generator must print with a suffix.
     channel_renames: HashMap<String, String>,
-    /// A macro rule rejected this file. The printed text is discarded.
+    /// A macro rule rejected an item. That item stays as written; the rest
+    /// of the file is still expanded. Nested expansion copies this flag up
+    /// so the parent does not treat a refused hole as a successful rewrite.
     failed: bool,
 }
 
@@ -535,7 +529,7 @@ impl<'a> Printer<'a> {
                 .map(node_span)
                 .unwrap_or_else(|| node_span(&nodes[op_at]));
             self.fail_macro_at(&name, &rules, at);
-            return self.skip_failed(nodes, index);
+            return self.skip_failed(nodes, op_at);
         }
         let rules: Vec<Rule> = self
             .macros
@@ -623,7 +617,9 @@ impl<'a> Printer<'a> {
             }
         }
         self.fail_macro(nodes, index, &name, &rules);
-        self.skip_failed(nodes, index)
+        // The left operand is ordinary code. Only the operator's own item
+        // stays as written; a later statement is still expanded.
+        self.skip_failed(nodes, op_at)
     }
 
     /// A prefix form the reader kept as one group: `(-> ...)`, `(->> ...)`.
@@ -1317,8 +1313,7 @@ impl<'a> Printer<'a> {
             return false;
         }
         self.fail_macro(nodes, index, &name, &rules);
-        self.skip_failed(nodes, index);
-        self.last_form_next = nodes.len();
+        self.last_form_next = self.skip_failed(nodes, index);
         true
     }
 
@@ -1397,8 +1392,7 @@ impl<'a> Printer<'a> {
                         self.fail_macro(nodes, index, &name, &rules);
                     }
                 }
-                self.skip_failed(nodes, index);
-                self.last_form_next = nodes.len();
+                self.last_form_next = self.skip_failed(nodes, index);
                 return true;
             }
             return false;
@@ -1672,13 +1666,17 @@ impl<'a> Printer<'a> {
         });
     }
 
-    /// A rejected macro is not printed, and neither is the rest of the file.
+    /// A rejected macro stays as written. Copy this item (through its
+    /// terminator, when it has one) and keep expanding what follows.
     fn skip_failed(&mut self, nodes: &[Syntax], index: usize) -> usize {
         self.failed = true;
         let start = node_start(&nodes[index]);
         self.copy_until(start);
-        self.last_original = self.source.len();
-        nodes.len()
+        let next = failed_item_resume(self.source, nodes, index);
+        if let Some(node) = nodes.get(next.saturating_sub(1)) {
+            self.copy_until(node_end(node));
+        }
+        next
     }
 
     fn copy_until(&mut self, original_end: usize) {
@@ -5513,6 +5511,15 @@ fn take_hole(
                     let end = node_end(&nodes[end_index]);
                     return Some((source[start..end].to_owned(), end, end_index + 1));
                 }
+                // Automatic semicolon insertion, the same question the
+                // enforester asks in `asiAllowed`: a line break in front of
+                // the next token, a `}` that closes the enclosing statement
+                // list, or the end of the file. The statement already read
+                // is whole; the following token is the next item.
+                if end_index > index && statement_asi(source, nodes, end_index) {
+                    let end = node_end(&nodes[end_index - 1]);
+                    return Some((source[start..end].to_owned(), end, end_index));
+                }
                 if is_closed_group(&nodes[end_index], Delimiter::Brace) {
                     let mut after = end_index + 1;
                     skip_comments(nodes, &mut after);
@@ -5528,6 +5535,11 @@ fn take_hole(
                 if end_index - index > 80 {
                     break;
                 }
+            }
+            // The file ended with no semicolon. That is a terminator.
+            if end_index > index && end_index >= nodes.len() {
+                let end = node_end(&nodes[end_index - 1]);
+                return Some((source[start..end].to_owned(), end, end_index));
             }
             None
         }
@@ -5550,6 +5562,108 @@ fn take_hole(
             // slice stops at a comma, semicolon, or a closer the pattern owns.
             take_expr(source, nodes, index)
         }
+    }
+}
+
+/// Whether a statement already begun may end at `index` by automatic
+/// semicolon insertion.
+///
+/// The enforester's `asiAllowed` is true at the end of the cursor or when a
+/// line break stands in front of the next token. A `}` closes the statement
+/// list that holds this statement, so it is a terminator too: the group is
+/// the next pattern token, not part of the statement.
+fn statement_asi(source: &str, nodes: &[Syntax], index: usize) -> bool {
+    let Some(node) = nodes.get(index) else {
+        return true;
+    };
+    if is_closed_group(node, Delimiter::Brace) || operator_is(Some(node), "}") {
+        return true;
+    }
+    if operator_is(Some(node), ";") {
+        return false;
+    }
+    let Some(previous) = nodes.get(index - 1) else {
+        return false;
+    };
+    // A line break in front of the next token. The reader drops whitespace,
+    // so the break is the source between the two spans.
+    source
+        .get(node_end(previous)..node_start(node))
+        .is_some_and(|between| between.contains('\n'))
+}
+
+/// Where printing resumes after an item that no rule accepted.
+///
+/// Upstream recovery keeps the unread run through its `;`, or through the
+/// line break in front of the next statement, and then keeps expanding.
+/// Stopping at the macro's own head left the rest of that statement to be
+/// matched again.
+fn failed_item_resume(source: &str, nodes: &[Syntax], index: usize) -> usize {
+    let mut end = index + 1;
+    while end < nodes.len() {
+        // A group is one node of this list. Its interior is not walked
+        // here, so a `;` inside it does not end the item.
+        if operator_is(Some(&nodes[end]), ";") {
+            return end + 1;
+        }
+        // The next statement begins here. The failed item stops in front
+        // of it, semicolon or not.
+        if statement_asi(source, nodes, end) && statement_boundary(nodes, end) {
+            return end;
+        }
+        end += 1;
+        if end - index > 80 {
+            break;
+        }
+    }
+    end.min(nodes.len())
+}
+
+/// A token that can begin the statement after an unterminated item.
+///
+/// Same words as the enforester's `statementStarts`, plus a brace group,
+/// which is itself a statement.
+fn statement_boundary(nodes: &[Syntax], index: usize) -> bool {
+    match nodes.get(index) {
+        Some(Syntax::Group {
+            delimiter: Delimiter::Brace,
+            ..
+        }) => true,
+        Some(Syntax::Token { raw, .. }) => matches!(
+            raw.as_str(),
+            "abstract"
+                | "await"
+                | "break"
+                | "class"
+                | "const"
+                | "continue"
+                | "debugger"
+                | "declare"
+                | "do"
+                | "enum"
+                | "export"
+                | "for"
+                | "function"
+                | "if"
+                | "import"
+                | "interface"
+                | "let"
+                | "module"
+                | "namespace"
+                | "operator"
+                | "rec"
+                | "return"
+                | "switch"
+                | "syntax"
+                | "throw"
+                | "try"
+                | "type"
+                | "var"
+                | "using"
+                | "while"
+                | "with"
+        ),
+        _ => false,
     }
 }
 

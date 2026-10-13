@@ -133,7 +133,8 @@ impl<'a> Reader<'a> {
                 continue;
             }
             if let Some(delimiter) = Delimiter::from_open(ch) {
-                children.push(self.read_group(delimiter));
+                let group = self.read_group(delimiter);
+                children.push(group);
                 continue;
             }
             children.push(self.read_atom());
@@ -144,7 +145,7 @@ impl<'a> Reader<'a> {
     fn read_group(&mut self, delimiter: Delimiter) -> Syntax {
         let open_at = self.index;
         self.index += 1;
-        let children = self.read_until(Some(delimiter));
+        let mut children = self.read_until(Some(delimiter));
         let close = if self.index < self.bytes.len()
             && self.bytes[self.index] as char == delimiter.close()
         {
@@ -162,7 +163,42 @@ impl<'a> Reader<'a> {
             });
             None
         };
-        let end = close.map_or(self.index, |close| close.end as usize);
+        // A missing closer used to own every token through the end of the
+        // file. Upstream closes the open frame and keeps reading, so a
+        // statement on the next line is still its own item. The line break
+        // in front of a later child is that boundary.
+        let mut end = close.map_or(self.index, |close| close.end as usize);
+        if close.is_none() {
+            let mut prev_end = open_at + 1;
+            let mut split_at = None;
+            for (at, child) in children.iter().enumerate() {
+                let start = node_span_start(child);
+                if self
+                    .source
+                    .get(prev_end..start)
+                    .is_some_and(|gap| gap.contains('\n'))
+                {
+                    split_at = Some((at, prev_end, start));
+                    break;
+                }
+                prev_end = node_span_end(child);
+            }
+            if let Some((at, prev_end, start)) = split_at {
+                children.truncate(at);
+                // The break belongs to the next statement. Ending the group
+                // on the following line made that statement look like it
+                // continued this one.
+                end = prev_end;
+                let _ = start;
+                self.index = self.source[prev_end..]
+                    .find('\n')
+                    .map_or(prev_end, |rel| prev_end + rel + 1);
+            } else if let Some(last) = children.last() {
+                end = node_span_end(last);
+            } else {
+                end = open_at + 1;
+            }
+        }
         Syntax::Group {
             delimiter,
             span: span(open_at, end),
@@ -339,6 +375,24 @@ impl<'a> Reader<'a> {
 
     fn peek_at(&self, at: usize, offset: usize) -> Option<char> {
         self.bytes.get(at + offset).map(|byte| *byte as char)
+    }
+}
+
+fn node_span_start(node: &Syntax) -> usize {
+    node_span_of(node).start as usize
+}
+
+fn node_span_end(node: &Syntax) -> usize {
+    node_span_of(node).end as usize
+}
+
+fn node_span_of(node: &Syntax) -> Span {
+    match node {
+        Syntax::Token { span, .. }
+        | Syntax::Comment { span, .. }
+        | Syntax::String { span, .. }
+        | Syntax::Operator { span, .. }
+        | Syntax::Group { span, .. } => *span,
     }
 }
 

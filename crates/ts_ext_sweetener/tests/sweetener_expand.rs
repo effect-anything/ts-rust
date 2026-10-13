@@ -136,9 +136,9 @@ fn case_matches_theirs(rel: &str) {
     );
 }
 
-/// A malformed program is one case. Expansion refuses it: empty virtual
-/// text, and a diagnostic whose message contains the expected reason.
-/// The span is the author token, not the whole file.
+/// A malformed program is one case. The item that failed stays as written
+/// and a diagnostic names the expected reason. The span is the author
+/// token, not the whole file. Other items in the file still expand.
 #[test]
 fn malformed_cases_are_refused() {
     let root = format!("{}/cases", env!("CARGO_MANIFEST_DIR"));
@@ -164,9 +164,15 @@ fn malformed_cases_are_refused() {
         });
         let name = dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
         assert!(
-            expansion.code.is_empty(),
-            "{name} still produced TypeScript:\n{}",
-            expansion.code
+            !expansion.code.is_empty(),
+            "{name} produced no TypeScript for the items it could read"
+        );
+        assert!(
+            expansion.segments.iter().any(|segment| {
+                segment.kind == ts_ext_sweetener::SegmentKind::Verbatim
+                    && segment.virtual_end > segment.virtual_start
+            }),
+            "{name} kept no verbatim segment for the item it could not read"
         );
         assert!(
             !expansion.diagnostics.is_empty(),
@@ -256,7 +262,12 @@ keep function only() { }\n";
         phase: Phase::Check,
     });
     assert!(
-        once_out.code.is_empty(),
+        once_out.code.contains("keep function only()"),
+        "a refused `keep` was not left as written:\n{}",
+        once_out.code
+    );
+    assert!(
+        !once_out.code.contains("const only = 1"),
         "one `function` satisfied a pattern that writes it twice:\n{}",
         once_out.code
     );
@@ -290,6 +301,121 @@ keep function both() { function }\n";
         twice_out.code.contains("const both = 1"),
         "a pattern with two `function` literals did not match:\n{}",
         twice_out.code
+    );
+}
+
+/// `:stmt` ends where the enforester inserts a semicolon: a line break, a
+/// `}` that closes the statement list, or the end of the file. `go()` has
+/// none of those written as `;`, and it is still the body.
+#[test]
+fn statement_body_ends_by_automatic_semicolon() {
+    let macros = "\
+export syntax unless:stmt {\n\
+  rule { unless ($condition:expr) { $($body:stmt)* } } => {\n\
+    if (!($condition)) { $($body)* }\n\
+  }\n\
+}\n";
+    let cases = [
+        ("file end", "unless(ok){go()}\n"),
+        ("before brace", "function f() { unless(ok){go()} }\n"),
+        ("line break", "unless(ok){\ngo()\n}\n"),
+    ];
+    for (label, code) in cases {
+        let expansion = expand(ExpandRequest {
+            filename: "main.sts",
+            code: &format!("{macros}{code}"),
+            phase: Phase::Check,
+        });
+        assert!(
+            expansion.diagnostics.is_empty(),
+            "{label}: {:?}",
+            expansion.diagnostics
+        );
+        assert!(
+            expansion.code.contains("if (!(ok))"),
+            "{label} did not expand the statement body:\n{}",
+            expansion.code
+        );
+        assert!(
+            expansion.code.contains("go()"),
+            "{label} dropped the statement body:\n{}",
+            expansion.code
+        );
+    }
+}
+
+/// One macro no rule accepts is left as written. A later macro in the same
+/// file still expands, and the kept text is a verbatim segment.
+#[test]
+fn one_failed_macro_does_not_drop_the_rest_of_the_file() {
+    let code = "\
+export syntax unless:stmt {\n\
+  rule { unless ($condition:expr) { $($body:stmt)* } } => {\n\
+    if (!($condition)) { $($body)* }\n\
+  }\n\
+}\n\
+export syntax twice:expr {\n\
+  rule { twice($value:expr) } => { [$value, $value] }\n\
+}\n\
+unless (not a call;\n\
+const n = twice(1);\n";
+    let expansion = expand(ExpandRequest {
+        filename: "mixed.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(
+        expansion
+            .diagnostics
+            .iter()
+            .any(|item| item.message.contains("macro unless")),
+        "missing unless diagnostic: {:?}",
+        expansion.diagnostics
+    );
+    assert!(
+        expansion.code.contains("[1, 1]"),
+        "twice was not expanded:\n{}",
+        expansion.code
+    );
+    assert!(
+        expansion.code.contains("unless"),
+        "the failed unless was erased:\n{}",
+        expansion.code
+    );
+    assert!(
+        expansion
+            .segments
+            .iter()
+            .any(|segment| segment.kind == ts_ext_sweetener::SegmentKind::Verbatim),
+        "no verbatim segment for the kept item"
+    );
+}
+
+/// An unmatched delimiter is a reader diagnostic. The file is still printed.
+#[test]
+fn reader_error_still_prints_the_file() {
+    let code = "function f( {\nconst n = 1;\n";
+    let expansion = expand(ExpandRequest {
+        filename: "reader.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(
+        expansion
+            .diagnostics
+            .iter()
+            .any(|item| item.message.contains("SWR1003")),
+        "missing reader diagnostic: {:?}",
+        expansion.diagnostics
+    );
+    assert!(
+        !expansion.code.is_empty(),
+        "reader error discarded the file"
+    );
+    assert!(
+        expansion.code.contains("const n = 1"),
+        "text after the unmatched delimiter was dropped:\n{}",
+        expansion.code
     );
 }
 
