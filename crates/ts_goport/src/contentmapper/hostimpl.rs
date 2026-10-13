@@ -772,6 +772,52 @@ pub struct Diagnostic {
     // PORT: ts-rust extension. Optional TypeScript `DiagnosticCategory`
     // (0 warning, 1 error, 2 suggestion, 3 message); absent means error, as in Go.
     pub category: Option<i32>,
+    // PORT: ts-rust extension. `relatedInformation`: secondary locations in
+    // the original content (a macro use, the rule that came closest).
+    pub related_information: Vec<RelatedInformation>,
+}
+
+// PORT: ts-rust extension. One `relatedInformation` entry of a mapper
+// diagnostic, in original-source coordinates.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RelatedInformation {
+    pub message_text: String,
+    pub start: i32,
+    pub length: i32,
+}
+
+impl MarshalerTo for RelatedInformation {
+    fn marshal_json_to(&self, enc: &mut String) -> std::result::Result<(), JsonError> {
+        let first = &mut true;
+        write_object_start(enc);
+        marshal_field(enc, first, "messageText", &self.message_text)?;
+        marshal_field(enc, first, "start", &self.start)?;
+        marshal_field(enc, first, "length", &self.length)?;
+        write_object_end(enc);
+        Ok(())
+    }
+}
+
+impl UnmarshalerFrom for RelatedInformation {
+    fn unmarshal_json_from(
+        &mut self,
+        dec: &mut JsonDecoder<'_>,
+    ) -> std::result::Result<(), JsonError> {
+        let is_object =
+            unmarshal_struct_fields(dec, "contentmapper.RelatedInformation", |name, dec| {
+                match name {
+                    "messageText" => json_unmarshal_decode(dec, &mut self.message_text)?,
+                    "start" => json_unmarshal_decode(dec, &mut self.start)?,
+                    "length" => json_unmarshal_decode(dec, &mut self.length)?,
+                    _ => return Ok(false),
+                }
+                Ok(true)
+            })?;
+        if !is_object {
+            *self = RelatedInformation::default();
+        }
+        Ok(())
+    }
 }
 
 impl MarshalerTo for Diagnostic {
@@ -785,6 +831,7 @@ impl MarshalerTo for Diagnostic {
         if let Some(category) = &self.category {
             marshal_field(enc, first, "category", category)?;
         }
+        marshal_field_omitempty(enc, first, "relatedInformation", &self.related_information)?;
         write_object_end(enc);
         Ok(())
     }
@@ -806,6 +853,7 @@ impl UnmarshalerFrom for Diagnostic {
                     json_unmarshal_decode(dec, &mut category)?;
                     self.category = Some(category);
                 }
+                "relatedInformation" => json_unmarshal_decode(dec, &mut self.related_information)?,
                 _ => return Ok(false),
             }
             Ok(true)
@@ -2714,14 +2762,40 @@ fn decode_transform_result(
                     vec![err],
                 )
             })?;
-        result.diagnostics.push(ast::new_external_diagnostic(
+        let mut diagnostic = ast::new_external_diagnostic(
             Node::NIL,
             TextRange::new(start, end),
             diagnostic_source,
             mapper_diagnostic_category(d.category),
             d.code,
             &d.message_text,
-        ));
+        );
+        // PORT: ts-rust extension. Related locations use the same coordinate
+        // space; one that does not map is dropped, not an error.
+        let mut related = Vec::with_capacity(d.related_information.len());
+        for item in &d.related_information {
+            if item.start < 0 || item.length < 0 || item.start > i32::MAX - item.length {
+                continue;
+            }
+            let (Ok(start), Ok(end)) = (
+                original_positions.normalize(item.start),
+                original_positions.normalize(item.start + item.length),
+            ) else {
+                continue;
+            };
+            related.push(ast::new_external_diagnostic(
+                Node::NIL,
+                TextRange::new(start, end),
+                diagnostic_source,
+                crate::diagnostics::Category::Message,
+                d.code,
+                &item.message_text,
+            ));
+        }
+        if !related.is_empty() {
+            diagnostic.set_related_info(related);
+        }
+        result.diagnostics.push(diagnostic);
     }
     Ok(result)
 }
@@ -3059,6 +3133,28 @@ mod tests {
     // (`MapperHandler`), and the thread makes its own connection around it.
     use super::*;
     use crate::gostd::context::background;
+
+    // PORT: ts-rust extension. Mapper diagnostics carry `relatedInformation`.
+    #[test]
+    fn diagnostic_related_information_round_trips() {
+        let input = br#"{"messageText":"m","start":1,"length":2,"code":4001,"category":1,"relatedInformation":[{"messageText":"r","start":5,"length":3}]}"#;
+        let mut diagnostic = Diagnostic::default();
+        crate::frontend::json::json_unmarshal(input, &mut diagnostic, &[]).unwrap();
+        assert_eq!(
+            diagnostic.related_information,
+            vec![RelatedInformation {
+                message_text: "r".to_string(),
+                start: 5,
+                length: 3
+            }]
+        );
+        let mut out = String::new();
+        diagnostic.marshal_json_to(&mut out).unwrap();
+        assert!(
+            out.contains(r#""relatedInformation":[{"messageText":"r","start":5,"length":3}]"#),
+            "{out}"
+        );
+    }
     use crate::ipc::{Protocol as _, ReadWriteCloser as _};
     use std::io::Read;
     use std::net::Shutdown;
@@ -3202,6 +3298,7 @@ mod tests {
                             length: 3.min(length),
                             code: 9999,
                             category: None,
+                            related_information: Vec::new(),
                         }],
                         ..Default::default()
                     })))
@@ -3341,6 +3438,7 @@ mod tests {
                             length: text_length - emoji_length,
                             code: 1001,
                             category: None,
+                            related_information: Vec::new(),
                         }],
                         ..Default::default()
                     })))

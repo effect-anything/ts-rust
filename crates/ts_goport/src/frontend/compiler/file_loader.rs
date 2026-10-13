@@ -4067,6 +4067,7 @@ export const a: T | Dep | number = x + (h as never);
                     length: 1,
                     code: 9001,
                     category: None,
+                    related_information: Vec::new(),
                 });
             }
             if params.content.contains("@supp") {

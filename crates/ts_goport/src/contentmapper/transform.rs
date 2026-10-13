@@ -173,6 +173,18 @@ fn parse_result_with(
         for diagnostic in &result.diagnostics {
             let mut diagnostic = diagnostic.clone();
             diagnostic.set_file(source_file.root);
+            if !diagnostic.related_information().is_empty() {
+                let related = diagnostic
+                    .related_information()
+                    .iter()
+                    .cloned()
+                    .map(|mut item| {
+                        item.set_file(source_file.root);
+                        item
+                    })
+                    .collect();
+                diagnostic.set_related_info(related);
+            }
             diagnostics.push(diagnostic);
         }
         // PORT: Go `sourceFile.SetDiagnostics(...)`. The parsed file keeps its
