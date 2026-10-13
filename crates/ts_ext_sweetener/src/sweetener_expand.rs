@@ -180,7 +180,7 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
 fn capture_texts(captures: &HashMap<String, Capture>) -> Vec<String> {
     fn walk(capture: &Capture, out: &mut Vec<String>) {
         match capture {
-            Capture::Text(text) => out.push(text.clone()),
+            Capture::Text(text, ..) => out.push(text.clone()),
             // A class match is printed through its fields, not as a whole.
             Capture::Record { fields, .. } => {
                 for value in fields.values() {
@@ -218,7 +218,7 @@ fn expand_pass(
     BUDGET.with(|budget| budget.borrow_mut().take());
     super::sweetener_budget::reset();
     INVOKED_OWNERS.with(|set| set.borrow_mut().clear());
-    TRACES.with(|traces| *traces.borrow_mut() = (Vec::new(), Vec::new()));
+    TRACES.with(|traces| traces.borrow_mut().clear());
     if let Err(message) = super::sweetener_budget::charge(
         super::sweetener_budget::Kind::InputTokens,
         super::sweetener_budget::count_tokens(source),
@@ -373,6 +373,8 @@ fn expand_pass(
         last_form_next: 0,
         failed: false,
         file_nodes: &read.children,
+        fine: Vec::new(),
+        pending_pieces: None,
     };
     printer.diagnostics.extend(loaded.diagnostics);
     printer.print_nodes(&read.children);
@@ -407,6 +409,7 @@ fn expand_pass(
     {
         printer.diagnostics.extend(unread);
     }
+    printer.segments = super::sweetener_origins::refine_segments(&printer.segments, &printer.fine);
     let hoisted = super::sweetener_scoped::hoist(
         &printer.out,
         &mut printer.segments,
@@ -419,8 +422,13 @@ fn expand_pass(
     );
     (
         Expansion {
-            origins: super::sweetener_origins::token_origins(&code, source, &printer.segments),
-            traces: TRACES.with(|traces| std::mem::take(&mut traces.borrow_mut().1)),
+            origins: super::sweetener_origins::token_origins(&code, &printer.segments),
+            traces: TRACES.with(|traces| {
+                std::mem::take(&mut *traces.borrow_mut())
+                    .into_iter()
+                    .map(|(trace, _)| trace)
+                    .collect()
+            }),
             code,
             segments: printer.segments,
             diagnostics: printer.diagnostics,
@@ -921,6 +929,12 @@ struct Printer<'a> {
     /// a top-level `for syntax` import, as upstream. Nested imports bind
     /// nothing and stay in the output as written.
     file_nodes: &'a [Syntax],
+    /// Inside expansions this printer emitted: `(virtual start, virtual
+    /// end, source start)` ranges of `out` that copy this printer's source.
+    fine: Vec<(u32, u32, u32)>,
+    /// The copy map of the expansion about to be emitted, relative to its
+    /// text. `emit` takes it.
+    pending_pieces: Option<Vec<Piece>>,
     /// Channel binders this generator must print with a suffix.
     channel_renames: HashMap<String, String>,
     context_rejected: Vec<(Rule, String)>,
@@ -1569,14 +1583,14 @@ impl<'a> Printer<'a> {
                         self.printing_core = true;
                     }
                     self.note_captures(&matched.captures);
-                    note_invoked(&rule, &name, self.depth);
-                    let replacement = instantiate(
-                        self.source,
+                    let mark = note_invoked(&rule, &name, self.depth);
+                    let start = node_span(&nodes[index]).start;
+                    let (mut expanded, mut pieces) = self.expand_mapped(
                         &rule.template,
                         &matched.captures,
-                        &self.classes,
+                        mark,
+                        (start, u32_at(matched.end)),
                     );
-                    let mut expanded = self.expand_replacement(&replacement);
                     self.printing_core = was_core;
                     let mut end = matched.end;
                     let mut next = matched.next;
@@ -1585,44 +1599,59 @@ impl<'a> Printer<'a> {
                     if let Some((folded, chain_end, resume)) =
                         self.fold_left_chain(nodes, next, &name, &expanded)
                     {
+                        // The chain re-expanded this text as an operand;
+                        // its copies are not tracked through that.
                         expanded = folded;
                         end = chain_end;
                         next = resume;
+                        pieces.clear();
                     }
-                    let start = node_span(&nodes[index]).start;
                     self.copy_until(start as usize);
+                    self.pending_pieces = Some(pieces);
                     self.emit(start, u32_at(end), &expanded, SegmentKind::Atom);
                     self.last_original = end;
                     return next;
                 }
             }
             let mut captures = HashMap::new();
-            if infix_rule_binds(&rule.pattern, &name, left, right.trim(), &mut captures) {
+            let left_at = offset_within(self.source, left);
+            let right_at = source_offset_of(self.source, node_end(&nodes[op_at]), right.trim());
+            if infix_rule_binds(
+                &rule.pattern,
+                &name,
+                (left, left_at),
+                (right.trim(), right_at),
+                &mut captures,
+            ) {
                 self.diagnose_unknown(&rule.template, node_span(&nodes[op_at]));
                 let was_core = self.printing_core;
                 if template_is_core(&rule.template) {
                     self.printing_core = true;
                 }
                 self.note_captures(&captures);
-                note_invoked(&rule, &name, self.depth);
-                let mut replacement =
-                    instantiate(self.source, &rule.template, &captures, &self.classes);
+                let mark = note_invoked(&rule, &name, self.depth);
+                let start = node_span(&nodes[index]).start;
+                let (mut replacement, _, mut pieces) =
+                    instantiate_marked(self.source, &rule.template, &captures, &self.classes);
                 // The rule's trailing `;` is the statement terminator. Emit it
                 // once. `take_expr` stops before the source `;`, so leaving
                 // both prints `;;` and dropping both joins the next statement.
                 if pattern_ends_with_semi(&rule.pattern) {
-                    replacement = replacement
+                    let mut trimmed = replacement
                         .trim_end()
                         .trim_end_matches(';')
                         .trim_end()
                         .to_owned();
                     if operator_is(nodes.get(next), ";") {
-                        replacement.push(';');
+                        trimmed.push(';');
                     }
+                    pieces = super::sweetener_origins::carry(&replacement, &trimmed, &pieces);
+                    replacement = trimmed;
                 }
-                let mut expanded = self.expand_replacement(&replacement);
+                let (mut expanded, inner) = self.expand_replacement_mapped(&replacement);
+                self.lift_traces(mark, &pieces, start, u32_at(right_end));
+                let mut expanded_pieces = super::sweetener_origins::compose(&inner, &pieces);
                 self.printing_core = was_core;
-                let start = node_span(&nodes[index]).start;
                 self.copy_until(start as usize);
                 let (mut emit_end, mut resume) =
                     if pattern_ends_with_semi(&rule.pattern) && operator_is(nodes.get(next), ";") {
@@ -1639,7 +1668,9 @@ impl<'a> Printer<'a> {
                     expanded = folded;
                     emit_end = chain_end;
                     resume = chain_next;
+                    expanded_pieces.clear();
                 }
+                self.pending_pieces = Some(expanded_pieces);
                 self.emit(start, u32_at(emit_end), &expanded, SegmentKind::Atom);
                 self.last_original = emit_end;
                 return resume;
@@ -1677,7 +1708,8 @@ impl<'a> Printer<'a> {
                 continue;
             }
             let mut captures = HashMap::new();
-            captures.insert(hole.clone(), Capture::Text(left.clone()));
+            let left_at = source_offset_of(self.source, node_start(&nodes[index]), &left);
+            captures.insert(hole.clone(), Capture::Text(left.clone(), left_at));
             if !refine_accepts(&rule.refines, &captures) {
                 continue;
             }
@@ -1687,13 +1719,14 @@ impl<'a> Printer<'a> {
                 self.printing_core = true;
             }
             self.note_captures(&captures);
-            note_invoked(&rule, &name, self.depth);
-            let replacement = instantiate(self.source, &rule.template, &captures, &self.classes);
-            let expanded = self.expand_replacement(&replacement);
-            self.printing_core = was_core;
+            let mark = note_invoked(&rule, &name, self.depth);
             let start = node_span(&nodes[index]).start;
             let end = node_end(&nodes[op_at]);
+            let (expanded, pieces) =
+                self.expand_mapped(&rule.template, &captures, mark, (start, u32_at(end)));
+            self.printing_core = was_core;
             self.copy_until(start as usize);
+            self.pending_pieces = Some(pieces);
             self.emit(start, u32_at(end), &expanded, SegmentKind::Atom);
             self.last_original = end;
             return op_at + 1;
@@ -1762,14 +1795,13 @@ impl<'a> Printer<'a> {
                     self.printing_core = true;
                 }
                 self.note_captures(&matched.captures);
-                note_invoked(&rule, &name, self.depth);
-                let replacement = instantiate(
-                    self.source,
+                let mark = note_invoked(&rule, &name, self.depth);
+                let (expanded, pieces) = self.expand_mapped(
                     &rule.template,
                     &matched.captures,
-                    &self.classes,
+                    mark,
+                    (span.start, span.end),
                 );
-                let expanded = self.expand_replacement(&replacement);
                 self.printing_core = was_core;
                 if self.failed {
                     return self.skip_failed(nodes, index);
@@ -1778,11 +1810,14 @@ impl<'a> Printer<'a> {
                 // and keeps a trailing comma. Shape comparison keeps that comma.
                 // Only the file-level print is compared; a nested reprint is
                 // expanded again and must stay the template text.
-                let expanded = if self.depth == 0 {
-                    trailing_thread_commas(&expanded)
+                let (expanded, pieces) = if self.depth == 0 {
+                    let commas = trailing_thread_commas(&expanded);
+                    let pieces = super::sweetener_origins::carry(&expanded, &commas, &pieces);
+                    (commas, pieces)
                 } else {
-                    expanded
+                    (expanded, pieces)
                 };
+                self.pending_pieces = Some(pieces);
                 self.emit(span.start, span.end, &expanded, SegmentKind::Atom);
                 self.last_original = span.end as usize;
                 return index + 1;
@@ -1878,8 +1913,9 @@ impl<'a> Printer<'a> {
                 ) {
                     note_budget(message);
                 }
-                note_invoked(&rule, &name, self.depth);
-                let (mut replacement, protected) = instantiate_marked(
+                let trace_mark = note_invoked(&rule, &name, self.depth);
+                let mut expanded_pieces: Vec<Piece>;
+                let (mut replacement, protected, mut pieces) = instantiate_marked(
                     self.source,
                     &rule.template,
                     &matched.captures,
@@ -1906,10 +1942,14 @@ impl<'a> Printer<'a> {
                 let plan = self.hygiene_plan(&introduced);
                 if let Some(plan) = &plan {
                     let (shielded, originals) = shield_captures(&replacement, &protected);
-                    replacement = unshield(&apply_plan(&shielded, plan), &originals);
+                    let renamed = unshield(&apply_plan(&shielded, plan), &originals);
+                    pieces = super::sweetener_origins::carry(&replacement, &renamed, &pieces);
+                    replacement = renamed;
                 }
-                replacement =
+                let stripped =
                     strip_already_printed(self.source, head_span.start as usize, &replacement);
+                pieces = super::sweetener_origins::carry(&replacement, &stripped, &pieces);
+                replacement = stripped;
                 // `#core` is ordinary TypeScript. Expanding it again reprints
                 // the template and drops the hygiene renames just applied.
                 // `#core(function ...)` is ordinary TypeScript, including
@@ -1923,21 +1963,33 @@ impl<'a> Printer<'a> {
                     // the hole again walks the same template without the
                     // repetition's row scope and prints empty fields.
                     if name == "record" {
+                        expanded_pieces = pieces.clone();
                         replacement
                     } else {
                         // `expand_core` renders the template again, so the
                         // plan applied above is gone. Apply it to the text
                         // that is actually printed.
-                        let rendered = self.expand_core(&rule.template, &matched.captures);
-                        let rendered =
+                        let (rendered, core_pieces) =
+                            self.expand_core(&rule.template, &matched.captures);
+                        let stripped =
                             strip_already_printed(self.source, head_span.start as usize, &rendered);
-                        match &plan {
-                            Some(plan) => apply_plan(&rendered, plan),
-                            None => rendered,
-                        }
+                        let core_pieces =
+                            super::sweetener_origins::carry(&rendered, &stripped, &core_pieces);
+                        let planned = match &plan {
+                            Some(plan) => apply_plan(&stripped, plan),
+                            None => stripped.clone(),
+                        };
+                        expanded_pieces =
+                            super::sweetener_origins::carry(&stripped, &planned, &core_pieces);
+                        planned
                     }
                 } else {
-                    self.expand_replacement(&replacement)
+                    // The expansion's own copy map, composed with where the
+                    // replacement's captures are in this printer's source.
+                    let (expanded, inner) = self.expand_replacement_mapped(&replacement);
+                    self.lift_traces(trace_mark, &pieces, head_span.start, u32_at(matched.end));
+                    expanded_pieces = super::sweetener_origins::compose(&inner, &pieces);
+                    expanded
                 };
                 // `$self` is a capture, so the plan above does not rename it.
                 // An outer `const self` still requires `self_1` in this method.
@@ -1952,7 +2004,9 @@ impl<'a> Printer<'a> {
                         .any(|macro_| macro_.name == name && macro_.category == "stmt")
                 {
                     expanded = ";".to_owned();
+                    expanded_pieces.clear();
                 }
+                self.pending_pieces = Some(expanded_pieces);
                 self.emit(
                     head_span.start,
                     u32_at(matched.end),
@@ -2041,6 +2095,8 @@ impl<'a> Printer<'a> {
             last_contexts: self.last_contexts,
             failed: false,
             file_nodes: self.file_nodes,
+            fine: Vec::new(),
+            pending_pieces: None,
         };
         nested.print_nodes(&read.children);
         nested.copy_until(owned.len());
@@ -2149,10 +2205,17 @@ impl<'a> Printer<'a> {
     /// `#core(...)` prints as TypeScript, but a hole inside it may still
     /// be a macro. Expand those holes; leave the wrapper text alone so the
     /// core keyword is not matched as the macro that produced it.
-    fn expand_core(&mut self, template: &[Tpl], captures: &HashMap<String, Capture>) -> String {
+    fn expand_core(
+        &mut self,
+        template: &[Tpl],
+        captures: &HashMap<String, Capture>,
+    ) -> (String, Vec<Piece>) {
         let mut out = String::new();
-        self.render_core(&mut out, template, captures);
-        out.trim().to_owned()
+        let mut pieces = Vec::new();
+        self.render_core(&mut out, template, captures, &mut pieces);
+        let trimmed = out.trim().to_owned();
+        let pieces = super::sweetener_origins::carry(&out, &trimmed, &pieces);
+        (trimmed, pieces)
     }
 
     fn render_core(
@@ -2160,6 +2223,7 @@ impl<'a> Printer<'a> {
         out: &mut String,
         template: &[Tpl],
         captures: &HashMap<String, Capture>,
+        pieces: &mut Vec<Piece>,
     ) {
         let mut at = 0;
         // The words before the first hole are the core form itself
@@ -2172,9 +2236,9 @@ impl<'a> Printer<'a> {
                 leading = false;
             }
             match part {
-                Tpl::Core(inner) => self.render_core(out, inner, captures),
+                Tpl::Core(inner) => self.render_core(out, inner, captures, pieces),
                 Tpl::Rep { inner, sep } => {
-                    self.render_core_rep(out, inner, sep.as_deref(), captures)
+                    self.render_core_rep(out, inner, sep.as_deref(), captures, pieces)
                 }
                 Tpl::Text(text) => {
                     // `gen $body;` inside `#core(...)`: the core form is the
@@ -2185,6 +2249,7 @@ impl<'a> Printer<'a> {
                     if let Some(head_at) = self.trailing_macro_head(text).filter(|_| !leading) {
                         out.push_str(&text[..head_at]);
                         let mut use_text = text[head_at..].to_owned();
+                        let mut use_protected: Vec<Prot> = Vec::new();
                         let mut rest = String::new();
                         while at < template.len() {
                             if let Tpl::Text(next) = &template[at] {
@@ -2195,20 +2260,25 @@ impl<'a> Printer<'a> {
                                     break;
                                 }
                             }
-                            let mut protected = Vec::new();
                             render(
                                 &mut use_text,
                                 std::slice::from_ref(&template[at]),
                                 captures,
                                 &self.classes,
-                                &mut protected,
+                                &mut use_protected,
                             );
                             at += 1;
                         }
                         let was = self.printing_core;
                         self.printing_core = false;
-                        let expanded = self.expand_replacement(&use_text);
+                        let (expanded, inner) = self.expand_replacement_mapped(&use_text);
                         self.printing_core = was;
+                        let own = prot_pieces(&use_text, &use_protected);
+                        push_pieces(
+                            pieces,
+                            out.len(),
+                            &super::sweetener_origins::compose(&inner, &own),
+                        );
                         out.push_str(&expanded);
                         out.push_str(&rest);
                     } else {
@@ -2216,20 +2286,33 @@ impl<'a> Printer<'a> {
                     }
                 }
                 Tpl::Var(name) => {
-                    let pieces = capture_pieces(captures, name);
-                    for text in pieces {
+                    let texts: Vec<(String, Option<u32>)> = capture_pieces_ref(captures, name)
+                        .into_iter()
+                        .map(|text| {
+                            let at = text_origin(captures, text).map(|(at, _)| at);
+                            (text.to_owned(), at)
+                        })
+                        .collect();
+                    for (text, at) in texts {
                         if text.is_empty() {
                             continue;
                         }
-                        let expanded = if self.replacement_needs_expand(&text) {
+                        let own: Vec<Piece> =
+                            at.map(|at| (0, text.len(), at)).into_iter().collect();
+                        let (expanded, inner) = if self.replacement_needs_expand(&text) {
                             let was = self.printing_core;
                             self.printing_core = false;
-                            let expanded = self.expand_replacement(&text);
+                            let expanded = self.expand_replacement_mapped(&text);
                             self.printing_core = was;
                             expanded
                         } else {
-                            text
+                            (text.clone(), vec![(0, text.len(), 0)])
                         };
+                        push_pieces(
+                            pieces,
+                            out.len(),
+                            &super::sweetener_origins::compose(&inner, &own),
+                        );
                         out.push_str(&expanded);
                     }
                 }
@@ -2243,6 +2326,7 @@ impl<'a> Printer<'a> {
                         &self.classes,
                         &mut protected,
                     );
+                    push_pieces(pieces, out.len(), &prot_pieces(&piece, &protected));
                     out.push_str(&piece);
                 }
             }
@@ -2260,6 +2344,7 @@ impl<'a> Printer<'a> {
         inner: &[Tpl],
         sep: Option<&str>,
         captures: &HashMap<String, Capture>,
+        pieces: &mut Vec<Piece>,
     ) {
         let inferred = sep.is_none();
         let (inner, sep) = rep_layout(inner, sep);
@@ -2267,25 +2352,33 @@ impl<'a> Printer<'a> {
         for (index, row) in rows.iter().enumerate() {
             push_row_sep(out, index, row, inferred, sep.as_deref());
             let scoped = with_rep_index(rep_row_scope(captures, &path, row), index);
-            self.render_core(out, &inner, &scoped);
+            self.render_core(out, &inner, &scoped, pieces);
         }
     }
 
     /// Expand the macros a rendered template still contains, then give
     /// each `#parameterize` region its parameter, innermost first.
     fn expand_replacement(&mut self, replacement: &str) -> String {
-        let expanded = self.expand_replacement_macros(replacement);
+        self.expand_replacement_mapped(replacement).0
+    }
+
+    /// The replacement with the macros in it expanded, and the ranges of
+    /// the result that copy `replacement`.
+    fn expand_replacement_mapped(&mut self, replacement: &str) -> (String, Vec<Piece>) {
+        let (expanded, pieces) = self.expand_replacement_macros(replacement);
         if !expanded.contains("__swp") {
-            return expanded;
+            return (expanded, pieces);
         }
         let (resolved, unused) = super::sweetener_scoped::resolve_parameters(&expanded);
         super::sweetener_scoped::note_unused(unused);
-        resolved
+        let pieces = super::sweetener_origins::carry(&expanded, &resolved, &pieces);
+        (resolved, pieces)
     }
 
-    fn expand_replacement_macros(&mut self, replacement: &str) -> String {
+    fn expand_replacement_macros(&mut self, replacement: &str) -> (String, Vec<Piece>) {
+        let same = || (replacement.to_owned(), vec![(0, replacement.len(), 0)]);
         if !self.replacement_needs_expand(replacement) {
-            return replacement.to_owned();
+            return same();
         }
         let owned = replacement.to_owned();
         let read = sweetener_reader::read_syntax(&owned);
@@ -2293,7 +2386,7 @@ impl<'a> Printer<'a> {
         // a macro name, and does not place it where a form or call starts,
         // is already TypeScript. Do not parse it into another printer.
         if !self.tree_needs_walk(&read.children) {
-            return owned;
+            return same();
         }
         // Budgets: a replacement that is already being expanded further up
         // is a cycle (SWR4014); nesting past the depth bound is SWR4015.
@@ -2304,16 +2397,16 @@ impl<'a> Printer<'a> {
             note_budget(format!(
                 "SWR4014: Macro {name} expanded to itself and would not terminate. A rule has to reduce its input, so one of them must match without reaching this macro again."
             ));
-            return owned;
+            return same();
         }
         if super::sweetener_budget::exhausted() {
-            return owned;
+            return same();
         }
         if u64::from(self.depth) >= super::sweetener_budget::max_nesting_depth() {
             note_budget(format!(
                 "SWR4015: Expanding {name} reached the nesting-depth limit. No further macros in it were expanded."
             ));
-            return owned;
+            return same();
         }
         ACTIVE_EXPANSIONS.with(|active| active.borrow_mut().push(fingerprint));
         let expanded = self.expand_nested_replacement(&owned, &read);
@@ -2341,7 +2434,7 @@ impl<'a> Printer<'a> {
         &mut self,
         owned: &str,
         read: &sweetener_reader::ReadSyntax,
-    ) -> String {
+    ) -> (String, Vec<Piece>) {
         let mut nested = Printer {
             source: owned,
             out: String::new(),
@@ -2369,6 +2462,8 @@ impl<'a> Printer<'a> {
             last_contexts: self.last_contexts,
             failed: false,
             file_nodes: self.file_nodes,
+            fine: Vec::new(),
+            pending_pieces: None,
         };
         // A form that already rewrote `function (...)` is TypeScript. Matching
         // it again as the function macro fails the file on the `return` the
@@ -2384,9 +2479,65 @@ impl<'a> Printer<'a> {
         if nested.failed {
             self.failed = true;
         }
+        let pieces = nested.copy_pieces();
         self.hygiene = nested.hygiene;
         self.form_signals = nested.form_signals;
-        nested.out
+        (nested.out, pieces)
+    }
+
+    /// Instantiate `template` and expand the macros in the result. The copy
+    /// map of the text is relative to it and points into this source.
+    fn expand_mapped(
+        &mut self,
+        template: &[Tpl],
+        captures: &HashMap<String, Capture>,
+        mark: usize,
+        invocation: (u32, u32),
+    ) -> (String, Vec<Piece>) {
+        let (replacement, _, pieces) =
+            instantiate_marked(self.source, template, captures, &self.classes);
+        let (expanded, inner) = self.expand_replacement_mapped(&replacement);
+        self.lift_traces(mark, &pieces, invocation.0, invocation.1);
+        (expanded, super::sweetener_origins::compose(&inner, &pieces))
+    }
+
+    /// Invocations a nested printer placed in `replacement` (from `mark`
+    /// on) get their span in this printer's source through `pieces`.
+    fn lift_traces(&self, mark: usize, pieces: &[Piece], start: u32, end: u32) {
+        let depth = self.depth;
+        TRACES.with(|traces| {
+            for (trace, level) in traces.borrow_mut().iter_mut().skip(mark) {
+                if *level == Some(depth + 1) {
+                    (trace.start, trace.end) =
+                        map_span(pieces, trace.start, trace.end, (start, end));
+                    *level = Some(depth);
+                }
+            }
+        });
+    }
+
+    /// Ranges of `out` that copy this printer's source: what it printed as
+    /// written, and the captures inside the expansions it printed.
+    fn copy_pieces(&self) -> Vec<Piece> {
+        let mut pieces: Vec<Piece> = self
+            .segments
+            .iter()
+            .filter(|segment| segment.kind == SegmentKind::Verbatim)
+            .map(|segment| {
+                (
+                    segment.virtual_start as usize,
+                    segment.virtual_end as usize,
+                    segment.original_start,
+                )
+            })
+            .chain(
+                self.fine
+                    .iter()
+                    .map(|&(start, end, at)| (start as usize, end as usize, at)),
+            )
+            .collect();
+        pieces.sort_unstable();
+        pieces
     }
 
     fn user_code_starts(&self, nodes: &[Syntax], index: usize) -> bool {
@@ -3195,16 +3346,26 @@ impl<'a> Printer<'a> {
 
     fn emit(&mut self, original_start: u32, original_end: u32, text: &str, kind: SegmentKind) {
         let source = self.source;
-        if self.depth == 0 && kind == SegmentKind::Atom {
+        let pieces = self.pending_pieces.take();
+        if kind == SegmentKind::Atom {
+            // An invocation of this printer's own depth is placed here; one
+            // a nested printer already placed is lifted to this source.
+            let depth = self.depth;
             TRACES.with(|traces| {
-                let (pending, placed) = &mut *traces.borrow_mut();
-                for mut trace in pending.drain(..) {
-                    trace.start = original_start;
-                    trace.end = original_end;
-                    placed.push(trace);
+                for (trace, level) in traces.borrow_mut().iter_mut() {
+                    if level.is_none() && trace.depth == depth {
+                        trace.start = original_start;
+                        trace.end = original_end;
+                        *level = Some(depth);
+                    } else if *level == Some(depth + 1) {
+                        trace.start = original_start;
+                        trace.end = original_end;
+                        *level = Some(depth);
+                    }
                 }
             });
         }
+        let base = self.out.len();
         let mut text = text;
         if self.depth == 0
             && let Some(message) = BUDGET.with(|budget| budget.borrow_mut().take())
@@ -3257,6 +3418,20 @@ impl<'a> Printer<'a> {
         let virtual_start = u32_at(self.out.len());
         self.out.push_str(text);
         let virtual_end = u32_at(self.out.len());
+        if let Some(pieces) = pieces
+            && kind == SegmentKind::Atom
+            && virtual_start as usize == base
+        {
+            for (start, end, at) in pieces {
+                if end <= text.len() && start < end {
+                    self.fine.push((
+                        virtual_start + u32_at(start),
+                        virtual_start + u32_at(end),
+                        at,
+                    ));
+                }
+            }
+        }
         if kind == SegmentKind::Verbatim {
             if let Some(last) = self.segments.last_mut() {
                 if last.kind == SegmentKind::Verbatim
@@ -5201,7 +5376,7 @@ fn every_token(
 /// The text of each leaf of a capture (one per repetition row).
 fn refine_values(captures: &HashMap<String, Capture>, field: &str) -> Vec<String> {
     match captures.get(field) {
-        Some(Capture::Text(text)) | Some(Capture::Record { text, .. }) => {
+        Some(Capture::Text(text, ..)) | Some(Capture::Record { text, .. }) => {
             vec![text.trim().to_owned()]
         }
         Some(Capture::Many(_)) => refine_spellings(captures, field),
@@ -5381,14 +5556,14 @@ fn refine_spellings(captures: &HashMap<String, Capture>, field: &str) -> Vec<Str
         return Vec::new();
     };
     match value {
-        Capture::Text(text) => vec![text.trim().to_owned()],
+        Capture::Text(text, ..) => vec![text.trim().to_owned()],
         Capture::Record { text, .. } => vec![text.trim().to_owned()],
         Capture::Many(rows) => rows
             .iter()
             .filter_map(|row| {
                 row.iter().find_map(|(name, value)| {
                     (name == field).then(|| match value {
-                        Capture::Text(text) | Capture::Record { text, .. } => {
+                        Capture::Text(text, ..) | Capture::Record { text, .. } => {
                             text.trim().to_owned()
                         }
                         Capture::Many(_) => String::new(),
@@ -5403,14 +5578,14 @@ fn refine_spellings(captures: &HashMap<String, Capture>, field: &str) -> Vec<Str
 fn capture_len(captures: &HashMap<String, Capture>, field: &str) -> usize {
     match captures.get(field) {
         Some(Capture::Many(rows)) => rows.len(),
-        Some(Capture::Text(text)) if !text.trim().is_empty() => 1,
+        Some(Capture::Text(text, ..)) if !text.trim().is_empty() => 1,
         Some(Capture::Record { .. }) => 1,
         _ => 0,
     }
 }
 
 fn capture_opens(captures: &HashMap<String, Capture>, field: &str) -> Vec<Delimiter> {
-    let Some(Capture::Text(text)) = captures.get(field) else {
+    let Some(Capture::Text(text, ..)) = captures.get(field) else {
         return Vec::new();
     };
     let trimmed = text.trim();
@@ -6554,12 +6729,16 @@ struct Match {
 
 #[derive(Clone, Debug, PartialEq)]
 enum Capture {
-    Text(String),
+    /// The text, and where it starts in the printer's source when it is a
+    /// copy of it (the origin map follows it through the template).
+    Text(String, Option<u32>),
     /// A syntax-class match. `text` is the whole form; `fields` are its
     /// declared fields, including sequences.
     Record {
         text: String,
         fields: HashMap<String, Capture>,
+        /// Where `text` starts in the printer's source.
+        at: Option<u32>,
     },
     Many(Vec<Vec<(String, Capture)>>),
 }
@@ -8151,7 +8330,8 @@ fn match_pats_cont(
                             node_end(node).saturating_sub(1),
                         )
                         .to_owned();
-                        captures.insert(name, Capture::Text(text));
+                        let at = u32::try_from(node_start(node) + 1).ok();
+                        captures.insert(name, Capture::Text(text, at));
                     }
                 }
                 last_end = node_end(node);
@@ -8212,7 +8392,10 @@ fn match_pats_cont(
                         take_hole(source, nodes, *cursor, kind, in_rep)
                     };
                     let (text, end, next) = taken?;
-                    captures.insert(name.clone(), Capture::Text(text));
+                    let at = nodes
+                        .get(*cursor)
+                        .and_then(|node| source_offset_of(source, node_start(node), &text));
+                    captures.insert(name.clone(), Capture::Text(text, at));
                     last_end = end;
                     *cursor = next;
                 }
@@ -8319,7 +8502,7 @@ fn match_pats_cont(
                     // (`$($rest:tt,)+`) is not part of the captured step.
                     if sep.is_some() {
                         for (_, value) in &mut one {
-                            if let Capture::Text(text) = value {
+                            if let Capture::Text(text, ..) = value {
                                 *text = text.trim().trim_end_matches(',').trim().to_owned();
                             }
                         }
@@ -8341,6 +8524,7 @@ fn match_pats_cont(
                                             node_start(node),
                                         )
                                         .to_owned(),
+                                        None,
                                     ),
                                 ));
                             }
@@ -8422,7 +8606,7 @@ fn match_pats_cont(
                         // `$($body:item)*` is several items. One blob hides
                         // `record` from the next expansion. Keep each item.
                         let item_rows = many.iter().all(|one| {
-                            matches!(one.first(), Some((_, Capture::Text(text))) if !text.contains('\n') || text.trim_end().ends_with(';'))
+                            matches!(one.first(), Some((_, Capture::Text(text, ..))) if !text.contains('\n') || text.trim_end().ends_with(';'))
                         }) && many.len() > 1;
                         if !class_rows && !item_rows {
                             if let (Some(start_node), Some(end_node)) = (
@@ -8435,7 +8619,8 @@ fn match_pats_cont(
                                     node_end(end_node),
                                 );
                                 if !grouped.contains_key(&name) {
-                                    captures.insert(name, Capture::Text(text.to_owned()));
+                                    let at = u32::try_from(node_start(start_node)).ok();
+                                    captures.insert(name, Capture::Text(text.to_owned(), at));
                                 }
                             }
                         }
@@ -8621,7 +8806,8 @@ fn take_class(
                 fields.insert(field.name.clone(), value);
             }
         }
-        return Some((Capture::Record { text, fields }, end, child));
+        let at = u32::try_from(start).ok();
+        return Some((Capture::Record { text, fields, at }, end, child));
     }
     None
 }
@@ -10655,30 +10841,31 @@ fn skip_syntax_import(nodes: &[Syntax], index: usize) -> usize {
     index + 1
 }
 
-fn instantiate(
-    source: &str,
-    template: &[Tpl],
-    captures: &HashMap<String, Capture>,
-    classes: &[SyntaxClass],
-) -> String {
-    instantiate_marked(source, template, captures, classes).0
-}
-
 fn instantiate_marked(
     source: &str,
     template: &[Tpl],
     captures: &HashMap<String, Capture>,
     classes: &[SyntaxClass],
-) -> (String, Vec<(usize, usize)>) {
+) -> (String, Vec<(usize, usize)>, Vec<Piece>) {
     let _ = source;
     let mut out = String::new();
     let mut protected = Vec::new();
     render(&mut out, template, captures, classes, &mut protected);
+    // Each capture the template printed is a copy of the printer's source.
+    let pieces: Vec<Piece> = protected
+        .iter()
+        .filter_map(|(from, to, at)| {
+            let (at, len) = (*at)?;
+            let len = len.min(to.saturating_sub(*from));
+            (len > 0 && out.get(*from..*from + len).is_some()).then_some((*from, *from + len, at))
+        })
+        .collect();
     let start = out.len() - out.trim_start().len();
     let text = normalize_replacement(&out);
+    let pieces = super::sweetener_origins::carry(&out, &text, &pieces);
     let protected = protected
         .into_iter()
-        .filter_map(|(from, to)| {
+        .filter_map(|(from, to, _)| {
             let from = from.checked_sub(start)?;
             let to = to.checked_sub(start)?;
             if from >= text.len() {
@@ -10687,7 +10874,51 @@ fn instantiate_marked(
             Some((from, to.min(text.len())))
         })
         .collect();
-    (text, protected)
+    (text, protected, pieces)
+}
+
+/// A protected span of rendered text: a capture the template printed. The
+/// third part is where its first `len` bytes start in the printer's source.
+type Prot = (usize, usize, Option<(u32, usize)>);
+
+/// `[start, end)` of a text that is a byte copy of the printer's source
+/// from `at` on.
+pub(crate) type Piece = (usize, usize, u32);
+
+/// Where `slice` (text borrowed from one of `captures`) is in the source.
+/// The capture owning the bytes is found by address, so two captures with
+/// the same spelling are never confused.
+fn text_origin(captures: &HashMap<String, Capture>, slice: &str) -> Option<(u32, usize)> {
+    fn walk(capture: &Capture, ptr: usize, len: usize) -> Option<u32> {
+        match capture {
+            Capture::Text(text, at) => {
+                let base = text.as_ptr() as usize;
+                if ptr >= base && ptr + len <= base + text.len() {
+                    return at.map(|at| at + u32::try_from(ptr - base).unwrap_or(0));
+                }
+                None
+            }
+            Capture::Record { text, fields, at } => {
+                let base = text.as_ptr() as usize;
+                if !text.is_empty() && ptr >= base && ptr + len <= base + text.len() {
+                    return at.map(|at| at + u32::try_from(ptr - base).unwrap_or(0));
+                }
+                fields.values().find_map(|v| walk(v, ptr, len))
+            }
+            Capture::Many(rows) => rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .find_map(|(_, v)| walk(v, ptr, len)),
+        }
+    }
+    if slice.is_empty() {
+        return None;
+    }
+    let ptr = slice.as_ptr() as usize;
+    captures
+        .values()
+        .find_map(|capture| walk(capture, ptr, slice.len()))
+        .map(|at| (at, slice.len()))
 }
 
 fn normalize_replacement(text: &str) -> String {
@@ -10779,7 +11010,7 @@ fn capture_spellings(captures: &HashMap<String, Capture>) -> std::collections::H
 /// a parameter theirs keeps.
 fn collect_capture_idents(value: &Capture, names: &mut std::collections::HashSet<String>) {
     match value {
-        Capture::Text(text) => {
+        Capture::Text(text, ..) => {
             let trimmed = text.trim();
             if is_ident_text(trimmed) {
                 names.insert(trimmed.to_owned());
@@ -10790,7 +11021,7 @@ fn collect_capture_idents(value: &Capture, names: &mut std::collections::HashSet
                 names.extend(introduced_of(trimmed, &read.children));
             }
         }
-        Capture::Record { fields, text } => {
+        Capture::Record { fields, text, .. } => {
             let trimmed = text.trim();
             if is_ident_text(trimmed) {
                 names.insert(trimmed.to_owned());
@@ -11161,7 +11392,10 @@ fn with_rep_index(mut scoped: HashMap<String, Capture>, index: usize) -> HashMap
     // the first parameter (`minimum`) for `lower` and for `upper`. Keep
     // only the row this iteration captured.
     retain_row_sequences(&mut scoped);
-    scoped.insert("__rep_index".to_owned(), Capture::Text(index.to_string()));
+    scoped.insert(
+        "__rep_index".to_owned(),
+        Capture::Text(index.to_string(), None),
+    );
     scoped
 }
 
@@ -11190,7 +11424,7 @@ fn row_belongs_here(scoped: &HashMap<String, Capture>, row: &[(String, Capture)]
     let texts: Vec<(&str, &str)> = row
         .iter()
         .filter_map(|(key, value)| match value {
-            Capture::Text(text) => Some((key.as_str(), text.trim())),
+            Capture::Text(text, ..) => Some((key.as_str(), text.trim())),
             _ => None,
         })
         .filter(|(_, text)| !text.is_empty())
@@ -11228,7 +11462,7 @@ fn render_let(
     body: &[Tpl],
     captures: &HashMap<String, Capture>,
     classes: &[SyntaxClass],
-    protected: &mut Vec<(usize, usize)>,
+    protected: &mut Vec<Prot>,
 ) {
     let binder = super::sweetener_hygiene::placeholder(name);
     let mut bound = String::new();
@@ -11238,7 +11472,13 @@ fn render_let(
     super::sweetener_scoped::push_let(name, &binder);
     render(&mut text, body, captures, classes, &mut spans);
     super::sweetener_scoped::pop_let();
-    let (text, spans) = super::sweetener_scoped::rename_outside(&text, &spans, name, &binder);
+    let plain: Vec<(usize, usize)> = spans.iter().map(|(from, to, _)| (*from, *to)).collect();
+    let (text, moved) = super::sweetener_scoped::rename_outside(&text, &plain, name, &binder);
+    let spans: Vec<Prot> = moved
+        .into_iter()
+        .zip(spans.iter())
+        .map(|((from, to), (_, _, at))| (from, to, *at))
+        .collect();
     let text_trimmed = text.trim();
     let lead = text.len() - text.trim_start().len();
     let suspends = super::sweetener_scoped::suspends(text_trimmed);
@@ -11255,11 +11495,12 @@ fn render_let(
     }
     let shift = out.len() - base;
     out.push_str(text_trimmed);
-    for (from, to) in spans {
+    for (from, to, at) in spans {
         if from >= lead {
             protected.push((
                 base + shift + from - lead,
                 base + shift + (to - lead).min(text_trimmed.len()),
+                at,
             ));
         }
     }
@@ -11297,6 +11538,7 @@ fn render_fold(
             .unwrap_or_else(|| Capture::Record {
                 text: String::new(),
                 fields: row.iter().cloned().collect(),
+                at: None,
             });
         scoped.insert(item.to_owned(), element);
         let spliced = if is_primary_text(&current) {
@@ -11304,8 +11546,8 @@ fn render_fold(
         } else {
             format!("({current})")
         };
-        scoped.insert(acc.to_owned(), Capture::Text(spliced));
-        scoped.insert(index.to_owned(), Capture::Text(position.to_string()));
+        scoped.insert(acc.to_owned(), Capture::Text(spliced, None));
+        scoped.insert(index.to_owned(), Capture::Text(position.to_string(), None));
         scope_record_fields(&mut scoped);
         let mut next = String::new();
         render(&mut next, body, &scoped, classes, &mut Vec::new());
@@ -11356,29 +11598,75 @@ thread_local! {
 
 thread_local! {
     /// Invocations not yet placed (no top-level span yet), then the traces.
-    static TRACES: std::cell::RefCell<(Vec<crate::ExpansionTrace>, Vec<crate::ExpansionTrace>)> =
-        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+    /// Every invocation, with the depth whose source its span is in
+    /// (`None` until its expansion is printed).
+    static TRACES: std::cell::RefCell<Vec<(crate::ExpansionTrace, Option<u32>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn note_invoked(rule: &Rule, name: &str, depth: u32) {
+fn note_invoked(rule: &Rule, name: &str, depth: u32) -> usize {
+    let mark = TRACES.with(|traces| traces.borrow().len());
     TRACES.with(|traces| {
-        traces.borrow_mut().0.push(crate::ExpansionTrace {
-            macro_name: name.to_owned(),
-            module: rule.owner.as_deref().map(str::to_owned),
-            rule_start: rule
-                .origin
-                .filter(|_| rule.owner.is_none())
-                .map(|span| span.start),
-            depth,
-            start: 0,
-            end: 0,
-        });
+        traces.borrow_mut().push((
+            crate::ExpansionTrace {
+                macro_name: name.to_owned(),
+                module: rule.owner.as_deref().map(str::to_owned),
+                rule_start: rule
+                    .origin
+                    .filter(|_| rule.owner.is_none())
+                    .map(|span| span.start),
+                depth,
+                start: 0,
+                end: 0,
+            },
+            None,
+        ));
     });
     if let Some(owner) = rule.owner.as_deref() {
         INVOKED_OWNERS.with(|set| {
             set.borrow_mut().insert(owner.to_owned());
         });
     }
+    mark
+}
+
+/// `[start, end)` of a replacement in the source its copy map points
+/// into. Exact when both ends are copies; otherwise the invocation.
+fn map_span(pieces: &[Piece], start: u32, end: u32, invocation: (u32, u32)) -> (u32, u32) {
+    let at = |offset: usize, last: bool| {
+        pieces.iter().find_map(|&(from, to, src)| {
+            let inside = if last {
+                from < offset && offset <= to
+            } else {
+                from <= offset && offset < to
+            };
+            inside.then(|| src + u32::try_from(offset - from).unwrap_or(0))
+        })
+    };
+    match (at(start as usize, false), at(end as usize, true)) {
+        (Some(from), Some(to)) if from <= to => (from, to),
+        _ => invocation,
+    }
+}
+
+/// Where `slice`, borrowed from `source`, starts in it.
+fn offset_within(source: &str, slice: &str) -> Option<u32> {
+    let base = source.as_ptr() as usize;
+    let at = (slice.as_ptr() as usize).checked_sub(base)?;
+    (at + slice.len() <= source.len())
+        .then(|| u32::try_from(at).ok())
+        .flatten()
+}
+
+/// Where `text` starts in `source` when it is the source's own text from
+/// `from` on (after leading space). `None` when the hole rebuilt the text.
+fn source_offset_of(source: &str, from: usize, text: &str) -> Option<u32> {
+    let rest = source.get(from..)?;
+    let skipped = rest.len() - rest.trim_start().len();
+    let at = from + skipped;
+    (!text.is_empty() && source.get(at..at + text.len()) == Some(text))
+        .then(|| u32::try_from(at).ok())
+        .flatten()
 }
 
 fn note_budget(message: String) {
@@ -11401,7 +11689,7 @@ fn render(
     template: &[Tpl],
     captures: &HashMap<String, Capture>,
     classes: &[SyntaxClass],
-    protected: &mut Vec<(usize, usize)>,
+    protected: &mut Vec<Prot>,
 ) {
     let template = trim_template(template);
     if let Err(message) = super::sweetener_budget::charge(
@@ -11424,8 +11712,8 @@ fn render(
                 };
                 let base = out.len();
                 let (substituted, spans) = substitute_text_protecting(&text, captures);
-                for (from, to) in spans {
-                    protected.push((base + from, base + to));
+                for (from, to, at) in spans {
+                    protected.push((base + from, base + to, at));
                 }
                 out.push_str(&substituted);
             }
@@ -11433,15 +11721,15 @@ fn render(
                 if let Some(text) = capture_text(captures, name) {
                     let start = out.len();
                     out.push_str(text.trim());
-                    protected.push((start, out.len()));
+                    protected.push((start, out.len(), text_origin(captures, text.trim())));
                 } else if let Some((root, rest)) = name.split_once('.') {
                     // `$protocol.register` is a text capture plus a member.
                     // A field path such as `$method.parameters.name` is not.
-                    if matches!(captures.get(root), Some(Capture::Text(_))) {
+                    if matches!(captures.get(root), Some(Capture::Text(_, ..))) {
                         if let Some(text) = capture_text(captures, root) {
                             let start = out.len();
                             out.push_str(text.trim());
-                            protected.push((start, out.len()));
+                            protected.push((start, out.len(), text_origin(captures, text.trim())));
                             out.push('.');
                             out.push_str(rest);
                         }
@@ -11519,12 +11807,14 @@ fn render(
                 {
                     let start = out.len();
                     out.push_str(text.trim());
-                    protected.push((start, out.len()));
+                    protected.push((start, out.len(), text_origin(captures, text.trim())));
                 }
             }
             Tpl::Trim { path } => {
                 if let Some(text) = capture_text(captures, path) {
+                    let start = out.len();
                     out.push_str(text.trim());
+                    protected.push((start, out.len(), text_origin(captures, text.trim())));
                 }
             }
             Tpl::Index => {
@@ -11549,7 +11839,7 @@ fn render_rep(
     sep: Option<&str>,
     captures: &HashMap<String, Capture>,
     classes: &[SyntaxClass],
-    protected: &mut Vec<(usize, usize)>,
+    protected: &mut Vec<Prot>,
 ) {
     let inferred = sep.is_none();
     let (inner, sep) = rep_layout(inner, sep);
@@ -11598,7 +11888,7 @@ fn push_row_sep(
     sep: Option<&str>,
 ) {
     let gap = row.iter().find_map(|(name, capture)| match capture {
-        Capture::Text(text) if name == REP_GAP => Some(text.as_str()),
+        Capture::Text(text, ..) if name == REP_GAP => Some(text.as_str()),
         _ => None,
     });
     match gap {
@@ -11727,7 +12017,7 @@ fn scope_record_fields(scoped: &mut HashMap<String, Capture>) {
             let dotted = format!("{key}.{field}");
             // Do not overwrite a binding already called `name`. The protocol
             // name and a method's `name` field are different captures.
-            if matches!(child, Capture::Text(_))
+            if matches!(child, Capture::Text(_, ..))
                 && !scoped.contains_key(&field)
                 && !key.ends_with(&format!(".{field}"))
                 && key != field
@@ -11768,7 +12058,7 @@ fn substitute_text(text: &str, captures: &HashMap<String, Capture>) -> String {
 fn substitute_text_protecting(
     text: &str,
     captures: &HashMap<String, Capture>,
-) -> (String, Vec<(usize, usize)>) {
+) -> (String, Vec<Prot>) {
     if !text.contains('$') && !text.contains("#text") {
         return (text.to_owned(), Vec::new());
     }
@@ -11799,7 +12089,7 @@ fn substitute_nodes(
     captures: &HashMap<String, Capture>,
     out: &mut String,
     cursor: &mut usize,
-    protected: &mut Vec<(usize, usize)>,
+    protected: &mut Vec<Prot>,
 ) {
     let mut index = 0;
     while index < nodes.len() {
@@ -11809,7 +12099,7 @@ fn substitute_nodes(
                     push_until(source, out, cursor, node_start(&nodes[index]));
                     let start = out.len();
                     out.push_str(&string_literal(value.trim()));
-                    protected.push((start, out.len()));
+                    protected.push((start, out.len(), None));
                     *cursor = node_end(&nodes[index + 1]);
                     index += 2;
                     continue;
@@ -11837,6 +12127,7 @@ fn substitute_nodes(
                     (end_at, next)
                 };
                 if let Some(value) = value {
+                    let origin = text_origin(captures, value.trim());
                     let value = if let Some(rest) = member {
                         format!("{}.{rest}", value.trim())
                     } else {
@@ -11845,7 +12136,7 @@ fn substitute_nodes(
                     push_until(source, out, cursor, node_start(&nodes[index]));
                     let start = out.len();
                     out.push_str(value.trim());
-                    protected.push((start, out.len()));
+                    protected.push((start, out.len(), origin));
                     *cursor = end_at;
                     index = next;
                     continue;
@@ -11855,7 +12146,7 @@ fn substitute_nodes(
                     push_until(source, out, cursor, node_start(&nodes[index]));
                     let start = out.len();
                     out.push_str(value.trim());
-                    protected.push((start, out.len()));
+                    protected.push((start, out.len(), text_origin(captures, value.trim())));
                     *cursor = span.end as usize;
                     index += 2;
                     continue;
@@ -11871,7 +12162,7 @@ fn substitute_nodes(
                 let substituted = substitute_template_literal(raw, captures);
                 let start = out.len();
                 out.push_str(&substituted);
-                protected.push((start, out.len()));
+                protected.push((start, out.len(), None));
                 *cursor = span.end as usize;
             }
         }
@@ -12042,7 +12333,8 @@ fn string_literal(text: &str) -> String {
     out
 }
 
-fn capture_pieces(captures: &HashMap<String, Capture>, name: &str) -> Vec<String> {
+/// [`capture_pieces`], borrowed from the captures so each keeps its origin.
+fn capture_pieces_ref<'a>(captures: &'a HashMap<String, Capture>, name: &str) -> Vec<&'a str> {
     match captures.get(name) {
         Some(Capture::Many(rows)) => rows
             .iter()
@@ -12051,20 +12343,37 @@ fn capture_pieces(captures: &HashMap<String, Capture>, name: &str) -> Vec<String
                     .find(|(key, _)| key == name)
                     .or_else(|| row.first())
                     .and_then(|(_, value)| capture_spelling(value))
-                    .map(str::to_owned)
             })
             .collect(),
-        _ => capture_text(captures, name)
-            .map(|text| vec![text.to_owned()])
-            .unwrap_or_default(),
+        _ => capture_text(captures, name).into_iter().collect(),
     }
+}
+
+/// The copy map of rendered text from its protected spans.
+fn prot_pieces(text: &str, protected: &[Prot]) -> Vec<Piece> {
+    protected
+        .iter()
+        .filter_map(|(from, to, at)| {
+            let (at, len) = (*at)?;
+            let len = len.min(to.saturating_sub(*from));
+            (len > 0 && text.get(*from..*from + len).is_some()).then_some((*from, *from + len, at))
+        })
+        .collect()
+}
+
+fn push_pieces(into: &mut Vec<Piece>, base: usize, pieces: &[Piece]) {
+    into.extend(
+        pieces
+            .iter()
+            .map(|&(start, end, at)| (base + start, base + end, at)),
+    );
 }
 
 fn capture_text<'a>(captures: &'a HashMap<String, Capture>, name: &str) -> Option<&'a str> {
     // `$name` is the root binding. A scoped field also called `name`
     // belongs to `$method.name`, not to the protocol.
     if !name.contains('.') {
-        if let Some(Capture::Text(text)) = captures.get(name) {
+        if let Some(Capture::Text(text, ..)) = captures.get(name) {
             if !text.trim().is_empty() {
                 return Some(text.as_str());
             }
@@ -12074,14 +12383,14 @@ fn capture_text<'a>(captures: &'a HashMap<String, Capture>, name: &str) -> Optio
     // over the parent record. A different field that also ends in `name`
     // (`method.name`) must not fill `method.parameters.name`.
     if name.contains('.') {
-        if let Some(Capture::Text(text)) = captures.get(name) {
+        if let Some(Capture::Text(text, ..)) = captures.get(name) {
             if !text.trim().is_empty() {
                 return Some(text.as_str());
             }
         }
         if let Some((parent, leaf)) = name.rsplit_once('.') {
             if matches!(captures.get(parent), Some(Capture::Record { .. })) {
-                if let Some(Capture::Text(text)) = captures.get(leaf) {
+                if let Some(Capture::Text(text, ..)) = captures.get(leaf) {
                     if !text.trim().is_empty() {
                         return Some(text.as_str());
                     }
@@ -12091,7 +12400,7 @@ fn capture_text<'a>(captures: &'a HashMap<String, Capture>, name: &str) -> Optio
     }
     let value = capture_at(captures, name)?;
     if name.contains('.') {
-        if let Capture::Text(text) = value {
+        if let Capture::Text(text, ..) = value {
             return Some(text.as_str());
         }
         if let Capture::Record { fields, .. } = value {
@@ -12111,8 +12420,8 @@ fn capture_spelling(value: &Capture) -> Option<&str> {
 
 fn capture_spelling_key<'a>(value: &'a Capture, key: &str) -> Option<&'a str> {
     match value {
-        Capture::Text(text) => Some(text.as_str()),
-        Capture::Record { fields, text } => {
+        Capture::Text(text, ..) => Some(text.as_str()),
+        Capture::Record { fields, text, .. } => {
             // A field path that stopped on the record wants the field, not
             // the whole form. Callers that want the form use the text only
             // when no field was asked. This branch is the form itself.
@@ -12135,7 +12444,7 @@ fn row_spelling<'a>(row: &'a [(String, Capture)], key: &str) -> Option<&'a str> 
     if !key.is_empty() {
         if let Some((_, value)) = row.iter().find(|(name, _)| name == key) {
             return match value {
-                Capture::Text(text) => Some(text.as_str()),
+                Capture::Text(text, ..) => Some(text.as_str()),
                 Capture::Many(inner) => inner
                     .iter()
                     .find_map(|inner_row| row_spelling(inner_row, key)),
@@ -12144,7 +12453,7 @@ fn row_spelling<'a>(row: &'a [(String, Capture)], key: &str) -> Option<&'a str> 
         }
     }
     row.iter().find_map(|(_, value)| match value {
-        Capture::Text(text) => Some(text.as_str()),
+        Capture::Text(text, ..) => Some(text.as_str()),
         _ => None,
     })
 }
@@ -12152,7 +12461,7 @@ fn row_spelling<'a>(row: &'a [(String, Capture)], key: &str) -> Option<&'a str> 
 fn capture_present(captures: &HashMap<String, Capture>, path: &str) -> bool {
     match capture_at(captures, path) {
         Some(Capture::Many(rows)) => !rows.is_empty(),
-        Some(Capture::Text(text)) => !text.trim().is_empty(),
+        Some(Capture::Text(text, ..)) => !text.trim().is_empty(),
         Some(Capture::Record { .. }) => true,
         None => false,
     }
@@ -12175,13 +12484,13 @@ fn capture_at<'a>(captures: &'a HashMap<String, Capture>, path: &str) -> Option<
     for field in rest.split('.') {
         value = match value {
             Capture::Record { fields, .. } => fields.get(field)?,
-            Capture::Text(_) => {
+            Capture::Text(_, ..) => {
                 // `$protocol.register` is a text capture plus a member.
                 // The member is not stored on the text, so this path is
                 // absent and the caller keeps `.register` in the output.
                 return captures
                     .get(path)
-                    .filter(|found| matches!(found, Capture::Text(_)));
+                    .filter(|found| matches!(found, Capture::Text(_, ..)));
             }
             Capture::Many(rows) => {
                 // `$column.modifiers` is a sequence of records. The next
@@ -12280,7 +12589,7 @@ fn capture_sequence(
                 }
                 Capture::Many(projected)
             }
-            Capture::Text(_) => return None,
+            Capture::Text(_, ..) => return None,
         };
     }
     match value {
@@ -12295,7 +12604,7 @@ fn capture_sequence(
 fn capture_count(captures: &HashMap<String, Capture>, name: &str) -> usize {
     match capture_at(captures, name) {
         Some(Capture::Many(rows)) => rows.len(),
-        Some(Capture::Text(text)) if !text.trim().is_empty() => 1,
+        Some(Capture::Text(text, ..)) if !text.trim().is_empty() => 1,
         Some(Capture::Record { .. }) => 1,
         _ => 0,
     }
@@ -12487,7 +12796,7 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
         })
         .or_else(|| {
             row.iter().find(|(key, value)| {
-                (key == leaf || key == path) && !matches!(value, Capture::Text(_))
+                (key == leaf || key == path) && !matches!(value, Capture::Text(_, ..))
             })
         })
         .or_else(|| row.iter().find(|(key, _)| key == leaf || key == path))
@@ -12499,14 +12808,14 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
         // field text on the field path. A text row (`name: "Closed"`)
         // stays under the leaf so `$state.name` does not look up the
         // machine binding also called `name`.
-        if let Capture::Text(text) = &element {
+        if let Capture::Text(text, at) = &element {
             // `method.name` is text, but `name` is also the protocol binding.
             // Keep the field on the path the template wrote.
             if path.contains('.') {
-                scoped.push((path.to_owned(), Capture::Text(text.clone())));
+                scoped.push((path.to_owned(), Capture::Text(text.clone(), *at)));
             } else {
-                scoped.push((leaf.to_owned(), Capture::Text(text.clone())));
-                scoped.push((path.to_owned(), Capture::Text(text.clone())));
+                scoped.push((leaf.to_owned(), Capture::Text(text.clone(), *at)));
+                scoped.push((path.to_owned(), Capture::Text(text.clone(), *at)));
             }
             for (key, value) in row {
                 if key == leaf || key == path {
@@ -12514,7 +12823,7 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
                 }
                 // A nested sequence (`$($request)+` inside the outer row)
                 // is this iteration's, not every iteration's.
-                if matches!(value, Capture::Text(_) | Capture::Many(_)) {
+                if matches!(value, Capture::Text(_, ..) | Capture::Many(_)) {
                     scoped.push((key.clone(), value.clone()));
                 }
             }
@@ -12547,13 +12856,13 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
                 // record on `state` is the form; `$state.name` is the field.
                 // Do not also store it as the bare leaf when that leaf is
                 // already the outer binding (`protocol $name`).
-                if let Capture::Text(text) = value {
+                if let Capture::Text(text, at) = value {
                     // `$field.name` is the field. A bare `name` is also the
                     // record binding (`record $name`), so the field must not
                     // overwrite it. The dotted path below is the one the
                     // template writes.
                     if field != "name" || path == field || path.ends_with(&format!(".{field}")) {
-                        scoped.push((field.clone(), Capture::Text(text.clone())));
+                        scoped.push((field.clone(), Capture::Text(text.clone(), *at)));
                     }
                 }
                 let mut child = record_path.clone();
@@ -13006,10 +13315,14 @@ fn pattern_ends_with_semi(pattern: &[Pat]) -> bool {
 fn infix_rule_binds(
     pattern: &[Pat],
     name: &str,
-    left: &str,
-    right: &str,
+    (left, left_at): (&str, Option<u32>),
+    (right, right_at): (&str, Option<u32>),
     captures: &mut HashMap<String, Capture>,
 ) -> bool {
+    // Where the trimmed operand starts in the source.
+    let trimmed_at = |text: &str, at: Option<u32>| {
+        at.map(|at| at + u32::try_from(text.len() - text.trim_start().len()).unwrap_or(0))
+    };
     // `left OP right`, with the operator a literal.
     let mut holes = Vec::new();
     let mut saw_op = false;
@@ -13029,14 +13342,23 @@ fn infix_rule_binds(
         if written != run.concat() {
             return false;
         }
-        captures.insert(holes[0].clone(), Capture::Text(left.trim().to_owned()));
+        captures.insert(
+            holes[0].clone(),
+            Capture::Text(left.trim().to_owned(), trimmed_at(left, left_at)),
+        );
         return true;
     }
     if !saw_op || holes.len() < 2 {
         return false;
     }
-    captures.insert(holes[0].clone(), Capture::Text(left.trim().to_owned()));
-    captures.insert(holes[1].clone(), Capture::Text(right.trim().to_owned()));
+    captures.insert(
+        holes[0].clone(),
+        Capture::Text(left.trim().to_owned(), trimmed_at(left, left_at)),
+    );
+    captures.insert(
+        holes[1].clone(),
+        Capture::Text(right.trim().to_owned(), trimmed_at(right, right_at)),
+    );
     true
 }
 

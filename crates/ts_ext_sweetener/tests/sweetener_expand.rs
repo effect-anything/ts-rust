@@ -1130,6 +1130,198 @@ fn deep_nesting_is_honored_up_to_the_budget() {
     assert!(out.code.contains(&expected));
 }
 
+/// The map invariants every expansion must keep: segments ordered and
+/// disjoint, a verbatim segment is the same bytes on both sides, and a
+/// token that claims a source origin is spelled as that source token.
+fn check_map(code: &str, out: &ts_ext_sweetener::Expansion) -> Result<(), String> {
+    let mut last = 0;
+    for segment in &out.segments {
+        let (vs, ve) = (segment.virtual_start as usize, segment.virtual_end as usize);
+        let (os, oe) = (
+            segment.original_start as usize,
+            segment.original_end as usize,
+        );
+        if vs < last || ve < vs || ve > out.code.len() || oe < os || oe > code.len() {
+            return Err(format!("bad segment {segment:?}"));
+        }
+        last = ve;
+        if segment.kind == ts_ext_sweetener::SegmentKind::Verbatim
+            && out.code.get(vs..ve) != code.get(os..oe)
+        {
+            return Err(format!(
+                "verbatim {segment:?}: {:?} vs {:?}",
+                out.code.get(vs..ve),
+                code.get(os..oe)
+            ));
+        }
+    }
+    for origin in &out.origins {
+        let printed = &out.code[origin.virtual_start as usize..origin.virtual_end as usize];
+        if !origin.introduced
+            && code.get(origin.original_start as usize..origin.original_end as usize)
+                != Some(printed)
+        {
+            return Err(format!("origin {origin:?} of {printed:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// Words of an invocation that its expansion prints but no exact origin
+/// points at: the user's code the map lost.
+fn lost_user_words(code: &str, out: &ts_ext_sweetener::Expansion) -> Vec<String> {
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mapped: std::collections::HashSet<u32> = out
+        .origins
+        .iter()
+        .filter(|o| !o.introduced)
+        .map(|o| o.original_start)
+        .collect();
+    let mut lost = Vec::new();
+    for o in out
+        .origins
+        .iter()
+        .filter(|o| o.introduced && o.original_end > o.original_start)
+    {
+        let printed = &out.code[o.virtual_start as usize..o.virtual_end as usize];
+        if !printed.chars().next().is_some_and(word) {
+            continue;
+        }
+        let inv = &code[o.original_start as usize..o.original_end as usize];
+        let hit = inv.match_indices(printed).find(|(at, _)| {
+            let abs = o.original_start + *at as u32;
+            !inv[..*at].chars().next_back().is_some_and(word)
+                && !inv[at + printed.len()..].chars().next().is_some_and(word)
+                && !mapped.contains(&abs)
+        });
+        if let Some((at, _)) = hit {
+            lost.push(format!("{printed}@{}", o.original_start as usize + at));
+        }
+    }
+    lost
+}
+
+#[test]
+fn every_case_keeps_an_exact_map() {
+    let root = format!("{}/cases", env!("CARGO_MANIFEST_DIR"));
+    let mut failed = Vec::new();
+    let (mut user, mut exact) = (0usize, 0usize);
+    let mut lost_cases: Vec<String> = Vec::new();
+    for entry in walk(&root) {
+        let Some(dir) = input_dir(&entry) else {
+            continue;
+        };
+        let Some(input) = snapshot_file(&dir, "input") else {
+            continue;
+        };
+        let code = fs::read_to_string(&input).unwrap();
+        let out = expand(ExpandRequest {
+            filename: &input.display().to_string(),
+            code: &code,
+            phase: Phase::Check,
+        });
+        if let Err(why) = check_map(&code, &out) {
+            failed.push(format!("{dir}: {why}"));
+        }
+        // How much of the user's code inside invocations kept its origin.
+        user += out.origins.len();
+        exact += out
+            .origins
+            .iter()
+            .filter(|origin| !origin.introduced)
+            .count();
+        let lost = lost_user_words(&code, &out);
+        if !lost.is_empty() {
+            lost_cases.push(format!("{dir}: {}", lost.join(" ")));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    if std::env::var_os("SW_LOST").is_some() {
+        eprintln!("{}", lost_cases.join("\n"));
+    }
+    eprintln!("tokens with an exact source origin: {exact} of {user}");
+}
+
+#[test]
+fn captures_map_to_their_own_source_tokens() {
+    let defs = "export syntax pair:expr {\n  rule { pair($a:expr, $b:expr) } => { [$b, $a, $b] }\n}\nexport syntax tmp:expr {\n  rule { tmp($x:expr) } => { (() => { const t = $x; return t + t; })() }\n}\nexport syntax nest:expr {\n  rule { nest($x:expr) } => { pair($x, 0) }\n}\nexport syntax all:expr {\n  rule { all($($x:expr),*) } => { [$($x + 1),*] }\n}\n";
+    let body = "const t = 1;\nconst a = pair(x, x);\nconst b = tmp(t);\nconst c = nest(y.z);\nconst d = all(p, q, p);\n";
+    let code = format!("{defs}{body}");
+    let out = expand(ExpandRequest {
+        filename: "map.sts",
+        code: &code,
+        phase: Phase::Check,
+    });
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    check_map(&code, &out).unwrap();
+    // From an output position, recover the original position and text.
+    let original = |needle: &str, nth: usize| -> (usize, String) {
+        let at = out.code.match_indices(needle).nth(nth).unwrap().0;
+        let origin = out
+            .origins
+            .iter()
+            .find(|origin| origin.virtual_start as usize == at)
+            .unwrap();
+        assert!(
+            !origin.introduced,
+            "{needle}#{nth} introduced: {}",
+            out.code
+        );
+        let (s, e) = (origin.original_start as usize, origin.original_end as usize);
+        (s, code[s..e].to_owned())
+    };
+    let first_x = code.find("pair(x, x)").unwrap() + 5;
+    let second_x = first_x + 3;
+    // `[$b, $a, $b]` over `pair(x, x)`: same spelling, different tokens.
+    let line = out.code.find("const a = ").unwrap();
+    let nth = out.code[..line].matches('x').count();
+    assert_eq!(original("x", nth), (second_x, "x".to_owned()));
+    assert_eq!(original("x", nth + 1), (first_x, "x".to_owned()));
+    assert_eq!(original("x", nth + 2), (second_x, "x".to_owned()));
+    // Hygiene renamed the template's `t`; the user's `t` keeps its origin.
+    let user_t = code.find("tmp(t)").unwrap() + 4;
+    let printed = out.code.find("const b = ").unwrap();
+    let t_at = out.code[printed..].find("= t;").unwrap() + printed + 2;
+    let origin = out
+        .origins
+        .iter()
+        .find(|o| o.virtual_start as usize == t_at)
+        .unwrap();
+    assert_eq!(
+        (origin.original_start as usize, origin.introduced),
+        (user_t, false),
+        "{}",
+        out.code
+    );
+    // Through a nested macro: `nest` prints `pair`, which prints `y.z`.
+    let yz = code.find("nest(y.z)").unwrap() + 5;
+    assert_eq!(original("y", 0).0, yz);
+    // Repetition rows keep their own tokens.
+    let p2 = code.find("q, p)").unwrap() + 3;
+    let last_p = out.code.rfind("p + 1").unwrap();
+    let origin = out
+        .origins
+        .iter()
+        .find(|o| o.virtual_start as usize == last_p)
+        .unwrap();
+    assert_eq!(
+        (origin.original_start as usize, origin.introduced),
+        (p2, false),
+        "{}",
+        out.code
+    );
+    // Nested traces carry their own span: `pair` from `nest` covers `y.z`
+    // only where it is the user's; its head is the template's, so it is the
+    // `nest` invocation.
+    let nest_at = code.find("nest(y.z)").unwrap() as u32;
+    let pair = out
+        .traces
+        .iter()
+        .find(|t| t.macro_name == "pair" && t.depth == 1)
+        .unwrap();
+    assert_eq!(pair.start, nest_at);
+}
+
 #[test]
 fn traces_and_token_origins() {
     let code = "export syntax twice:expr {\n  rule { twice($x:expr) } => { [$x, $x] }\n}\nexport syntax outer:expr {\n  rule { outer($x:expr) } => { twice($x) }\n}\nconst a = outer(value);\nconst b = 1;\n";

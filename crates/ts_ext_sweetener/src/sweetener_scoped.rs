@@ -589,6 +589,14 @@ pub(crate) fn apply_edits(
     for segment in segments.iter_mut() {
         segment.virtual_start = map(segment.virtual_start as usize) as u32;
         segment.virtual_end = map(segment.virtual_end as usize) as u32;
+        // A rewrite inside a verbatim range changed its length: the bytes
+        // no longer match one for one, so the range maps as a whole.
+        if segment.kind == crate::SegmentKind::Verbatim
+            && segment.virtual_end - segment.virtual_start
+                != segment.original_end - segment.original_start
+        {
+            segment.kind = crate::SegmentKind::Atom;
+        }
     }
     out
 }
