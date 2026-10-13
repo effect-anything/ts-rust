@@ -164,6 +164,10 @@ fn expand_pass(
 ) -> (Expansion, Vec<(usize, usize, Vec<String>)>) {
     let source = request.code;
     let read = sweetener_reader::read_syntax(source);
+    SYNTAX_PARAMETERS.with(|set| {
+        *set.borrow_mut() = syntax_parameters(&read.children).into_iter().collect();
+    });
+    super::sweetener_scoped::clear_unused();
     let imports = syntax_imports(&read.children);
     let names_again = names.clone();
     let user_names = names.unwrap_or_else(|| user_spellings(&read.children));
@@ -254,6 +258,10 @@ fn expand_pass(
         printer.out.clear();
         printer.segments.clear();
     }
+    // A syntax parameter the file still spells, outside every expansion
+    // that gives it a meaning.
+    let unbound = unbound_parameter_uses(source, &printer.segments);
+    printer.diagnostics.extend(unbound);
     // Warnings come last so they never count as a failed expansion above.
     let unread = unread_items(
         source,
@@ -262,8 +270,13 @@ fn expand_pass(
         &printer.diagnostics,
     );
     printer.diagnostics.extend(unread);
-    let code = super::sweetener_hygiene::assign(
+    let hoisted = super::sweetener_scoped::hoist(
         &printer.out,
+        &mut printer.segments,
+        request.filename.ends_with('x'),
+    );
+    let code = super::sweetener_hygiene::assign(
+        &hoisted,
         &mut printer.segments,
         request.filename.ends_with('x'),
     );
@@ -1120,8 +1133,14 @@ impl<'a> Printer<'a> {
                     && matches!(&nodes[cursor - 1], Syntax::Operator { raw, .. } if raw == ".");
                 let infix_word = macro_head(&nodes[cursor])
                     .is_some_and(|name| self.infix_precedence(name).is_some());
+                // `await x |> f(%)`: a unary keyword binds its operand.
+                let prev_is_unary = cursor > index
+                    && ["await", "typeof", "void", "delete", "new"]
+                        .iter()
+                        .any(|word| token_is(Some(&nodes[cursor - 1]), word));
                 if !prev_is_op
                     && !prev_is_dot
+                    && !prev_is_unary
                     && !token_is(Some(&nodes[cursor]), "as")
                     && !infix_word
                 {
@@ -1881,7 +1900,19 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// Expand the macros a rendered template still contains, then give
+    /// each `#parameterize` region its parameter, innermost first.
     fn expand_replacement(&mut self, replacement: &str) -> String {
+        let expanded = self.expand_replacement_macros(replacement);
+        if !expanded.contains("__swp") {
+            return expanded;
+        }
+        let (resolved, unused) = super::sweetener_scoped::resolve_parameters(&expanded);
+        super::sweetener_scoped::note_unused(unused);
+        resolved
+    }
+
+    fn expand_replacement_macros(&mut self, replacement: &str) -> String {
         if self.depth > 8 || !self.replacement_needs_expand(replacement) {
             return replacement.to_owned();
         }
@@ -2509,6 +2540,22 @@ impl<'a> Printer<'a> {
     }
 
     fn emit(&mut self, original_start: u32, original_end: u32, text: &str, kind: SegmentKind) {
+        if self.depth == 0 {
+            // `#parameterize(required % = ...)` around a body that never
+            // uses `%`. The body is inside this expansion.
+            for unused in super::sweetener_scoped::take_unused() {
+                self.diagnostics.push(Diagnostic {
+                    message: format!(
+                        "SWR4022: This must use {0}, and does not. The macro gives {0} a meaning here only for syntax that uses it.",
+                        unused.param
+                    ),
+                    start: original_start,
+                    end: original_end,
+                    severity: Severity::Error,
+                    ..Default::default()
+                });
+            }
+        }
         if self.depth == 0 && kind == SegmentKind::Atom {
             if let Some(captures) = self.pending_captures.take() {
                 // Only a capture the expansion prints again is in the output.
@@ -2706,6 +2753,21 @@ enum Tpl {
     },
     /// `#index()` — the zero-based index of the current repetition row.
     Index,
+    /// `#let(name = value) { body }` — evaluate `value` once and bind it to
+    /// a fresh `name` the body refers to.
+    Let {
+        name: String,
+        value: Vec<Tpl>,
+        body: Vec<Tpl>,
+    },
+    /// `#parameterize([required] p = value) { body }` — inside `body`, the
+    /// syntax parameter `p` stands for `value`.
+    Parameterize {
+        param: String,
+        required: bool,
+        value: Vec<Tpl>,
+        body: Vec<Tpl>,
+    },
     Rep {
         inner: Vec<Tpl>,
         sep: Option<String>,
@@ -2907,11 +2969,12 @@ fn load_syntax_module(
             if !is_core_form(&macro_.name, &macro_.category, macro_.operator) || authorized {
                 taken.push(macro_);
             }
-        } else if report
-            && !syntax_parameters(&read.children)
-                .iter()
-                .any(|param| param == exported)
+        } else if syntax_parameters(&read.children)
+            .iter()
+            .any(|param| param == exported)
         {
+            note_syntax_parameter(name);
+        } else if report {
             loaded.diagnostics.push(Diagnostic {
                 message: format!(
                     "SWR4001: Sweetener macro error: macro `{name}` was imported for syntax but is not exported by its module"
@@ -3506,6 +3569,56 @@ fn collect_macros(source: &str, nodes: &[Syntax], out: &mut HashMap<String, Macr
         }
         index += 1;
     }
+}
+
+thread_local! {
+    /// Syntax parameters (`%`) this file declares or imports. Where one
+    /// starts an expression it is an operand, not an operator.
+    static SYNTAX_PARAMETERS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+fn unbound_parameter_uses(source: &str, segments: &[Segment]) -> Vec<Diagnostic> {
+    let params: Vec<String> = SYNTAX_PARAMETERS.with(|set| set.borrow().iter().cloned().collect());
+    let mut out = Vec::new();
+    for param in params {
+        for at in super::sweetener_scoped::parameter_uses(source, &param) {
+            let end = at + param.len();
+            let before = source[..at].trim_end();
+            let after = source[end..].trim_start();
+            // `import { (%) }` and `syntax parameter (%)` name it.
+            if before.ends_with('(') && after.starts_with(')') {
+                continue;
+            }
+            let copied = segments.iter().any(|segment| {
+                segment.kind == SegmentKind::Verbatim
+                    && segment.original_start as usize <= at
+                    && end <= segment.original_end as usize
+            });
+            if copied {
+                out.push(Diagnostic {
+                    message: format!(
+                        "SWR4018: Syntax parameter {param} is used outside any #parameterize that gives it a meaning. It is declared without rules, so it means nothing here."
+                    ),
+                    start: u32_at(at),
+                    end: u32_at(end),
+                    severity: Severity::Error,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    out
+}
+
+fn note_syntax_parameter(name: &str) {
+    SYNTAX_PARAMETERS.with(|set| {
+        set.borrow_mut().insert(name.to_owned());
+    });
+}
+
+fn is_syntax_parameter(name: &str) -> bool {
+    SYNTAX_PARAMETERS.with(|set| set.borrow().contains(name))
 }
 
 /// Names a module declares with `syntax parameter (%):expr;`. They are
@@ -4530,6 +4643,16 @@ fn template_from_source(source: &str, group: &Syntax) -> Vec<Tpl> {
 fn walk_template(source: &str, nodes: &[Syntax], tpls: &mut Vec<Tpl>, cursor: &mut usize) {
     let mut index = 0;
     while index < nodes.len() {
+        // A comment in a template is the macro author's note. Theirs never
+        // prints it, and the whitespace after it belongs to the comment.
+        if let Syntax::Comment { span, .. } = &nodes[index] {
+            push_gap(source, tpls, cursor, span.start as usize);
+            let end = span.end as usize;
+            let rest = source.get(end..).unwrap_or("");
+            *cursor = end + (rest.len() - rest.trim_start().len());
+            index += 1;
+            continue;
+        }
         if is_rep_open(nodes, index) {
             push_gap(source, tpls, cursor, node_start(&nodes[index]));
             let (tpl, next) = read_tpl_rep(nodes, index);
@@ -4688,6 +4811,9 @@ fn read_split_directive(source: &str, nodes: &[Syntax], index: usize) -> Option<
     if name == "#if" {
         return read_if(source, nodes, index + 3, span.start as usize, children);
     }
+    if let Some(found) = read_scoped(source, nodes, index + 3, &name, children, arg_span) {
+        return Some(found);
+    }
     let tpl = directive_tpl(source, &name, span.start as usize, args, children, arg_span)?;
     Some((tpl, index + 3))
 }
@@ -4726,8 +4852,63 @@ fn read_directive(source: &str, nodes: &[Syntax], index: usize) -> Option<(Tpl, 
     if raw == "#if" {
         return read_if(source, nodes, index + 2, span.start as usize, children);
     }
+    if let Some(found) = read_scoped(source, nodes, index + 2, raw, children, arg_span) {
+        return Some(found);
+    }
     let tpl = directive_tpl(source, raw, span.start as usize, args, children, arg_span)?;
     Some((tpl, index + 2))
+}
+
+/// `#let(name = value) { body }` and `#parameterize([required] p = value)
+/// { body }`. The value is a template; so is the body.
+fn read_scoped(
+    source: &str,
+    nodes: &[Syntax],
+    body_at: usize,
+    name: &str,
+    children: &[Syntax],
+    arg_span: &Span,
+) -> Option<(Tpl, usize)> {
+    if name != "#let" && name != "#parameterize" {
+        return None;
+    }
+    let body = nodes.get(body_at)?;
+    if !group_is(Some(body), Delimiter::Brace) {
+        return None;
+    }
+    let mut at = 0;
+    let required = name == "#parameterize" && token_at(children, at, "required");
+    if required {
+        at += 1;
+    }
+    let bound = match children.get(at)? {
+        Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => raw.clone(),
+        _ => return None,
+    };
+    if !operator_is(children.get(at + 1), "=") {
+        return None;
+    }
+    let first = children.get(at + 2)?;
+    let mut value = Vec::new();
+    let mut cursor = node_start(first);
+    walk_template(source, &children[at + 2..], &mut value, &mut cursor);
+    push_gap(source, &mut value, &mut cursor, arg_span.end as usize - 1);
+    let body = group_template(source, body);
+    let tpl = if name == "#let" {
+        Tpl::Let {
+            name: bound,
+            value,
+            body,
+        }
+    } else {
+        Tpl::Parameterize {
+            param: bound,
+            required,
+            value,
+            body,
+        }
+    };
+    Some((tpl, body_at + 1))
 }
 
 fn syntax_define(source: &str, body: &Syntax) -> Option<Tpl> {
@@ -7900,10 +8081,12 @@ fn take_expr_until(
 fn is_expr_start(node: &Syntax) -> bool {
     match node {
         Syntax::Token { .. } | Syntax::String { .. } | Syntax::Group { .. } => true,
-        Syntax::Operator { raw, .. } => matches!(
-            raw.as_str(),
-            "!" | "-" | "+" | "~" | "#" | "..." | "." | "<"
-        ),
+        Syntax::Operator { raw, .. } => {
+            matches!(
+                raw.as_str(),
+                "!" | "-" | "+" | "~" | "#" | "..." | "." | "<"
+            ) || is_syntax_parameter(raw)
+        }
         Syntax::Comment { .. } => false,
     }
 }
@@ -9435,6 +9618,29 @@ fn render_keeping_holes(out: &mut String, template: &[Tpl], captures: &HashMap<S
                 }
             }
             Tpl::Index => out.push_str("#index()"),
+            Tpl::Let { name, value, body } => {
+                out.push_str(&format!("#let({name} = "));
+                render_keeping_holes(out, value, captures);
+                out.push_str(") {");
+                render_keeping_holes(out, body, captures);
+                out.push('}');
+            }
+            Tpl::Parameterize {
+                param,
+                required,
+                value,
+                body,
+            } => {
+                out.push_str("#parameterize(");
+                if *required {
+                    out.push_str("required ");
+                }
+                out.push_str(&format!("{param} = "));
+                render_keeping_holes(out, value, captures);
+                out.push_str(") {");
+                render_keeping_holes(out, body, captures);
+                out.push('}');
+            }
             Tpl::Unknown { name, .. } => out.push_str(name),
         }
     }
@@ -9531,6 +9737,62 @@ fn row_belongs_here(scoped: &HashMap<String, Capture>, row: &[(String, Capture)]
     })
 }
 
+/// `#let(name = value) { body }`: the body sees a fresh binder for `name`.
+/// A body that awaits or yields cannot move into a function of its own, so
+/// it assigns a binder declared at the top of the enclosing function.
+fn render_let(
+    out: &mut String,
+    name: &str,
+    value: &[Tpl],
+    body: &[Tpl],
+    captures: &HashMap<String, Capture>,
+    classes: &[SyntaxClass],
+    protected: &mut Vec<(usize, usize)>,
+) {
+    let binder = super::sweetener_hygiene::placeholder(name);
+    let mut bound = String::new();
+    render(&mut bound, value, captures, classes, &mut Vec::new());
+    let mut text = String::new();
+    let mut spans = Vec::new();
+    super::sweetener_scoped::push_let(name, &binder);
+    render(&mut text, body, captures, classes, &mut spans);
+    super::sweetener_scoped::pop_let();
+    let (text, spans) = super::sweetener_scoped::rename_outside(&text, &spans, name, &binder);
+    let text_trimmed = text.trim();
+    let lead = text.len() - text.trim_start().len();
+    let suspends = super::sweetener_scoped::suspends(text_trimmed);
+    let head = if suspends {
+        format!("({binder} = {}, ", bound.trim())
+    } else {
+        format!("(({binder}) => ")
+    };
+    out.push_str(&head);
+    let base = out.len();
+    let object = !suspends && text_trimmed.starts_with('{');
+    if object {
+        out.push('(');
+    }
+    let shift = out.len() - base;
+    out.push_str(text_trimmed);
+    for (from, to) in spans {
+        if from >= lead {
+            protected.push((
+                base + shift + from - lead,
+                base + shift + (to - lead).min(text_trimmed.len()),
+            ));
+        }
+    }
+    if object {
+        out.push(')');
+    }
+    if suspends {
+        out.push_str(&super::sweetener_scoped::hoist_marker(&binder));
+        out.push(')');
+    } else {
+        out.push_str(&format!(")({})", bound.trim()));
+    }
+}
+
 fn render(
     out: &mut String,
     template: &[Tpl],
@@ -9610,6 +9872,26 @@ fn render(
                 }
             }
             Tpl::Define(_) => {}
+            Tpl::Let { name, value, body } => {
+                render_let(out, name, value, body, captures, classes, protected)
+            }
+            Tpl::Parameterize {
+                param,
+                required,
+                value,
+                body,
+            } => {
+                let mut bound = String::new();
+                render(&mut bound, value, captures, classes, &mut Vec::new());
+                // `#parameterize(% = topic)` inside `#let(topic = ...)` names
+                // the let's binder.
+                let bound = super::sweetener_scoped::let_binder_in(bound.trim());
+                let (open, close) =
+                    super::sweetener_scoped::parameter_markers(param, &bound, *required);
+                out.push_str(&open);
+                render(out, body, captures, classes, protected);
+                out.push_str(&close);
+            }
             Tpl::Unknown { .. } => {}
             Tpl::Metavar { hole, key } => {
                 let name = metavar_hole(hole, key, captures);
@@ -10645,6 +10927,10 @@ fn collect_vars(template: &[Tpl], names: &mut Vec<String>) {
             Tpl::Define(inner) | Tpl::Core(inner) | Tpl::Rep { inner, .. } => {
                 collect_vars(inner, names)
             }
+            Tpl::Let { value, body, .. } | Tpl::Parameterize { value, body, .. } => {
+                collect_vars(value, names);
+                collect_vars(body, names);
+            }
             Tpl::If {
                 path,
                 then_body,
@@ -10940,6 +11226,10 @@ fn collect_free_idents(template: &[Tpl], names: &mut std::collections::HashSet<S
             }
             Tpl::Core(inner) | Tpl::Rep { inner, .. } | Tpl::Define(inner) => {
                 collect_free_idents(inner, names)
+            }
+            Tpl::Let { value, body, .. } | Tpl::Parameterize { value, body, .. } => {
+                collect_free_idents(value, names);
+                collect_free_idents(body, names);
             }
             Tpl::If {
                 then_body,

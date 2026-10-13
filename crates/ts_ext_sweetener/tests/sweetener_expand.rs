@@ -806,6 +806,65 @@ fn item_hole_reads_exports_and_stmt_hole_does_not() {
     assert!(call.contains("import(\"y\");"), "{call}");
 }
 
+const HACK_PIPE: &str = "export syntax parameter (%):expr;\n\
+export operator (|>):expr {\n\
+  fixity infix;\n\
+  associativity right;\n\
+  precedence 20;\n\
+  rule { $value:expr |> $body:expr } => {\n\
+    // a note the output never prints\n\
+    #let(topic = $value) {\n\
+      #parameterize(required % = topic) { $body }\n\
+    }\n\
+  }\n\
+}\n";
+
+/// `#let` binds a value once to a fresh name; `#parameterize` gives the
+/// syntax parameter `%` that name inside the body. An inner pipe rebinds
+/// `%` for its own body only, `% % 5` keeps the remainder, and a body that
+/// awaits or yields assigns a binder declared at the top of its function.
+#[test]
+fn let_and_parameterize() {
+    let code = expand_ok(
+        "pipe.sts",
+        &format!(
+            "{HACK_PIPE}const a = xs |> %.map(f) |> %.join(\" \") |> `$ ${{%}}`;\n\
+const b = next() |> [%, % * 10];\n\
+const c = 17 |> % % 5;\n\
+async function load(id) {{\n  return id |> await get(%) |> %.name;\n}}\n"
+        ),
+    );
+    for piece in [
+        "const a = ((topic) => ((topic_1) => ((topic_2) => `$ ${topic_2}`)(topic_1.join(\" \")))(topic.map(f)))(xs);",
+        "const b = ((topic_3) => [topic_3, topic_3 * 10])(next());",
+        "const c = ((topic_4) => topic_4 % 5)(17);",
+        "async function load(id) { let topic_5; return (topic_5 = id, ((topic_6) => topic_6.name)(await get(topic_5)));",
+    ] {
+        assert!(code.contains(piece), "missing {piece}: {code}");
+    }
+    assert!(!code.contains("note"), "{code}");
+}
+
+/// A `required` parameter the body never uses is SWR4022; a parameter used
+/// outside every `#parameterize` is SWR4018.
+#[test]
+fn parameter_misuse_diagnostics() {
+    let code = format!("{HACK_PIPE}const a = 1 |> foo + 1;\nconst b = %;\n");
+    let out = expand(ExpandRequest {
+        filename: "pipe.sts",
+        code: &code,
+        phase: Phase::Check,
+    });
+    let codes: Vec<&str> = out
+        .diagnostics
+        .iter()
+        .map(|diagnostic| &diagnostic.message[..7])
+        .collect();
+    assert_eq!(codes, ["SWR4022", "SWR4018"], "{:?}", out.diagnostics);
+    let at = out.diagnostics[1].start as usize;
+    assert_eq!(&code[at..at + 1], "%");
+}
+
 /// Hygiene asks the output, as upstream does: a binder the user wrote inside
 /// input a macro consumed (and did not print again) does not force a rename,
 /// one still printed does.
