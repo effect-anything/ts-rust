@@ -1156,7 +1156,10 @@ impl<'a> Printer<'a> {
 
     /// `${... |> callee}` is still an operator use. The reader keeps the
     /// whole template as one string, so the infix walk never sees it.
-    fn expand_template_literal(&mut self, raw: &str) -> Option<String> {
+    /// The result carries pieces: the template text and every capture a
+    /// hole's expansion prints map back to their own bytes of `raw`, which
+    /// starts at `base` in this printer's source.
+    fn expand_template_literal(&mut self, raw: &str, base: u32) -> Option<(String, Vec<Piece>)> {
         if !raw.starts_with('`') || !raw.contains("${") {
             return None;
         }
@@ -1164,8 +1167,16 @@ impl<'a> Printer<'a> {
             return None;
         }
         let mut out = String::new();
+        let mut pieces: Vec<Piece> = Vec::new();
+        let copy = |out: &mut String, pieces: &mut Vec<Piece>, from: usize, to: usize| {
+            if from < to {
+                pieces.push((out.len(), out.len() + (to - from), base + u32_at(from)));
+                out.push_str(&raw[from..to]);
+            }
+        };
         let bytes = raw.as_bytes();
         let mut index = 0;
+        let mut plain = 0;
         let mut changed = false;
         while index < bytes.len() {
             if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'{') {
@@ -1182,27 +1193,34 @@ impl<'a> Printer<'a> {
                     index += 1;
                 }
                 if depth != 0 {
-                    out.push_str(&raw[start..]);
+                    index = bytes.len();
                     break;
                 }
                 let body = &raw[body_at..index - 1];
                 if body.contains("|>") || self.replacement_needs_expand(body) {
-                    let expanded = self.expand_fragment(body);
+                    let mark = TRACES.with(|traces| traces.borrow().len());
+                    let (expanded, inner) = self.expand_fragment(body);
+                    let at = base + u32_at(body_at);
+                    self.lift_traces(mark, &[(0, body.len(), at)], at, at + u32_at(body.len()));
                     if expanded != body {
                         changed = true;
                     }
-                    out.push_str("${");
+                    copy(&mut out, &mut pieces, plain, start + 2);
+                    let offset = out.len();
+                    pieces.extend(
+                        inner
+                            .into_iter()
+                            .map(|(from, to, source)| (offset + from, offset + to, at + source)),
+                    );
                     out.push_str(&expanded);
-                    out.push('}');
-                } else {
-                    out.push_str(&raw[start..index]);
+                    plain = index - 1;
                 }
                 continue;
             }
-            out.push(bytes[index] as char);
             index += 1;
         }
-        changed.then_some(out)
+        copy(&mut out, &mut pieces, plain, index.min(bytes.len()));
+        changed.then_some((out, pieces))
     }
 
     /// Every definition of `name` is an `:item` macro.
@@ -1268,12 +1286,15 @@ impl<'a> Printer<'a> {
             }
             Syntax::String { span, raw } => {
                 self.copy_until(span.start as usize);
-                let rewritten = self
-                    .expand_template_literal(raw)
-                    .unwrap_or_else(|| rewrite_specifier(raw));
+                let (rewritten, pieces) =
+                    self.expand_template_literal(raw, span.start).map_or_else(
+                        || (rewrite_specifier(raw), None),
+                        |(text, pieces)| (text, Some(pieces)),
+                    );
                 if rewritten == *raw {
                     self.copy_until(span.end as usize);
                 } else {
+                    self.pending_pieces = pieces;
                     self.emit(span.start, span.end, &rewritten, SegmentKind::Atom);
                     self.last_original = span.end as usize;
                 }
@@ -1407,7 +1428,8 @@ impl<'a> Printer<'a> {
         next: usize,
         name: &str,
         expanded: &str,
-    ) -> Option<(String, usize, usize)> {
+        pieces: &[Piece],
+    ) -> Option<(String, usize, usize, Vec<Piece>)> {
         if self.infix_associativity(name) != Associativity::Left
             || operator_spelling(nodes.get(next)?) != Some(name)
         {
@@ -1421,9 +1443,23 @@ impl<'a> Printer<'a> {
             stop += 1;
         }
         let end = node_end(&nodes[stop - 1]);
-        let rest = sweetener_reader::slice_range(self.source, node_start(&nodes[next]), end);
+        let rest_at = node_start(&nodes[next]);
+        let rest = sweetener_reader::slice_range(self.source, rest_at, end);
         let combined = format!("{expanded} {rest}");
-        Some((self.expand_replacement(&combined), end, stop))
+        // The combined operand copies the expansion so far (through its
+        // own pieces) and the rest of the chain as written.
+        let mut copied = pieces.to_vec();
+        copied.push((expanded.len() + 1, combined.len(), u32_at(rest_at)));
+        let mark = TRACES.with(|traces| traces.borrow().len());
+        let (folded, inner) = self.expand_replacement_mapped(&combined);
+        let start = copied
+            .iter()
+            .map(|piece| piece.2)
+            .min()
+            .unwrap_or(u32_at(rest_at));
+        self.lift_traces(mark, &copied, start, u32_at(end));
+        let pieces = super::sweetener_origins::compose(&inner, &copied);
+        Some((folded, end, stop, pieces))
     }
 
     /// Upstream's first two ways to read a macro operator's right operand
@@ -1617,15 +1653,13 @@ impl<'a> Printer<'a> {
                     let mut next = matched.next;
                     // `a |> f() |> g()` is left-associative: the expansion
                     // of `a |> f()` is the left operand of the next `|>`.
-                    if let Some((folded, chain_end, resume)) =
-                        self.fold_left_chain(nodes, next, &name, &expanded)
+                    if let Some((folded, chain_end, resume, folded_pieces)) =
+                        self.fold_left_chain(nodes, next, &name, &expanded, &pieces)
                     {
-                        // The chain re-expanded this text as an operand;
-                        // its copies are not tracked through that.
                         expanded = folded;
                         end = chain_end;
                         next = resume;
-                        pieces.clear();
+                        pieces = folded_pieces;
                     }
                     self.copy_until(start as usize);
                     self.pending_pieces = Some(pieces);
@@ -1683,13 +1717,13 @@ impl<'a> Printer<'a> {
                 // A specially read right operand stopped at the next use of
                 // the operator; the chain continues from this expansion.
                 if read_specially
-                    && let Some((folded, chain_end, chain_next)) =
-                        self.fold_left_chain(nodes, resume, &name, &expanded)
+                    && let Some((folded, chain_end, chain_next, folded_pieces)) =
+                        self.fold_left_chain(nodes, resume, &name, &expanded, &expanded_pieces)
                 {
                     expanded = folded;
                     emit_end = chain_end;
                     resume = chain_next;
-                    expanded_pieces.clear();
+                    expanded_pieces = folded_pieces;
                 }
                 self.pending_pieces = Some(expanded_pieces);
                 self.emit(start, u32_at(emit_end), &expanded, SegmentKind::Atom);
@@ -2086,7 +2120,7 @@ impl<'a> Printer<'a> {
         }
     }
 
-    fn expand_fragment(&mut self, fragment: &str) -> String {
+    fn expand_fragment(&mut self, fragment: &str) -> (String, Vec<Piece>) {
         let owned = fragment.to_owned();
         let read = sweetener_reader::read_syntax(&owned);
         let mut nested = Printer {
@@ -2125,7 +2159,8 @@ impl<'a> Printer<'a> {
         if nested.failed {
             self.failed = true;
         }
-        nested.out
+        let pieces = nested.copy_pieces();
+        (nested.out, pieces)
     }
 
     /// A node `try_form` might rewrite. Ordinary identifiers, strings, and
@@ -2375,12 +2410,6 @@ impl<'a> Printer<'a> {
             let scoped = with_rep_index(rep_row_scope(captures, &path, row), index);
             self.render_core(out, &inner, &scoped, pieces);
         }
-    }
-
-    /// Expand the macros a rendered template still contains, then give
-    /// each `#parameterize` region its parameter, innermost first.
-    fn expand_replacement(&mut self, replacement: &str) -> String {
-        self.expand_replacement_mapped(replacement).0
     }
 
     /// The replacement with the macros in it expanded, and the ranges of
@@ -2840,7 +2869,20 @@ impl<'a> Printer<'a> {
         // Curried `function` prints ordinary overloads. An expression
         // `function(...)` is the same macro. Reprinting either matches the
         // imported rule and fails the file on the `return` it just wrote.
-        let mut expanded = self.expand_replacement(&rewritten.text);
+        // A procedural form builds its text from the invocation's own
+        // tokens. Their order survives, so the rewrite's token diff against
+        // the invocation says which output tokens copy which input tokens.
+        let invocation = sweetener_reader::slice_range(self.source, rewritten.start, rewritten.end);
+        let own = super::sweetener_origins::carry(
+            invocation,
+            &rewritten.text,
+            &[(0, invocation.len(), u32_at(rewritten.start))],
+        );
+        let mark = TRACES.with(|traces| traces.borrow().len());
+        let (mut expanded, inner) = self.expand_replacement_mapped(&rewritten.text);
+        self.lift_traces(mark, &own, u32_at(rewritten.start), u32_at(rewritten.end));
+        let mut pieces = super::sweetener_origins::compose(&inner, &own);
+        let before = expanded.clone();
         // Channel operators name `put` and `take`. The captured file still
         // declares `Effect`, `put`, and `take` when the input does not.
         // The hygiene input is that case. Do not invent them twice.
@@ -2862,6 +2904,10 @@ impl<'a> Printer<'a> {
         if expanded.contains("type Effect =\n  |") {
             expanded = expanded.replace("type Effect =\n  |", "type Effect =\n ");
         }
+        if expanded != before {
+            pieces = super::sweetener_origins::carry(&before, &expanded, &pieces);
+        }
+        self.pending_pieces = Some(pieces);
         self.emit(
             u32_at(rewritten.start),
             u32_at(rewritten.end),
