@@ -633,3 +633,95 @@ let ok = 1;\n";
         code.find("let go").unwrap()
     );
 }
+
+fn expand_ok(filename: &str, code: &str) -> String {
+    let out = expand(ExpandRequest {
+        filename,
+        code,
+        phase: Phase::Check,
+    });
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    out.code.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `$( ... )?` matches at most once and a spaced `|` separates ordered
+/// alternatives; the alternative that fills its group is taken.
+#[test]
+fn optional_and_choice_patterns() {
+    let code = expand_ok(
+        "choice.sts",
+        "export syntax opt:expr {\n\
+  rule { opt($x:expr $(, $y:expr)?) } => { [$x $(, $y)*] }\n\
+}\n\
+export syntax pick:expr {\n\
+  rule { pick(yes) } => { true }\n\
+  rule { pick($a:ident | $a:ident !) } => { $a }\n\
+}\n\
+const a = opt(1);\n\
+const b = opt(1, 2);\n\
+const c = pick(yes);\n\
+const d = pick(foo);\n\
+const e = pick(bar !);\n\
+",
+    );
+    for line in [
+        "const a = [1 ];",
+        "const b = [1 , 2];",
+        "const c = true;",
+        "const d = foo;",
+        "const e = bar;",
+    ] {
+        assert!(code.contains(line), "missing {line}: {code}");
+    }
+}
+
+/// `:classElement`, `:typeMember` and destructuring `:binding` holes.
+#[test]
+fn member_and_binding_holes() {
+    let code = expand_ok(
+        "holes.sts",
+        "export syntax klass:item {\n\
+  rule { klass $name:ident { $($member:classElement)* } } => { class $name { $($member)* } }\n\
+}\n\
+export syntax shape:item {\n\
+  rule { shape $name:ident { $($field:typeMember)* } } => { interface $name { $($field)* } }\n\
+}\n\
+export syntax bind:stmt {\n\
+  rule { bind $target:binding = $value:expr; } => { const $target = $value; }\n\
+}\n\
+export syntax twice:stmt {\n\
+  rule { twice $body:item } => { $body $body }\n\
+}\n\
+klass Point { x = 1; move(dx: number) { this.x += dx; } }\n\
+shape Size { width: number; height?: number; }\n\
+bind { a, b } = pair;\n\
+bind [c, d] = list;\n\
+",
+    );
+    for piece in [
+        "class Point { x = 1;move(dx: number) { this.x += dx; } }",
+        "interface Size { width: number;height?: number; }",
+        "const { a, b } = pair;",
+        "const [c, d] = list;",
+    ] {
+        assert!(code.contains(piece), "missing {piece}: {code}");
+    }
+}
+
+/// A `fixity postfix` operator takes the expression written before it.
+#[test]
+fn postfix_operator() {
+    let code = expand_ok(
+        "postfix.sts",
+        "export operator (::):expr {\n\
+  fixity postfix;\n\
+  precedence 80;\n\
+  rule { $value:expr :: } => { assertDefined($value) }\n\
+}\n\
+const a = load() ::;\n\
+const b = 1 + x ::;\n\
+",
+    );
+    assert!(code.contains("const a = assertDefined(load());"), "{code}");
+    assert!(code.contains("const b = assertDefined(1 + x);"), "{code}");
+}

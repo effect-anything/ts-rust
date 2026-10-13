@@ -522,7 +522,7 @@ impl<'a> Printer<'a> {
                     if self
                         .macros
                         .iter()
-                        .any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
+                        .any(|macro_| macro_.name == name && !macro_.fixity.operand_led())
                         && !self.rules_reject(nodes, index)
                     {
                         index = self.expand_head(nodes, index, &name);
@@ -584,7 +584,7 @@ impl<'a> Printer<'a> {
                 if self
                     .macros
                     .iter()
-                    .any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
+                    .any(|macro_| macro_.name == name && !macro_.fixity.operand_led())
                 {
                     index = self.expand_grouped(nodes, index, &name);
                     continue;
@@ -831,7 +831,7 @@ impl<'a> Printer<'a> {
     fn infix_associativity(&self, name: &str) -> Associativity {
         self.macros
             .iter()
-            .find(|macro_| macro_.fixity == Fixity::Infix && macro_.name == name)
+            .find(|macro_| macro_.fixity.operand_led() && macro_.name == name)
             .map(|macro_| macro_.associativity)
             .unwrap_or(Associativity::Left)
     }
@@ -839,12 +839,19 @@ impl<'a> Printer<'a> {
     fn infix_precedence(&self, name: &str) -> Option<u8> {
         self.macros
             .iter()
-            .find(|macro_| macro_.fixity == Fixity::Infix && macro_.name == name)
+            .find(|macro_| macro_.fixity.operand_led() && macro_.name == name)
             .map(|macro_| macro_.precedence)
     }
 
     fn expand_infix_expr(&mut self, nodes: &[Syntax], index: usize, op_at: usize) -> usize {
         let name = operator_spelling(&nodes[op_at]).unwrap_or("").to_owned();
+        if self
+            .macros
+            .iter()
+            .any(|macro_| macro_.name == name && macro_.fixity == Fixity::Postfix)
+        {
+            return self.expand_postfix_expr(nodes, index, op_at, &name);
+        }
         let left = sweetener_reader::slice_range(
             self.source,
             node_start(&nodes[index]),
@@ -976,6 +983,60 @@ impl<'a> Printer<'a> {
         self.fail_macro(nodes, index, &name, &rules);
         // The left operand is ordinary code. Only the operator's own item
         // stays as written; a later statement is still expanded.
+        self.skip_failed(nodes, op_at)
+    }
+
+    /// `operand OP` for a `fixity postfix` operator. The operand is the
+    /// expression written before the operator; a rule `$value:expr OP`
+    /// binds it.
+    fn expand_postfix_expr(
+        &mut self,
+        nodes: &[Syntax],
+        index: usize,
+        op_at: usize,
+        name: &str,
+    ) -> usize {
+        let left = sweetener_reader::slice_range(
+            self.source,
+            node_start(&nodes[index]),
+            node_start(&nodes[op_at]),
+        )
+        .trim()
+        .to_owned();
+        let rules: Vec<Rule> = self
+            .macros
+            .iter()
+            .filter(|macro_| macro_.name == name)
+            .flat_map(|macro_| macro_.rules.clone())
+            .collect();
+        for rule in &rules {
+            let [Pat::Hole { name: hole, .. }, Pat::Lit(op)] = rule.pattern.as_slice() else {
+                continue;
+            };
+            if op != name || left.is_empty() {
+                continue;
+            }
+            let mut captures = HashMap::new();
+            captures.insert(hole.clone(), Capture::Text(left.clone()));
+            if !refine_accepts(&rule.refines, &captures) {
+                continue;
+            }
+            self.diagnose_unknown(&rule.template, node_span(&nodes[op_at]));
+            let was_core = self.printing_core;
+            if template_is_core(&rule.template) {
+                self.printing_core = true;
+            }
+            let replacement = instantiate(self.source, &rule.template, &captures, &self.classes);
+            let expanded = self.expand_replacement(&replacement);
+            self.printing_core = was_core;
+            let start = node_span(&nodes[index]).start;
+            let end = node_end(&nodes[op_at]);
+            self.copy_until(start as usize);
+            self.emit(start, u32_at(end), &expanded, SegmentKind::Atom);
+            self.last_original = end;
+            return op_at + 1;
+        }
+        self.fail_macro(nodes, index, name, &rules);
         self.skip_failed(nodes, op_at)
     }
 
@@ -1340,7 +1401,7 @@ impl<'a> Printer<'a> {
                     || self
                         .macros
                         .iter()
-                        .any(|macro_| macro_.fixity == Fixity::Infix && macro_.name == *raw)
+                        .any(|macro_| macro_.fixity.operand_led() && macro_.name == *raw)
                 {
                     return true;
                 }
@@ -1666,7 +1727,7 @@ impl<'a> Printer<'a> {
         if self
             .macros
             .iter()
-            .any(|macro_| macro_.name == name && macro_.fixity == Fixity::Infix)
+            .any(|macro_| macro_.name == name && macro_.fixity.operand_led())
             && macro_head(&nodes[index]).is_none()
             && !nodes
                 .get(index)
@@ -1722,7 +1783,7 @@ impl<'a> Printer<'a> {
     fn compiled_rule_matches(&self, nodes: &[Syntax], index: usize, name: &str) -> bool {
         self.macros
             .iter()
-            .filter(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
+            .filter(|macro_| macro_.name == name && !macro_.fixity.operand_led())
             .flat_map(|macro_| macro_.rules.iter())
             .any(|rule| {
                 match_rule_with(
@@ -1743,7 +1804,7 @@ impl<'a> Printer<'a> {
         if grouped_prefix(nodes, index).is_some_and(|name| {
             self.macros
                 .iter()
-                .any(|macro_| macro_.name == name && macro_.fixity != Fixity::Infix)
+                .any(|macro_| macro_.name == name && !macro_.fixity.operand_led())
         }) {
             return false;
         }
@@ -2152,6 +2213,15 @@ enum Fixity {
     Function,
     Prefix,
     Infix,
+    /// `fixity postfix;`: written after its one operand.
+    Postfix,
+}
+
+impl Fixity {
+    /// Infix and postfix operators are found after their left operand.
+    fn operand_led(self) -> bool {
+        matches!(self, Self::Infix | Self::Postfix)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2194,6 +2264,9 @@ enum Pat {
         sep: Option<String>,
         kind: RepKind,
     },
+    /// `a | b`: ordered alternatives of a whole sequence (upstream
+    /// `createChoicePattern`). The first alternative that matches wins.
+    Choice(Vec<Vec<Pat>>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2204,6 +2277,11 @@ enum HoleKind {
     Binding,
     Ident,
     TokenTree,
+    /// `$member:classElement` / `$member:typeMember`: one member of a class
+    /// body or of an object type.
+    Member {
+        type_member: bool,
+    },
     /// `$state:State` — a user syntax class, matched by its rules.
     Class(String),
 }
@@ -2212,6 +2290,8 @@ enum HoleKind {
 enum RepKind {
     ZeroOrMore,
     OneOrMore,
+    /// `$( ... )?`: at most one.
+    Optional,
 }
 
 #[derive(Clone, Debug)]
@@ -2753,6 +2833,11 @@ fn rename_pat_lit(pats: &mut [Pat], from: &str, to: &str) {
         match pat {
             Pat::Lit(text) if text == from => *text = to.to_owned(),
             Pat::Group { inner, .. } | Pat::Rep { inner, .. } => rename_pat_lit(inner, from, to),
+            Pat::Choice(alternatives) => {
+                for alternative in alternatives {
+                    rename_pat_lit(alternative, from, to);
+                }
+            }
             _ => {}
         }
     }
@@ -3084,6 +3169,8 @@ fn macro_fixity(operator: bool, body: &Syntax) -> (Fixity, u8, Associativity) {
                 fixity = Fixity::Prefix;
             } else if token_at(children, index + 1, "infix") {
                 fixity = Fixity::Infix;
+            } else if token_at(children, index + 1, "postfix") {
+                fixity = Fixity::Postfix;
             }
         }
         if token_at(children, index, "precedence") {
@@ -3815,6 +3902,7 @@ fn has_separated_rep(pattern: &[Pat]) -> bool {
     pattern.iter().any(|pat| match pat {
         Pat::Rep { sep: Some(_), .. } => true,
         Pat::Rep { inner, .. } | Pat::Group { inner, .. } => has_separated_rep(inner),
+        Pat::Choice(alternatives) => alternatives.iter().any(|alt| has_separated_rep(alt)),
         _ => false,
     })
 }
@@ -3878,9 +3966,24 @@ fn pattern_of(group: &Syntax) -> Vec<Pat> {
 }
 
 fn pats_from(nodes: &[Syntax]) -> Vec<Pat> {
+    let mut alternatives: Vec<Vec<Pat>> = Vec::new();
     let mut pats = Vec::new();
     let mut index = 0;
     while index < nodes.len() {
+        // A `|` with space on both sides separates alternatives; `$x |= y`
+        // and `$x:tt|` are literals (upstream parser.ts `#parsePatternSequence`).
+        if operator_is(nodes.get(index), "|")
+            && !pats.is_empty()
+            && index > 0
+            && node_start(&nodes[index]) > node_end(&nodes[index - 1])
+            && nodes
+                .get(index + 1)
+                .is_some_and(|next| node_start(next) > node_end(&nodes[index]))
+        {
+            alternatives.push(std::mem::take(&mut pats));
+            index += 1;
+            continue;
+        }
         if is_rep_open(nodes, index) {
             let (pat, next) = read_rep(nodes, index);
             pats.push(pat);
@@ -3912,7 +4015,11 @@ fn pats_from(nodes: &[Syntax]) -> Vec<Pat> {
         }
         index += 1;
     }
-    pats
+    if alternatives.is_empty() {
+        return pats;
+    }
+    alternatives.push(pats);
+    vec![Pat::Choice(alternatives)]
 }
 
 fn is_rep_open(nodes: &[Syntax], index: usize) -> bool {
@@ -3993,10 +4100,10 @@ fn read_rep(nodes: &[Syntax], index: usize) -> (Pat, usize) {
         cursor += 1;
         RepKind::ZeroOrMore
     } else if operator_is(nodes.get(cursor), "?") {
-        // `$($filter:Filter)?` is optional, not a literal `?` after the
-        // repetition. Zero or more covers one optional item.
+        // `$($filter:Filter)?` matches at most once (upstream
+        // `createOptionalPattern`).
         cursor += 1;
-        RepKind::ZeroOrMore
+        RepKind::Optional
     } else {
         RepKind::ZeroOrMore
     };
@@ -4008,7 +4115,11 @@ fn hole_kind(raw: &str) -> HoleKind {
         "expr" => HoleKind::Expr,
         "stmt" => HoleKind::Stmt,
         "type" => HoleKind::Type,
-        "binding" | "ident" => HoleKind::Ident,
+        "ident" => HoleKind::Ident,
+        // A name or a destructuring pattern.
+        "binding" => HoleKind::Binding,
+        "classElement" => HoleKind::Member { type_member: false },
+        "typeMember" => HoleKind::Member { type_member: true },
         "tt" | "token" => HoleKind::TokenTree,
         // Positions, not user syntax classes. `$body:item` is one item.
         "item" | "jsx" | "jsxChild" => HoleKind::Stmt,
@@ -4804,6 +4915,33 @@ fn match_pats_fail(
 ) -> Option<Span> {
     for (pat_index, pat) in pattern.iter().enumerate() {
         match pat {
+            Pat::Choice(alternatives) => {
+                let saved = *cursor;
+                let mut chosen = false;
+                let last = pat_index + 1 == pattern.len();
+                for alternative in choice_order(source, nodes, saved, alternatives, classes, last) {
+                    let mut tried = saved;
+                    let mut taken = captures.clone();
+                    if match_pats(source, nodes, &mut tried, alternative, &mut taken, classes)
+                        .is_some()
+                    {
+                        *cursor = tried;
+                        *captures = taken;
+                        if let Some(node) = tried.checked_sub(1).and_then(|at| nodes.get(at)) {
+                            *progress = (*progress).max(node_end(node) as i32);
+                        }
+                        chosen = true;
+                        break;
+                    }
+                }
+                if !chosen {
+                    let first = alternatives.first()?;
+                    return match_pats_fail(
+                        source, nodes, cursor, first, captures, classes, progress, expect,
+                    )
+                    .or_else(|| nodes.get(*cursor).map(failure_token));
+                }
+            }
             Pat::Lit(expected) => {
                 skip_comments(nodes, cursor);
                 let node = nodes.get(*cursor)?;
@@ -5097,6 +5235,9 @@ fn match_pats_fail(
                         *progress = (*progress).max(node_start(node) as i32);
                     }
                     many += 1;
+                    if *kind == RepKind::Optional {
+                        break;
+                    }
                     if let Some(sep) = sep {
                         let saved = *cursor;
                         skip_comments(nodes, cursor);
@@ -5957,6 +6098,38 @@ fn match_pats_stop(
     let mut last_end = start_end;
     for (pat_index, pat) in pattern.iter().enumerate() {
         match pat {
+            Pat::Choice(alternatives) => {
+                let saved = *cursor;
+                let mut chosen = false;
+                let last = pat_index + 1 == pattern.len();
+                for alternative in choice_order(source, nodes, saved, alternatives, classes, last) {
+                    let mut tried = saved;
+                    let mut taken = captures.clone();
+                    if match_pats_stop(
+                        source,
+                        nodes,
+                        &mut tried,
+                        alternative,
+                        &mut taken,
+                        classes,
+                        in_rep,
+                        rep_stop,
+                    )
+                    .is_some()
+                    {
+                        *cursor = tried;
+                        *captures = taken;
+                        if tried > saved {
+                            last_end = node_end(&nodes[tried - 1]);
+                        }
+                        chosen = true;
+                        break;
+                    }
+                }
+                if !chosen {
+                    return None;
+                }
+            }
             Pat::Lit(expected) => {
                 skip_comments(nodes, cursor);
                 let node = nodes.get(*cursor)?;
@@ -6063,10 +6236,6 @@ fn match_pats_stop(
                         // `from $table:ident $($joins)` and the next token is
                         // `join`. The ident is absent, not the word `join`.
                         None
-                    } else if *kind == HoleKind::Binding && pattern.len() == 1 {
-                        // `rule { clamp(...) }` is a binding hole standing for the
-                        // whole call. Inside `function $name(...)` it is one name.
-                        take_expr(source, nodes, *cursor).or_else(|| take_ident(nodes, *cursor))
                     } else if *kind == HoleKind::Expr {
                         // `$left:expr == $right` stops before `==`. The
                         // operator is the next pattern piece, not part of
@@ -6184,6 +6353,9 @@ fn match_pats_stop(
                         }
                     }
                     many.push(one);
+                    if *kind == RepKind::Optional {
+                        break;
+                    }
                     if let Some(sep) = sep {
                         let saved = *cursor;
                         skip_comments(nodes, cursor);
@@ -6615,7 +6787,20 @@ fn take_hole(
             }
             None
         }
-        HoleKind::Ident | HoleKind::Binding => take_ident(nodes, index),
+        HoleKind::Ident => take_ident(nodes, index),
+        HoleKind::Binding => {
+            if is_closed_group(node, Delimiter::Brace) || is_closed_group(node, Delimiter::Bracket)
+            {
+                Some((
+                    sweetener_reader::slice(source, node).to_owned(),
+                    node_end(node),
+                    index + 1,
+                ))
+            } else {
+                take_ident(nodes, index)
+            }
+        }
+        HoleKind::Member { type_member } => take_member(source, nodes, index, *type_member),
         HoleKind::Type => take_type(source, nodes, index),
         HoleKind::TokenTree => {
             // `$($rest:tt)+` is the remaining steps of a thread, which start
@@ -6635,6 +6820,87 @@ fn take_hole(
             take_expr(source, nodes, index)
         }
     }
+}
+
+/// One class element or type member: through its `;` (or `,` in a type),
+/// through the brace body of a method or accessor, or to a line break that
+/// ends it by automatic semicolon insertion.
+fn take_member(
+    source: &str,
+    nodes: &[Syntax],
+    index: usize,
+    type_member: bool,
+) -> Option<(String, usize, usize)> {
+    let start = node_start(nodes.get(index)?);
+    if operator_is(nodes.get(index), ";") || operator_is(nodes.get(index), "}") {
+        return None;
+    }
+    let mut end_index = index;
+    while end_index < nodes.len() {
+        let node = &nodes[end_index];
+        if operator_is(Some(node), ";") || (type_member && operator_is(Some(node), ",")) {
+            let end = node_end(node);
+            return Some((source[start..end].to_owned(), end, end_index + 1));
+        }
+        if end_index > index && is_closed_group(node, Delimiter::Brace) {
+            // `move() { ... }` ends at its body; `x = { a: 1 };` does not.
+            let body = matches!(
+                nodes.get(end_index - 1),
+                Some(Syntax::Group {
+                    delimiter: Delimiter::Paren,
+                    ..
+                })
+            ) || matches!(nodes.get(end_index - 1), Some(Syntax::Token { .. }) if end_index >= 2
+                    && matches!(nodes.get(end_index - 2), Some(Syntax::Operator { raw, .. }) if raw == ":"));
+            if body && !type_member {
+                let end = node_end(node);
+                return Some((source[start..end].to_owned(), end, end_index + 1));
+            }
+        }
+        if end_index > index && statement_asi(source, nodes, end_index) {
+            let end = node_end(&nodes[end_index - 1]);
+            return Some((source[start..end].to_owned(), end, end_index));
+        }
+        end_index += 1;
+    }
+    let end = node_end(&nodes[end_index - 1]);
+    Some((source[start..end].to_owned(), end, end_index))
+}
+
+/// The order a choice tries its alternatives. Upstream backtracks through
+/// the whole pattern; this matcher commits to the first alternative that
+/// matches, so where the choice ends its sequence an alternative that
+/// consumes every remaining node (the rest of a group) is tried first.
+fn choice_order<'p>(
+    source: &str,
+    nodes: &[Syntax],
+    at: usize,
+    alternatives: &'p [Vec<Pat>],
+    classes: &[SyntaxClass],
+    last: bool,
+) -> Vec<&'p Vec<Pat>> {
+    let mut order: Vec<&Vec<Pat>> = alternatives.iter().collect();
+    if last {
+        let whole = |alternative: &Vec<Pat>| {
+            let mut cursor = at;
+            let mut scratch = HashMap::new();
+            match_pats(
+                source,
+                nodes,
+                &mut cursor,
+                alternative,
+                &mut scratch,
+                classes,
+            )
+            .is_some()
+                && {
+                    skip_comments(nodes, &mut cursor);
+                    cursor >= nodes.len()
+                }
+        };
+        order.sort_by_key(|alternative| !whole(alternative));
+    }
+    order
 }
 
 /// Whether a statement already begun may end at `index` by automatic
