@@ -30,6 +30,20 @@ pub fn try_expand_fixture(
     signals: &[(String, String)],
     methods: &[MethodBinding],
 ) -> Option<FixtureRewrite> {
+    // One form expansion is one hygiene scope.
+    super::sweetener_hygiene::in_scope(|| {
+        try_expand_fixture_scoped(source, file, nodes, index, signals, methods)
+    })
+}
+
+fn try_expand_fixture_scoped(
+    source: &str,
+    file: &[Syntax],
+    nodes: &[Syntax],
+    index: usize,
+    signals: &[(String, String)],
+    methods: &[MethodBinding],
+) -> Option<FixtureRewrite> {
     // Handwritten forms are library macros. They run only where this file
     // imported the spelling. Core TypeScript forms are not in that set.
     // `file` is the module root: the use may be nested inside a function.
@@ -96,7 +110,8 @@ pub fn try_expand_fixture(
         let text = if step.op == "->" {
             expand_channel_send(&step.left, &step.right)
         } else {
-            let printed = fresh_param(&step.left, &outer_consts(source));
+            let printed = super::sweetener_hygiene::take_remembered(&step.left)
+                .unwrap_or_else(|| fresh_param(&step.left));
             expand_channel_receive(&printed, &step.right)
         };
         // The source `;` is the statement terminator. The form text has
@@ -133,7 +148,7 @@ pub fn try_expand_fixture(
             next: item.next + usize::from(operator_is(nodes.get(item.next), ";")),
             // A `bind` name shadows an outer const. The captured file keeps
             // that spelling; it does not print `left_1`.
-            text: expand_do_steps_hygiene(item.monad, &steps, &item.result, &[]),
+            text: expand_do_steps_hygiene(item.monad, &steps, &item.result),
             binds: Vec::new(),
             method: None,
         });
@@ -689,7 +704,7 @@ fn match_data_item(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
         start: node_start(&nodes[index]),
         end: node_end(&nodes[cursor]),
         next: cursor + 1,
-        text: expand_data_decl_hygiene(&name, &type_param, &variants, &[]),
+        text: expand_data_decl_hygiene(&name, &type_param, &variants),
         binds: Vec::new(),
         method: None,
     })
@@ -750,7 +765,6 @@ fn expand_data_decl_hygiene(
     name: &str,
     type_param: &str,
     variants: &[(String, Vec<(String, String)>)],
-    outer: &[String],
 ) -> String {
     let mut arms = Vec::new();
     for (variant, fields) in variants {
@@ -765,7 +779,7 @@ fn expand_data_decl_hygiene(
         let mut params = Vec::new();
         let mut object_fields = Vec::new();
         for (field, ty) in fields {
-            let printed = fresh_param(field, outer);
+            let printed = user_binder(field);
             params.push(format!("{printed}: {ty}"));
             if printed == *field {
                 object_fields.push(field.clone());
@@ -808,7 +822,7 @@ fn match_sweetener_match(source: &str, nodes: &[Syntax], index: usize) -> Option
     let body = nodes.get(body_at)?;
     let children = group_children(Some(body), Delimiter::Brace)?;
     let text = if let Some(arms) = parse_ctor_arms(source, children) {
-        expand_ctor_match(&subject, &arms, &unmatched_name(nodes, index), &[])
+        expand_ctor_match(&subject, &arms, &unmatched_name(nodes, index))
     } else {
         let (arms, fallback) = parse_structural_arms(source, children)?;
         // `1 => "one",` with no `_` arm is not a finished match. The
@@ -894,7 +908,7 @@ fn unmatched_name(nodes: &[Syntax], index: usize) -> String {
     }
 }
 
-fn expand_ctor_match(subject: &str, arms: &[CtorArm], unmatched: &str, outer: &[String]) -> String {
+fn expand_ctor_match(subject: &str, arms: &[CtorArm], unmatched: &str) -> String {
     let mut body = String::new();
     for arm in arms {
         body.push_str(&format!("if (this.value.tag === \"{}\") {{ ", arm.name));
@@ -903,7 +917,7 @@ fn expand_ctor_match(subject: &str, arms: &[CtorArm], unmatched: &str, outer: &[
                 .binders
                 .iter()
                 .map(|name| {
-                    let printed = fresh_param(name, outer);
+                    let printed = user_binder(name);
                     if printed == *name {
                         name.clone()
                     } else {
@@ -920,7 +934,7 @@ fn expand_ctor_match(subject: &str, arms: &[CtorArm], unmatched: &str, outer: &[
             &arm.body,
             &arm.binders
                 .iter()
-                .map(|name| (name.as_str(), fresh_param(name, outer)))
+                .map(|name| (name.as_str(), user_binder(name)))
                 .collect::<Vec<_>>(),
         );
         body.push_str(&format!("return {}; }} ", renamed_body));
@@ -1360,7 +1374,7 @@ pub fn expand_method_call(
     result: &str,
     body: &str,
 ) -> String {
-    expand_method_call_hygiene(head_params, head_args, segments, result, body, &[])
+    expand_method_call_hygiene(head_params, head_args, segments, result, body, false)
 }
 
 fn expand_method_call_hygiene(
@@ -1369,7 +1383,8 @@ fn expand_method_call_hygiene(
     segments: &[MethodSegment<'_>],
     result: &str,
     body: &str,
-    outer: &[String],
+    // Whether the parameters are the definition's own binders.
+    hygienic: bool,
 ) -> String {
     let mut params = String::new();
     let mut args = String::new();
@@ -1379,7 +1394,11 @@ fn expand_method_call_hygiene(
             params.push_str(", ");
             args.push_str(", ");
         }
-        let printed = fresh_param(name, outer);
+        let printed = if hygienic {
+            fresh_param(name)
+        } else {
+            user_binder(name)
+        };
         names.push((*name, printed.clone()));
         params.push_str(&printed);
         params.push_str(": ");
@@ -1393,7 +1412,11 @@ fn expand_method_call_hygiene(
             if !params.is_empty() {
                 params.push_str(", ");
             }
-            let printed = fresh_param(name, outer);
+            let printed = if hygienic {
+                fresh_param(name)
+            } else {
+                user_binder(name)
+            };
             names.push((*name, printed.clone()));
             params.push_str(&printed);
             params.push_str(": ");
@@ -1407,56 +1430,38 @@ fn expand_method_call_hygiene(
         }
     }
     let body = rename_params(&arrow_body(body), &names);
-    // The unsuffixed call keeps a trailing comma. A hygiene rename does not.
-    let suffixed = names.iter().any(|(name, printed)| printed != name);
-    let params = if suffixed || params.is_empty() || params.trim_end().ends_with(',') {
+    // Theirs keeps a trailing comma unless hygiene renamed a parameter;
+    // the names are only known on the output, so the comma is a marker.
+    let params = if params.is_empty() || params.trim_end().ends_with(',') {
         params
     } else {
-        format!("{params},")
+        let printed: Vec<&str> = names.iter().map(|(_, printed)| printed.as_str()).collect();
+        format!(
+            "{params}{}",
+            super::sweetener_hygiene::comma_unless_renamed(&printed)
+        )
     };
     format!("(({params}): {result} => {body})({args})")
 }
 
-fn outer_consts(source: &str) -> Vec<String> {
-    let read = sweetener_reader::read_syntax(source);
-    let mut names = Vec::new();
-    collect_outer_consts(&read.children, &mut names);
-    names
+/// A channel binder the form introduces. Its printed name is chosen on the
+/// output (`sweetener_hygiene::assign`). The receive form that prints the
+/// declaration takes the same placeholder.
+pub fn fresh_binder(name: &str) -> String {
+    let printed = super::sweetener_hygiene::placeholder(name);
+    super::sweetener_hygiene::remember(name, &printed);
+    printed
 }
 
-fn collect_outer_consts(nodes: &[Syntax], names: &mut Vec<String>) {
-    let mut index = 0;
-    while index < nodes.len() {
-        if token_is(nodes.get(index), "const")
-            || token_is(nodes.get(index), "let")
-            || token_is(nodes.get(index), "var")
-        {
-            if let Some(name) = token_raw(nodes.get(index + 1)) {
-                names.push(name);
-            }
-        }
-        if let Syntax::Group { children, .. } = &nodes[index] {
-            collect_outer_consts(children, names);
-        }
-        index += 1;
-    }
+/// A binder the form's own template introduces: one class per spelling per
+/// form expansion, named on the output like every other introduced binder.
+fn fresh_param(name: &str) -> String {
+    super::sweetener_hygiene::scoped(name)
 }
 
-/// `value` already bound by `const value` becomes `value_1`. A free name stays.
-pub fn fresh_binder(name: &str, outer: &std::collections::HashSet<String>) -> String {
-    if outer.contains(name) {
-        format!("{name}_1")
-    } else {
-        name.to_owned()
-    }
-}
-
-fn fresh_param(name: &str, outer: &[String]) -> String {
-    if outer.iter().any(|bound| bound == name) {
-        format!("{name}_1")
-    } else {
-        name.to_owned()
-    }
+/// A binder the user spelled. It is the user's name and is never renamed.
+fn user_binder(name: &str) -> String {
+    name.to_owned()
 }
 
 fn rename_params(body: &str, names: &[(&str, String)]) -> String {
@@ -1528,20 +1533,15 @@ pub fn expand_channel_receive(name: &str, channel: &str) -> String {
 /// again, not text left for a later pass.
 #[cfg(test)]
 pub fn expand_do_steps(monad: &str, steps: &[DoStep<'_>], result: &str) -> String {
-    expand_do_steps_hygiene(monad, steps, result, &[])
+    expand_do_steps_hygiene(monad, steps, result)
 }
 
 /// A step binder that the file already has (`const left`) is printed
 /// `left_1` in that arrow only. A free name stays.
-fn expand_do_steps_hygiene(
-    monad: &str,
-    steps: &[DoStep<'_>],
-    result: &str,
-    outer: &[String],
-) -> String {
+fn expand_do_steps_hygiene(monad: &str, steps: &[DoStep<'_>], result: &str) -> String {
     let mut names = Vec::new();
     for step in steps {
-        names.push((step.name, fresh_param(step.name, outer)));
+        names.push((step.name, user_binder(step.name)));
     }
     let renamed_result = rename_params(result, &names);
     let mut out = format!("{monad}.of({renamed_result})");
@@ -1776,8 +1776,7 @@ fn match_protocol_item(source: &str, nodes: &[Syntax], index: usize) -> Option<F
     if methods.is_empty() {
         return None;
     }
-    let outer = outer_consts(source);
-    let mut text = expand_protocol(&name, &subject, &methods, &outer);
+    let mut text = expand_protocol(&name, &subject, &methods);
     let mut end = node_end(&nodes[index + 5]);
     let mut next = index + 6;
     // `User implements ...` is an infix rule. Reprinting it drops the
@@ -2026,12 +2025,7 @@ fn skip_type_args(nodes: &[Syntax], mut cursor: usize) -> Option<usize> {
     None
 }
 
-fn expand_protocol(
-    name: &str,
-    subject: &str,
-    methods: &[ProtocolMethodForm],
-    outer: &[String],
-) -> String {
+fn expand_protocol(name: &str, subject: &str, methods: &[ProtocolMethodForm]) -> String {
     let mut iface = format!("interface {name}<{subject}> {{");
     for method in methods {
         iface.push_str(&format!(
@@ -2042,15 +2036,15 @@ fn expand_protocol(
         ));
     }
     iface.push('}');
-    let impl_name = fresh_param("implementations", outer);
+    let impl_name = fresh_param("implementations");
     // `implementation` in `register` is a parameter. An outer const of that
     // spelling suffixes the parameter and the later local.
-    let impl_param = fresh_param("implementation", outer);
+    let impl_param = fresh_param("implementation");
     let mut value = format!(
         "const {name} = (() => {{ const {impl_name} = new globalThis.WeakMap<object, {name}<unknown>>(); return {{ register<ImplementationSubject>(prototype: object, {impl_param}: {name}<ImplementationSubject>,): void {{ {impl_name}.set(prototype, {impl_param} as {name}<unknown>); }},"
     );
     for method in methods {
-        let impl_local = fresh_param("implementation", outer);
+        let impl_local = fresh_param("implementation");
         let params = join_typed(&method.params);
         let names = method
             .params
@@ -2477,14 +2471,13 @@ fn match_method_call(
             args: leak_args(args),
         })
         .collect();
-    let outer = outer_consts(source);
     let text = expand_method_call_hygiene(
         leak_pairs(&method.head_params),
         head_args,
         &segments,
         &method.result,
         &method.body,
-        &outer,
+        true,
     );
     Some(FixtureRewrite {
         start: node_start(&nodes[index]),
@@ -3362,6 +3355,7 @@ mod tests {
             "boolean",
             "return value > minimum && value < maximum;",
         );
+        let printed = crate::sweetener_hygiene::assign(&printed, &mut [], false);
         assert_eq!(
             printed,
             "((value: number, minimum: number, maximum: number,): boolean => value > minimum && value < maximum)(3, 1, 5)"
@@ -3391,7 +3385,7 @@ mod tests {
             "left + right",
         );
         assert_eq!(
-            done,
+            crate::sweetener_hygiene::assign(&done, &mut [], false),
             "box.flatMap(box.of(2), (left) => box.flatMap(box.of(3), (right) => box.of(left + right)),)"
         );
         let renamed = expand_do_steps_hygiene(
@@ -3407,10 +3401,9 @@ mod tests {
                 },
             ],
             "left + source",
-            &[],
         );
         assert_eq!(
-            renamed,
+            crate::sweetener_hygiene::assign(&renamed, &mut [], false),
             "box.flatMap(box.of(4), (left) => box.flatMap(box.of(6), (source) => box.of(left + source)),)"
         );
         assert_eq!(

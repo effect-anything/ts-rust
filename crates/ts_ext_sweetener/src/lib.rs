@@ -10,6 +10,7 @@ mod sweetener;
 mod sweetener_apps;
 mod sweetener_expand;
 mod sweetener_forms;
+mod sweetener_hygiene;
 mod sweetener_reader;
 
 /// Why a virtual span exists.

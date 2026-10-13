@@ -208,7 +208,6 @@ fn expand_pass(
         runtime_imports: loaded.runtime_imports,
         hygiene: HashMap::new(),
         channel_renames: HashMap::new(),
-        type_params: user_type_params(&read.children),
         // Theirs synthesizes a macro module's runtime imports only for a
         // file that invoked one of its macros. A module whose every item is
         // a macro definition invokes none.
@@ -237,9 +236,14 @@ fn expand_pass(
     printer
         .diagnostics
         .extend(unread_items(source, &read.children));
+    let code = super::sweetener_hygiene::assign(
+        &printer.out,
+        &mut printer.segments,
+        request.filename.ends_with('x'),
+    );
     (
         Expansion {
-            code: printer.out,
+            code,
             segments: printer.segments,
             diagnostics: printer.diagnostics,
             dependencies: printer.dependencies,
@@ -550,8 +554,6 @@ struct Printer<'a> {
     runtime_imports: Vec<RuntimeImport>,
     /// Macro-introduced spellings already assigned a printed name in this file.
     hygiene: HashMap<String, String>,
-    /// Type parameters the user wrote, such as `Option<A>`.
-    type_params: std::collections::HashSet<String>,
     imports_emitted: bool,
     /// `state` bindings and multi-part methods the form pass introduced.
     form_signals: Vec<(String, String)>,
@@ -622,8 +624,7 @@ impl<'a> Printer<'a> {
                 super::sweetener_forms::match_channel_stmt(self.source, nodes, index)
             {
                 if step.op == "<-" {
-                    let printed =
-                        super::sweetener_forms::fresh_binder(&step.left, &self.user_names);
+                    let printed = super::sweetener_forms::fresh_binder(&step.left);
                     if printed != step.left {
                         self.channel_renames.insert(step.left.clone(), printed);
                     }
@@ -1469,7 +1470,6 @@ impl<'a> Printer<'a> {
             classes: self.classes.clone(),
             runtime_imports: Vec::new(),
             hygiene: HashMap::new(),
-            type_params: self.type_params.clone(),
             imports_emitted: true,
             form_signals: self.form_signals.clone(),
             form_methods: self.form_methods.clone(),
@@ -1690,7 +1690,6 @@ impl<'a> Printer<'a> {
             classes: self.classes.clone(),
             runtime_imports: Vec::new(),
             hygiene: self.hygiene.clone(),
-            type_params: self.type_params.clone(),
             imports_emitted: true,
             form_signals: self.form_signals.clone(),
             form_methods: self.form_methods.clone(),
@@ -2037,24 +2036,16 @@ impl<'a> Printer<'a> {
         // A later expansion must not reprint `Inner` or `A` that an
         // earlier expansion already bound. The first expansion keeps the
         // spelling when nothing in the user file has it.
+        // Names are chosen once, on the printed file
+        // (`sweetener_hygiene::assign`). Here each introduced binder only
+        // becomes its own class: one placeholder per spelling per expansion.
         let mut plan: Vec<(String, String)> = Vec::new();
-        let mut used = self.user_names.clone();
-        // `class Option<A>` binds `A`. A macro that introduces `A` prints
-        // `A_1`. Other user type arguments, such as `F<A>`, are not binders
-        // and must not rename `F`.
-        for name in &self.type_params {
-            if introduced.iter().any(|introduced| introduced == name) {
-                used.insert(name.clone());
-            }
-        }
-
         let mut seen = HashMap::<String, usize>::new();
         for name in introduced {
             let nth = seen.get(name).copied().unwrap_or(0);
             seen.insert(name.clone(), nth + 1);
-            // `left` in `add` and `left` in `sub` are different binders, but
-            // theirs numbers each spelling once per expansion: every `left`
-            // in this quantity is `left_1`.
+            // Theirs numbers each spelling once per expansion: every `left`
+            // in this quantity is the same binding.
             if nth > 0 {
                 if let Some(printed) = plan
                     .iter()
@@ -2065,16 +2056,11 @@ impl<'a> Printer<'a> {
                 }
                 continue;
             }
-            if !used.contains(name) {
-                used.insert(name.clone());
-
-                self.user_names.insert(name.clone());
-                continue;
-            }
-            let printed = fresh_name(name, &used, &HashMap::new());
-            plan.push((format!("{name}\00"), printed.clone()));
-            used.insert(printed.clone());
-            self.user_names.insert(printed.clone());
+            self.user_names.insert(name.clone());
+            plan.push((
+                format!("{name}\00"),
+                super::sweetener_hygiene::placeholder(name),
+            ));
         }
         // A runtime import whose local name is already bound at the call site
         // is printed `exported as name_1`, and the template must use that name.
@@ -7636,7 +7622,8 @@ fn apply_plan_nodes(
                     let shorthand = pattern
                         && printed != *raw
                         && !operator_is(nodes.get(index.wrapping_sub(1)), ":");
-                    if shorthand {
+                    // A placeholder's shorthand is decided on the output.
+                    if shorthand && !super::sweetener_hygiene::is_placeholder(&printed) {
                         out.push_str(raw);
                         out.push_str(": ");
                     }
@@ -8311,50 +8298,6 @@ fn user_spellings(nodes: &[Syntax]) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
     collect_user_binders(nodes, &mut names);
     names
-}
-
-/// `class Option<A>` and `function id<T>` bind those parameters. A use such
-/// as `F<A>` does not bind `F`.
-fn user_type_params(nodes: &[Syntax]) -> std::collections::HashSet<String> {
-    let mut names = std::collections::HashSet::new();
-    collect_user_type_params(nodes, &mut names);
-    names
-}
-
-fn collect_user_type_params(nodes: &[Syntax], names: &mut std::collections::HashSet<String>) {
-    let mut index = 0;
-    while index < nodes.len() {
-        if operator_is(nodes.get(index), "<") {
-            let head = index.checked_sub(1).and_then(|at| nodes.get(at));
-            let binds = match head {
-                Some(Syntax::Token { raw, .. })
-                    if is_binder_keyword(nodes, index.saturating_sub(2))
-                        || matches!(raw.as_str(), "class" | "interface" | "type" | "function") =>
-                {
-                    true
-                }
-                Some(Syntax::Token { raw, .. })
-                    if index >= 2 && is_binder_keyword(nodes, index - 2) =>
-                {
-                    true
-                }
-                _ => index > 0 && is_binder_keyword(nodes, index - 1),
-            };
-            // `class Option<A>`: `<` follows the class name, and the class
-            // keyword is two tokens back. `function id<T>` is the same.
-            let declares = index >= 2 && is_binder_keyword(nodes, index - 2);
-            if declares {
-                if let Some(params) = type_param_names(nodes, index) {
-                    names.extend(params);
-                }
-            }
-            let _ = binds;
-        }
-        if let Syntax::Group { children, .. } = &nodes[index] {
-            collect_user_type_params(children, names);
-        }
-        index += 1;
-    }
 }
 
 fn collect_user_binders(nodes: &[Syntax], names: &mut std::collections::HashSet<String>) {
