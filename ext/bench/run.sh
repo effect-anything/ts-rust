@@ -6,7 +6,7 @@
 # 1. expand_bench (in-process): cold / modules-warm / memo-hit / build
 #    on bench.stsx, a synthetic file of `copies` bodies, and the largest
 #    Sweetener cases.
-# 2. tsc-ext transform (process, protocol and v3 map included).
+# 2. tsc-ext sweetener --expand --map (process, protocol and v3 map included).
 # 3. vite build of ext/examples/vite.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -39,7 +39,7 @@ echo
 target/release/examples/expand_bench "$work/bench.stsx" "$work/big.stsx" $largest
 
 echo
-echo "## tsc-ext transform (release process, median of 5)"
+echo "## tsc-ext sweetener --expand --map (release process, median of 5)"
 echo
 echo "| file | median s |"
 echo "| --- | ---: |"
@@ -50,7 +50,7 @@ tool, f = sys.argv[1], sys.argv[2]
 times = []
 for _ in range(5):
     t = time.perf_counter()
-    subprocess.run([tool, "transform", f], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run([tool, "sweetener", "--expand", f, "--map"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     times.append(time.perf_counter() - t)
 print(f"| {os.path.basename(f)} | {statistics.median(times):.3f} |")
 PY

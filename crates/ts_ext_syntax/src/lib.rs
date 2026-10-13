@@ -18,8 +18,12 @@ pub use ts_ext_sweetener::{
 };
 pub use ts_ext_typegpu::structure;
 
+pub mod compose;
+pub mod config;
 pub mod prewarm;
 pub mod protocol;
 pub use session::{SessionDiagnostic, TransformSession, Transformed, v3_source_map};
 
+// napi-derive registers the exports outside `cfg(test)` only.
+#[cfg_attr(test, allow(dead_code))]
 mod node;

@@ -59,6 +59,8 @@ pub struct Transformed {
     /// composes its own map through this one.
     pub source_map: String,
     pub diagnostics: Vec<SessionDiagnostic>,
+    /// Files the expansion read (macro modules). A bundler watches them.
+    pub dependencies: Vec<String>,
     pub changed: bool,
 }
 
@@ -145,6 +147,19 @@ impl TransformSession {
         self
     }
 
+    /// The bundler pipeline under tsc-ext options: build phase (`TypeGPU`
+    /// functions are wrapped with `__TYPEGPU_META__`), `TypeGPU` switches from
+    /// `options.typegpu`.
+    #[must_use]
+    pub fn from_options(options: &crate::config::Options) -> Self {
+        let session = Self::build_with_auto_naming(options.typegpu.auto_naming())
+            .early_pruning(options.typegpu.early_pruning());
+        match &options.typegpu.force_tgpu_alias {
+            Some(alias) => session.force_tgpu_alias(alias.clone()),
+            None => session,
+        }
+    }
+
     /// Plugin entry. See the module docs for which passes run.
     #[must_use]
     pub fn transform(&self, path: &str, code: &str) -> Transformed {
@@ -222,6 +237,7 @@ fn apply_typegpu(
         return Transformed {
             changed: already_changed || gpu.changed || output != gpu.code,
             extension,
+            dependencies: first.dependencies.clone(),
             source_map,
             mappings,
             diagnostics,
@@ -240,6 +256,7 @@ fn apply_typegpu(
         return Transformed {
             changed: changed || output != gpu.code,
             extension,
+            dependencies: first.dependencies.clone(),
             source_map,
             mappings,
             diagnostics,
@@ -266,6 +283,7 @@ fn apply_typegpu(
     Transformed {
         changed: true,
         extension,
+        dependencies: first.dependencies.clone(),
         source_map,
         mappings,
         diagnostics: {

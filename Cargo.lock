@@ -874,6 +874,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "serde_json",
  "ts_ext_sweetener",
  "ts_ext_typegpu",
  "ts_goport",

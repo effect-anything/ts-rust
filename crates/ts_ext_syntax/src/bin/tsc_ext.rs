@@ -1,38 +1,77 @@
-//! Content mapper and standalone transform.
+//! `tsc-ext`: the content mapper and the Sweetener CLI.
 //!
 //! With no arguments this process speaks the content-mapper protocol on
-//! stdin/stdout. `tsc-ext transform <file>` writes the virtual
-//! TypeScript and the span-map JSON beside it. `tsgo` does not link this
-//! binary; a tsconfig `contentMappers` entry starts it.
+//! stdin/stdout; a tsconfig `contentMappers` entry for `@effect-x/tsc`
+//! starts it. `tsgo` does not link this binary.
+//!
+//! `tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map]` prints
+//! the expansion `tsc` type-checks (Sweetener, check phase) to stdout.
+//! Diagnostics go to stderr as `file(line,col): error SWRxxxx: message`;
+//! any error exits 1. `--map` appends the v3 source map to the output as an
+//! inline `//# sourceMappingURL=data:application/json;base64,...` comment.
+//! The options are those of the tsconfig (`--tsconfig`, else the nearest
+//! `tsconfig.json` above the file); see `ts_ext_syntax::config`.
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use ts_ext_syntax::config::{self, Options};
 use ts_ext_syntax::protocol::{self, TransformResponse};
 
+const USAGE: &str = "usage:
+  tsc-ext                       content mapper on stdin/stdout (started by tsc)
+  tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map]
+                                print the expansion of <file> to stdout;
+                                diagnostics to stderr, exit 1 on an error;
+                                --map appends an inline v3 source map
+  tsc-ext help                  this text";
+
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
-    match args.next().as_deref() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
         None => serve(),
-        Some("transform") => transform_cli(args.next()),
-        Some("help") | Some("-h") | Some("--help") => {
-            eprintln!(
-                "tsc-ext\n  (no args)          content mapper on stdin/stdout\n  transform <file>   write <file>.virtual.ts and <file>.mappings.json"
-            );
+        Some("sweetener") => sweetener_cli(&args[1..]),
+        Some("help" | "-h" | "--help") => {
+            println!("{USAGE}");
             ExitCode::SUCCESS
         }
         Some(other) => {
-            eprintln!("unknown command {other}; try --help");
+            eprintln!("tsc-ext: unknown command {other}\n{USAGE}");
             ExitCode::from(2)
         }
     }
 }
 
-fn transform_cli(path: Option<String>) -> ExitCode {
-    let Some(path) = path else {
-        eprintln!("usage: tsc-ext transform <file>");
+fn sweetener_cli(args: &[String]) -> ExitCode {
+    let mut file = None;
+    let mut tsconfig = None;
+    let mut map = false;
+    let mut expand = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--expand" => {
+                expand = true;
+                file = rest.next().cloned();
+            }
+            "--tsconfig" => tsconfig = rest.next().map(PathBuf::from),
+            "--map" => map = true,
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            other => {
+                eprintln!("tsc-ext sweetener: unexpected argument {other}\n{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let (true, Some(path)) = (expand, file) else {
+        eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
     let content = match fs::read_to_string(&path) {
@@ -42,49 +81,101 @@ fn transform_cli(path: Option<String>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let response = protocol::transform_file(&path, &content);
-    for diagnostic in &response.diagnostics {
+    let tsconfig = tsconfig.or_else(|| config::find_tsconfig(Path::new(&path)));
+    // No Sweetener option changes the expansion yet; reading them still
+    // reports an invalid config here, as tsc would.
+    if let Some(tsconfig) = &tsconfig
+        && let Err(err) = config::read_tsconfig_options(tsconfig)
+    {
+        eprintln!("{err}");
+        return ExitCode::from(1);
+    }
+    let expanded = ts_ext_syntax::expand(ts_ext_syntax::ExpandRequest {
+        filename: &path,
+        code: &content,
+        phase: ts_ext_syntax::Phase::Check,
+    });
+    let mut failed = false;
+    for diagnostic in &expanded.diagnostics {
         let (line, col) = line_col(&content, diagnostic.start);
-        let level = if diagnostic.category == 0 {
-            "warning"
-        } else {
-            "error"
-        };
+        let error = diagnostic.severity == ts_ext_syntax::Severity::Error;
+        failed |= error;
         eprintln!(
-            "{path}({line},{col}): {level} {}",
-            report_message(diagnostic.code, &diagnostic.message_text)
+            "{path}({line},{col}): {} {}",
+            if error { "error" } else { "warning" },
+            report_message(&diagnostic.message)
         );
-        for (message, start, _) in &diagnostic.related {
-            let (line, col) = line_col(&content, *start);
-            eprintln!("  {path}({line},{col}): {message}");
+        for related in &diagnostic.related {
+            let (line, col) = line_col(&content, related.start);
+            eprintln!("  {path}({line},{col}): {}", related.message);
         }
     }
-    let virtual_path = format!("{path}.virtual{}", response.extension);
-    let map_path = format!("{path}.mappings.json");
-    if let Err(err) = fs::write(&virtual_path, &response.text) {
-        eprintln!("{virtual_path}: {err}");
+    let mut out = io::stdout().lock();
+    let mut written = out.write_all(expanded.code.as_bytes());
+    if map && written.is_ok() {
+        let segments = expanded.span_map_segments();
+        let v3 = ts_ext_syntax::v3_source_map(&path, &content, &expanded.code, &segments);
+        let v3 = strip_segments(&v3);
+        let newline = if expanded.code.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        written = write!(
+            out,
+            "{newline}//# sourceMappingURL=data:application/json;base64,{}\n",
+            base64(v3.as_bytes())
+        );
+    }
+    if let Err(err) = written.and_then(|()| out.flush()) {
+        eprintln!("tsc-ext: {err}");
         return ExitCode::from(1);
     }
-    if let Err(err) = fs::write(&map_path, &response.mappings) {
-        eprintln!("{map_path}: {err}");
-        return ExitCode::from(1);
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
-    eprintln!("wrote {virtual_path}");
-    ExitCode::SUCCESS
 }
 
-/// `file.sts(line,col): error SWRxxxx: message`. Sweetener diagnostics
-/// already start with `SWR`. A numeric code with no prefix is printed the
-/// same way. A `TS` prefix is a TypeScript diagnostic and is left as written.
-fn report_message(code: i32, message: &str) -> String {
-    if message.starts_with("SWR") || message.starts_with("TS") || code == 0 {
+/// The v3 map without the raw `segments` tuples `v3_source_map` appends.
+fn strip_segments(map: &str) -> String {
+    match map.rfind(r#","segments":"#) {
+        Some(at) => format!("{}}}", &map[..at]),
+        None => map.to_owned(),
+    }
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &b)| n | (u32::from(b) << (16 - 8 * i)));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(TABLE[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// `SWRxxxx: message`. Sweetener diagnostics already start with `SWR`; a
+/// `TS` prefix is a TypeScript diagnostic and is left as written.
+fn report_message(message: &str) -> String {
+    if message.starts_with("SWR") || message.starts_with("TS") {
         message.to_owned()
     } else {
-        format!("SWR{code}: {message}")
+        format!("SWR0: {message}")
     }
 }
 
-fn line_col(content: &str, start: i32) -> (usize, usize) {
+fn line_col(content: &str, start: u32) -> (usize, usize) {
     let start = usize::try_from(start).unwrap_or(0).min(content.len());
     let mut line = 1usize;
     let mut col = 1usize;
@@ -99,10 +190,14 @@ fn line_col(content: &str, start: i32) -> (usize, usize) {
     (line, col)
 }
 
+/// Per-project options from `openProject`, by project handle.
+type Projects = HashMap<String, Options>;
+
 fn serve() -> ExitCode {
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let mut stdout = io::stdout().lock();
+    let mut projects = Projects::new();
     loop {
         let message = match read_message(&mut input) {
             Ok(Some(message)) => message,
@@ -112,7 +207,7 @@ fn serve() -> ExitCode {
                 return ExitCode::from(1);
             }
         };
-        let response = handle(&message);
+        let response = handle(&message, &mut projects);
         if let Err(err) = write_message(&mut stdout, &response) {
             eprintln!("tsc-ext: {err}");
             return ExitCode::from(1);
@@ -120,22 +215,50 @@ fn serve() -> ExitCode {
     }
 }
 
-fn handle(message: &str) -> String {
+fn handle(message: &str, projects: &mut Projects) -> String {
     let method = json_string(message, "method").unwrap_or_default();
     let id = json_raw(message, "id");
     let params = json_object(message, "params");
     let result = match method.as_str() {
-        "initialize" => {
-            r#"{"positionEncoding":"utf-8","diagnosticSource":"tsc-ext"}"#.to_owned()
-        }
+        "initialize" => r#"{"positionEncoding":"utf-8","diagnosticSource":"tsc-ext"}"#.to_owned(),
         "openProject" => {
             // Expand the project's files in the background so the first
             // transforms (and the first hover) find them in the memo.
             let config = json_string(&params, "configFileName").unwrap_or_default();
+            let handle = json_string(&params, "projectHandle").unwrap_or_default();
+            let options = json_raw(&params, "options")
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let (options, errors) = Options::from_json(&options);
+            projects.insert(handle, options);
             let _ = ts_ext_syntax::prewarm::prewarm_in_background(&config);
-            r#"{"configIdentity":""}"#.to_owned()
+            let diagnostics: Vec<String> = errors
+                .iter()
+                .map(|error| {
+                    let path: Vec<String> =
+                        error.path.iter().map(|part| json_encode(part)).collect();
+                    format!(
+                        r#"{{"path":[{}],"messageText":{},"code":{OPTION_ERROR}}}"#,
+                        path.join(","),
+                        json_encode(&format!("{}: {error}", config::PACKAGE)),
+                    )
+                })
+                .collect();
+            if diagnostics.is_empty() {
+                r#"{"configIdentity":""}"#.to_owned()
+            } else {
+                format!(
+                    r#"{{"configIdentity":"","optionDiagnostics":[{}]}}"#,
+                    diagnostics.join(",")
+                )
+            }
         }
-        "closeProject" => "{}".to_owned(),
+        "closeProject" => {
+            if let Some(handle) = json_string(&params, "projectHandle") {
+                projects.remove(&handle);
+            }
+            "{}".to_owned()
+        }
         "transform" => {
             let file_name = json_string(&params, "fileName").unwrap_or_default();
             let content = json_string(&params, "content").unwrap_or_default();
@@ -157,6 +280,9 @@ fn handle(message: &str) -> String {
         None => format!(r#"{{"jsonrpc":"2.0","result":{result}}}"#),
     }
 }
+
+/// `optionDiagnostics` code for an invalid tsc-ext option.
+const OPTION_ERROR: i32 = 9001;
 
 fn encode_plugin(value: &ts_ext_syntax::Transformed) -> String {
     format!(
