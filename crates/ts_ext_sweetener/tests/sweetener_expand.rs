@@ -235,9 +235,11 @@ async function later() { }\n";
         "{:?}",
         prefix_out.diagnostics
     );
+    // `function` is a core item form and this definition does not write
+    // `shadows core`, so the use stays core (as the upstream CLI prints it).
     assert!(
-        prefix_out.code.contains("const plain = 1"),
-        "plain function was not expanded:\n{}",
+        prefix_out.code.contains("function plain() { }"),
+        "an unauthorized core spelling was expanded:\n{}",
         prefix_out.code
     );
     assert!(
@@ -448,4 +450,52 @@ fn json_strings(text: &str) -> Vec<String> {
         index += 1;
     }
     out
+}
+
+/// A core spelling dispatches as core unless the definition writes
+/// `shadows core`; a definition that does write it intercepts the form.
+#[test]
+fn core_spelling_needs_shadows_core() {
+    let plain = "\
+export syntax module:item {\n\
+  rule { module $name:ident { } } => { namespace $name { } }\n\
+}\n\
+module A { }\n";
+    let out = expand(ExpandRequest {
+        filename: "core.sts",
+        code: plain,
+        phase: Phase::Check,
+    });
+    assert!(out.code.contains("module A"), "{}", out.code);
+    assert!(!out.code.contains("namespace A"), "{}", out.code);
+
+    let shadowed = plain.replace("module:item {", "module:item shadows core {");
+    let out = expand(ExpandRequest {
+        filename: "core.sts",
+        code: &shadowed,
+        phase: Phase::Check,
+    });
+    assert!(out.code.contains("namespace A"), "{}", out.code);
+}
+
+/// `shadows core` on a spelling that is not a core form is refused.
+#[test]
+fn shadowing_a_non_core_spelling_is_refused() {
+    let code = "\
+export syntax hello:expr shadows core {\n\
+  rule { hello } => { 1 }\n\
+}\n\
+const x = hello;\n";
+    let out = expand(ExpandRequest {
+        filename: "noncore.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| d.message.contains("SWR4002")),
+        "{:?}",
+        out.diagnostics
+    );
 }

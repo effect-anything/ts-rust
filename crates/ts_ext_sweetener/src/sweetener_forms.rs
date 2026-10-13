@@ -182,13 +182,10 @@ pub fn try_expand_fixture(
         // The imported `effect` rule owns this form. A copy of the body
         // here skips macros inside template literals.
         let _ = signals;
-    } else if token_is(nodes.get(index), "function")
-        && !imported_syntax_bindings(file)
-            .iter()
-            .any(|(_, export)| export == "function")
-    {
-        // The implicit-return `function` is a library macro that shadows
-        // core. Without a `for syntax` import, `function` is TypeScript.
+    } else if token_is(nodes.get(index), "function") && !imports_shadowing(file, "function") {
+        // `function` is a core form. The implicit-return macro intercepts it
+        // only where it was imported `for syntax shadows core`, as upstream
+        // (`expansion/src/core-shadowing.ts`); otherwise it is TypeScript.
     } else if let Some(mut effect) = match_effect_item(source, nodes, index) {
         effect.text = substitute_signal_reads(&effect.text, signals);
         return Some(effect);
@@ -430,6 +427,28 @@ fn collect_imported_syntax_names(nodes: &[Syntax], names: &mut Vec<(String, Stri
         }
         index += 1;
     }
+}
+
+/// A top-level `import { export } from "..." for syntax shadows core;`.
+fn imports_shadowing(file: &[Syntax], export: &str) -> bool {
+    (0..file.len()).any(|index| {
+        if !syntax_import_here(file, index) {
+            return false;
+        }
+        let statement: Vec<&Syntax> = file
+            .iter()
+            .skip(index)
+            .take_while(|node| !operator_is(Some(node), ";"))
+            .collect();
+        let shadows = statement
+            .windows(2)
+            .any(|pair| token_is(Some(pair[0]), "shadows") && token_is(Some(pair[1]), "core"));
+        let mut names = Vec::new();
+        if let Some(children) = group_children(file.get(index + 1), Delimiter::Brace) {
+            collect_import_binding_names(children, &mut names);
+        }
+        shadows && names.iter().any(|(_, exported)| exported == export)
+    })
 }
 
 fn syntax_import_here(nodes: &[Syntax], index: usize) -> bool {

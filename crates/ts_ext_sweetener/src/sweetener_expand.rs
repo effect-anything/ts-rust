@@ -4,7 +4,6 @@
 //! A `for syntax` import is resolved against the file next to the source,
 //! compiled into rules, and removed from the print. Rules are matched from
 //! the imported macro, not a hardcoded rewrite table. `"use gpu"` is copied.
-//! Ordinary `.sts` / `.stsx` specifiers drop the extension.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -68,7 +67,19 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     let mut local = HashMap::new();
     collect_macros(source, &read.children, &mut local);
     for macro_ in local.into_values() {
-        push_macro(&mut loaded.macros, macro_);
+        if macro_.shadows_core && !core_shadow_valid(&macro_) {
+            loaded.diagnostics.push(Diagnostic {
+                message: format!(
+                    "SWR4002: Syntax {} cannot shadow a core {} form.",
+                    macro_.name, macro_.category
+                ),
+                start: 0,
+                end: 0,
+            });
+        }
+        if local_dispatchable(&macro_) {
+            push_macro(&mut loaded.macros, macro_);
+        }
     }
     loaded
         .classes
@@ -1735,6 +1746,9 @@ impl<'a> Printer<'a> {
                 precedence: 0,
                 associativity: Associativity::None,
                 rules: vec![rule],
+                category: "expr".to_owned(),
+                operator: false,
+                shadows_core: false,
             });
         }
     }
@@ -1840,6 +1854,12 @@ struct Macro {
     precedence: u8,
     associativity: Associativity,
     rules: Vec<Rule>,
+    /// The definition's category (`expr`, `item`, ...), `expr` when unwritten.
+    category: String,
+    /// `operator` rather than `syntax`: dispatched beside or between operands.
+    operator: bool,
+    /// The definition wrote `shadows core`.
+    shadows_core: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1990,6 +2010,8 @@ struct ImportBinding {
 
 struct SyntaxImport {
     names: Vec<String>,
+    /// `... for syntax shadows core;`
+    shadows_core: bool,
     /// `exported as local` for `import { twice as cloneArmy }`.
     aliases: Vec<(String, String)>,
     specifier: String,
@@ -2085,7 +2107,37 @@ fn load_syntax_module(
                 }
             }
             macro_.name = name.clone();
-            taken.push(macro_);
+            // Upstream only checks the authorization of an import that names
+            // a core spelling; `for syntax shadows core { (#) }` is harmless.
+            if import.shadows_core
+                && is_core_form(name, &macro_.category, macro_.operator)
+                && !(macro_.shadows_core && core_shadow_valid(&macro_))
+            {
+                loaded.diagnostics.push(Diagnostic {
+                    message: format!(
+                        "SWR4003: Import requests core shadowing for {name}, but its definition does not authorize interception."
+                    ),
+                    start: import.span.start,
+                    end: import.span.end,
+                });
+            }
+            if report && macro_.shadows_core && !core_shadow_valid(&macro_) {
+                loaded.diagnostics.push(Diagnostic {
+                    message: format!(
+                        "SWR4002: Syntax {} cannot shadow a core {} form.",
+                        macro_.name, macro_.category
+                    ),
+                    start: import.span.start,
+                    end: import.span.end,
+                });
+            }
+            // A core form is dispatched as core unless both the definition
+            // and this import opt into interception.
+            let authorized =
+                macro_.shadows_core && import.shadows_core && core_shadow_valid(&macro_);
+            if !is_core_form(&macro_.name, &macro_.category, macro_.operator) || authorized {
+                taken.push(macro_);
+            }
         } else if report
             && !syntax_parameters(&read.children)
                 .iter()
@@ -2115,7 +2167,11 @@ fn load_syntax_module(
     // are syntax in the same module. The import names `query` only. The
     // template still needs the others, so they stay available.
     for macro_ in found.into_values() {
-        push_macro(&mut loaded.macros, macro_);
+        // A sibling is in scope where its own module wrote it; a core
+        // spelling there needs that definition's own `shadows core`.
+        if local_dispatchable(&macro_) {
+            push_macro(&mut loaded.macros, macro_);
+        }
     }
     // A nested `for syntax` module is where the macro it exports is defined.
     // Its runtime imports are synthesized ahead of the module that imported
@@ -2131,6 +2187,156 @@ fn load_syntax_module(
         &mut loaded.runtime_imports,
         rebase_runtime_imports(user_dir, &path, used),
     );
+}
+
+/// The core forms a binding of this category could stand in for
+/// (upstream `expansion/src/core-shadowing.ts` and
+/// `enforestation/src/core-operators.ts`). A macro heads an operand, so it
+/// meets the declared words and the prefix operators; an operator meets
+/// every core operator of its spelling.
+fn is_core_form(spelling: &str, category: &str, operator: bool) -> bool {
+    const EXPR: &[&str] = &[
+        "await", "class", "delete", "function", "new", "super", "this", "typeof", "void", "yield",
+    ];
+    const STMT: &[&str] = &[
+        "break", "class", "const", "continue", "debugger", "do", "for", "function", "if", "let",
+        "return", "switch", "throw", "try", "var", "while", "with",
+    ];
+    const ITEM: &[&str] = &[
+        "class",
+        "const",
+        "declare",
+        "enum",
+        "export",
+        "function",
+        "import",
+        "interface",
+        "let",
+        "module",
+        "namespace",
+        "type",
+        "var",
+    ];
+    const TYPE: &[&str] = &[
+        "abstract",
+        "any",
+        "asserts",
+        "bigint",
+        "boolean",
+        "false",
+        "infer",
+        "keyof",
+        "never",
+        "new",
+        "null",
+        "number",
+        "object",
+        "readonly",
+        "string",
+        "symbol",
+        "this",
+        "true",
+        "typeof",
+        "undefined",
+        "unique",
+        "unknown",
+        "void",
+    ];
+    const CLASS_ELEMENT: &[&str] = &[
+        "abstract",
+        "accessor",
+        "constructor",
+        "declare",
+        "get",
+        "override",
+        "private",
+        "protected",
+        "public",
+        "readonly",
+        "set",
+        "static",
+    ];
+    const TYPE_MEMBER: &[&str] = &["get", "new", "readonly", "set"];
+    const PREFIX_OPS: &[&str] = &[
+        "+", "-", "!", "~", "typeof", "void", "delete", "await", "new", "++", "--", "yield",
+    ];
+    const OTHER_OPS: &[&str] = &[
+        "++",
+        "--",
+        "**",
+        "*",
+        "/",
+        "%",
+        "+",
+        "-",
+        "<<",
+        ">>",
+        ">>>",
+        "<",
+        "<=",
+        ">",
+        ">=",
+        "in",
+        "instanceof",
+        "as",
+        "satisfies",
+        "==",
+        "!=",
+        "===",
+        "!==",
+        "&",
+        "^",
+        "|",
+        "&&",
+        "||",
+        "??",
+        "=",
+        "+=",
+        "-=",
+        "*=",
+        "/=",
+        "%=",
+        "**=",
+        "<<=",
+        ">>=",
+        ">>>=",
+        "&=",
+        "^=",
+        "|=",
+        "&&=",
+        "||=",
+        "??=",
+        "=>",
+        ",",
+    ];
+    let declared: &[&str] = match category {
+        "expr" => EXPR,
+        "stmt" => STMT,
+        "item" => ITEM,
+        "type" => TYPE,
+        "classElement" => CLASS_ELEMENT,
+        "typeMember" => TYPE_MEMBER,
+        _ => &[],
+    };
+    if declared.contains(&spelling) {
+        return true;
+    }
+    if category != "expr" {
+        return false;
+    }
+    PREFIX_OPS.contains(&spelling) || (operator && OTHER_OPS.contains(&spelling))
+}
+
+/// `shadows core` names a core form of the definition's own category.
+fn core_shadow_valid(macro_: &Macro) -> bool {
+    is_core_form(&macro_.name, &macro_.category, macro_.operator)
+}
+
+/// A definition in scope where it was written: a core spelling is
+/// dispatched to it only when it opted in with a valid `shadows core`.
+fn local_dispatchable(macro_: &Macro) -> bool {
+    !is_core_form(&macro_.name, &macro_.category, macro_.operator)
+        || (macro_.shadows_core && core_shadow_valid(macro_))
 }
 
 fn push_macro(macros: &mut Vec<Macro>, macro_: Macro) {
@@ -2388,6 +2594,8 @@ fn collect_macros(source: &str, nodes: &[Syntax], out: &mut HashMap<String, Macr
             // the macro was stored as infix. An infix walk then treats
             // `typeof NaN` as an operator with a left operand.
             let position = syntax_position(nodes, &mut index);
+            let shadows_core =
+                token_at(nodes, index, "shadows") && token_at(nodes, index + 1, "core");
             // `syntax parameter (%):expr;` declares a name with no rules.
             // The next brace belongs to the following definition.
             let mut peek = index;
@@ -2429,6 +2637,9 @@ fn collect_macros(source: &str, nodes: &[Syntax], out: &mut HashMap<String, Macr
                         precedence,
                         associativity,
                         rules,
+                        category: position.clone().unwrap_or_else(|| "expr".to_owned()),
+                        operator,
+                        shadows_core,
                     });
                 }
             }
@@ -7257,8 +7468,16 @@ fn syntax_import_at(nodes: &[Syntax], index: usize) -> Option<SyntaxImport> {
             Syntax::String { raw, .. } => Some(raw.clone()),
             _ => None,
         })?;
+    let shadows_core = nodes
+        .iter()
+        .skip(index)
+        .take_while(|node| !operator_is(Some(node), ";"))
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| token_is(Some(pair[0]), "shadows") && token_is(Some(pair[1]), "core"));
     Some(SyntaxImport {
         names,
+        shadows_core,
         aliases,
         specifier,
         span,
