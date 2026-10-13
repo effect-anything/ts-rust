@@ -42,10 +42,23 @@ pub struct Options {
     pub typegpu: TypegpuOptions,
 }
 
-/// Sweetener options. None are defined yet; the object is accepted (and
-/// checked for unknown keys) so a config can name the category.
+/// Sweetener options. `None` is the default.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SweetenerOptions {}
+pub struct SweetenerOptions {
+    /// `rewriteImports`, default `false`: module specifiers keep the
+    /// `.sts`/`.stsx` the author wrote (as upstream Sweetener prints them).
+    /// `true` drops the extension (`./logic.sts` → `./logic`), for a
+    /// bundler that resolves the virtual `.ts` by extension search. Only the
+    /// Node API output uses it; `tsc` resolves `.sts` imports itself.
+    pub rewrite_imports: Option<bool>,
+}
+
+impl SweetenerOptions {
+    #[must_use]
+    pub fn rewrite_imports(&self) -> bool {
+        self.rewrite_imports.unwrap_or(false)
+    }
+}
 
 /// `TypeGPU` options, as unplugin-typegpu names them. `None` is the default.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -92,7 +105,12 @@ impl Options {
     #[must_use]
     pub fn merged(&self, over: &Options) -> Options {
         Options {
-            sweetener: SweetenerOptions {},
+            sweetener: SweetenerOptions {
+                rewrite_imports: over
+                    .sweetener
+                    .rewrite_imports
+                    .or(self.sweetener.rewrite_imports),
+            },
             typegpu: TypegpuOptions {
                 auto_naming: over.typegpu.auto_naming.or(self.typegpu.auto_naming),
                 early_pruning: over.typegpu.early_pruning.or(self.typegpu.early_pruning),
@@ -128,8 +146,18 @@ impl Options {
                 "sweetener" => match value {
                     Value::Null => {}
                     Value::Object(fields) => {
-                        for key in fields.keys() {
-                            errors.push(error(&["sweetener", key], "unknown option".to_owned()));
+                        for (key, value) in fields {
+                            let at = ["sweetener", key.as_str()];
+                            match (key.as_str(), value) {
+                                (_, Value::Null) => {}
+                                ("rewriteImports", Value::Bool(on)) => {
+                                    options.sweetener.rewrite_imports = Some(*on);
+                                }
+                                ("rewriteImports", _) => {
+                                    errors.push(error(&at, "must be a boolean".to_owned()));
+                                }
+                                _ => errors.push(error(&at, "unknown option".to_owned())),
+                            }
                         }
                     }
                     _ => errors.push(error(&["sweetener"], "must be an object".to_owned())),
@@ -339,11 +367,12 @@ mod tests {
     #[test]
     fn reads_categories_and_reports_unknown_keys() {
         let (options, errors) = Options::from_json(&json!({
-            "sweetener": {},
+            "sweetener": { "rewriteImports": true },
             "typegpu": { "autoNaming": false, "forceTgpuAlias": "gpu", "exclude": "x" },
             "other": 1
         }));
         assert_eq!(options.typegpu.auto_naming, Some(false));
+        assert_eq!(options.sweetener.rewrite_imports, Some(true));
         assert_eq!(options.typegpu.force_tgpu_alias.as_deref(), Some("gpu"));
         let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
         assert_eq!(

@@ -6,8 +6,14 @@
 // file runs the TypeGPU step only. To leave a file alone, do not call
 // transform on it.
 
-/** Sweetener options. None are defined yet. */
-export interface SweetenerOptions {}
+/** Sweetener options. */
+export interface SweetenerOptions {
+  /**
+   * Drop `.sts`/`.stsx` from module specifiers (`"./logic.sts"` → `"./logic"`), for a resolver
+   * that finds the virtual `.ts` by extension search. Default `false`: specifiers stay as written.
+   */
+  rewriteImports?: boolean;
+}
 
 /** TypeGPU options, named as in unplugin-typegpu. */
 export interface TypegpuOptions {

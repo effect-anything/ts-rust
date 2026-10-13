@@ -19,7 +19,7 @@ entry for `@effect-x/tsc`.
       "package": "@effect-x/tsc",
       "extensions": [".sts", ".stsx"],
       "options": {
-        "sweetener": {},
+        "sweetener": { "rewriteImports": false },
         "typegpu": { "autoNaming": true, "earlyPruning": false, "forceTgpuAlias": "tgpu" }
       }
     }
@@ -29,7 +29,7 @@ entry for `@effect-x/tsc`.
 
 | option | default | |
 | --- | --- | --- |
-| `sweetener` | `{}` | No options yet. |
+| `sweetener.rewriteImports` | `false` | Drop `.sts`/`.stsx` from module specifiers in the Node API output. |
 | `typegpu.autoNaming` | `true` | Name TypeGPU resources after their binding. |
 | `typegpu.earlyPruning` | `false` | Skip files that do not import TypeGPU. |
 | `typegpu.forceTgpuAlias` | none | The name `tgpu` is imported as. |

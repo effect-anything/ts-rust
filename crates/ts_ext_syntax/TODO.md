@@ -32,8 +32,8 @@ Sweetener cases are flat directories under `crates/ts_ext_sweetener/cases`, one 
 - [x] `transformer.transformFile(path, options?)` for tests and tools
 - [x] Both passes run; no mode switch (build form, `__TYPEGPU_META__` included)
 - [x] Options by category, the same shape in the tsconfig `contentMappers` entry (`config.rs`)
-- [ ] `sweetener` has no options yet
-- [ ] The content mapper keeps per-project options but nothing reads them yet (Sweetener has none; TypeGPU runs inside tsc)
+- [x] `sweetener.rewriteImports` (default off: specifiers keep `.sts`, as upstream prints them)
+- [ ] The content mapper keeps per-project options but nothing reads them yet (the mapper path is check-phase Sweetener; TypeGPU runs inside tsc)
 
 ## Expander: library forms and missing template behavior
 

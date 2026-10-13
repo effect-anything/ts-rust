@@ -23,6 +23,7 @@ pub enum TransformPhase {
 
 /// Reusable plugin transform. It holds no compiler and no tsconfig.
 #[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TransformSession {
     phase: TransformPhase,
     /// Upstream's `autoNamingEnabled`. The plugin defaults it on; the plugin's
@@ -38,6 +39,11 @@ pub struct TransformSession {
     filter_id: bool,
     /// Upstream `exclude`.
     exclude: Option<String>,
+    /// Rewrite `.sts`/`.stsx` module specifiers to extensionless ones (on by
+    /// default here; `sweetener.rewriteImports` of the tsc-ext options).
+    /// Off, specifiers keep the extension the author wrote, as upstream
+    /// Sweetener prints them.
+    rewrite_imports: bool,
 }
 
 impl Default for TransformSession {
@@ -89,6 +95,7 @@ impl TransformSession {
             force_tgpu_alias: None,
             filter_id: false,
             exclude: None,
+            rewrite_imports: true,
         }
     }
 
@@ -101,6 +108,7 @@ impl TransformSession {
             force_tgpu_alias: None,
             filter_id: false,
             exclude: None,
+            rewrite_imports: true,
         }
     }
 
@@ -114,6 +122,7 @@ impl TransformSession {
             force_tgpu_alias: None,
             filter_id: false,
             exclude: None,
+            rewrite_imports: true,
         }
     }
 
@@ -141,6 +150,13 @@ impl TransformSession {
         self
     }
 
+    /// See the `rewrite_imports` field.
+    #[must_use]
+    pub fn rewrite_imports(mut self, enabled: bool) -> Self {
+        self.rewrite_imports = enabled;
+        self
+    }
+
     #[must_use]
     pub fn exclude(mut self, text: impl Into<String>) -> Self {
         self.exclude = Some(text.into());
@@ -153,7 +169,8 @@ impl TransformSession {
     #[must_use]
     pub fn from_options(options: &crate::config::Options) -> Self {
         let session = Self::build_with_auto_naming(options.typegpu.auto_naming())
-            .early_pruning(options.typegpu.early_pruning());
+            .early_pruning(options.typegpu.early_pruning())
+            .rewrite_imports(options.sweetener.rewrite_imports());
         match &options.typegpu.force_tgpu_alias {
             Some(alias) => session.force_tgpu_alias(alias.clone()),
             None => session,
@@ -227,7 +244,7 @@ fn apply_typegpu(
     }
     .transform(path, code);
     if phase == TransformPhase::Build {
-        let output = rewrite_specifiers(path, source, &gpu.code);
+        let output = rewrite_specifiers(session.rewrite_imports, source, &gpu.code);
         let segments = crate::retarget_segments(code, &gpu.code, &first.span_map_segments());
         let segments = crate::retarget_segments(&gpu.code, &output, &segments);
         let mappings = mappings_json(&segments);
@@ -246,7 +263,7 @@ fn apply_typegpu(
     }
     let Some(rewritten) = gpu.rewrite else {
         let changed = already_changed || !first.diagnostics.is_empty() || gpu.code != code;
-        let output = rewrite_specifiers(path, source, &gpu.code);
+        let output = rewrite_specifiers(session.rewrite_imports, source, &gpu.code);
         let segments = crate::retarget_segments(code, &gpu.code, &first.span_map_segments());
         let segments = crate::retarget_segments(&gpu.code, &output, &segments);
         let mappings = mappings_json(&segments);
@@ -276,7 +293,7 @@ fn apply_typegpu(
         segment.0 = segment.0.wrapping_add(shift);
         segment.1 = segment.1.wrapping_add(shift);
     }
-    let output = rewrite_specifiers(path, source, &gpu.code);
+    let output = rewrite_specifiers(session.rewrite_imports, source, &gpu.code);
     let segments = crate::retarget_segments(&gpu.code, &output, &segments);
     let mappings = mappings_json(&segments);
     let source_map = v3_source_map(path, source, &output, &segments);
@@ -316,12 +333,54 @@ fn apply_typegpu(
 /// `.sts` stays. The scan follows statement and expression structure, so a
 /// `.sts` inside an ordinary literal is never a specifier just because it
 /// sits on the same line as an import.
-fn rewrite_specifiers(_path: &str, source: &str, code: &str) -> String {
+fn rewrite_specifiers(rewrite: bool, source: &str, code: &str) -> String {
     // Sweetener expansion strips `.sts` from every string, specifier or
     // not. Put the author's literal back when this text still matches it
     // apart from that strip, then remove the extension from specifiers only.
     let code = restore_unstripped_literals(source, code);
+    if !rewrite {
+        return keep_specifiers(source, &code);
+    }
     apply_specifier_spans(&code)
+}
+
+/// Sweetener's printer drops `.sts`/`.stsx` from strings. With import
+/// rewriting off, every quoted literal of the author that named such a file
+/// gets its extension back where the output has the stripped spelling, so
+/// `import "./logic.sts"` stays as written (upstream Sweetener's output).
+fn keep_specifiers(source: &str, code: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for ext in [".stsx", ".sts"] {
+        for (at, _) in source.match_indices(ext) {
+            let end = at + ext.len();
+            let Some(&quote) = bytes.get(end) else {
+                continue;
+            };
+            if quote != b'"' && quote != b'\'' {
+                continue;
+            }
+            let Some(open) = source[..at].rfind(|ch| ch == quote as char || ch == '\n') else {
+                continue;
+            };
+            if bytes[open] != quote {
+                continue;
+            }
+            let quote = quote as char;
+            let original = format!("{quote}{}{quote}", &source[open + 1..end]);
+            let stripped = format!("{quote}{}{quote}", &source[open + 1..at]);
+            if !pairs.iter().any(|(from, _)| *from == stripped) {
+                pairs.push((stripped, original));
+            }
+        }
+    }
+    let mut out = code.to_owned();
+    for (stripped, original) in pairs {
+        if out.contains(&stripped) {
+            out = out.replace(&stripped, &original);
+        }
+    }
+    out
 }
 
 fn apply_specifier_spans(code: &str) -> String {
@@ -1193,6 +1252,23 @@ pub fn mappings_json(segments: &[(i32, i32, i32, i32, i32)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{TransformSession, compose, map_through};
+
+    #[test]
+    fn import_specifiers_keep_the_extension_unless_rewriting() {
+        let code = "import { b } from \"./b.sts\";\nexport syntax twice:expr {\n  rule { twice($x:expr) } => { [$x, $x] }\n}\nexport const a = twice(b);\n";
+        let kept = TransformSession::from_options(&crate::config::Options::default())
+            .transform("/p/a.sts", code);
+        assert!(kept.code.contains("from \"./b.sts\""), "{}", kept.code);
+        assert!(kept.code.contains("[b, b]"), "{}", kept.code);
+        let mut options = crate::config::Options::default();
+        options.sweetener.rewrite_imports = Some(true);
+        let rewritten = TransformSession::from_options(&options).transform("/p/a.sts", code);
+        assert!(
+            rewritten.code.contains("from \"./b\""),
+            "{}",
+            rewritten.code
+        );
+    }
 
     #[test]
     fn ranges_across_reordered_segments_cover_every_operand() {
