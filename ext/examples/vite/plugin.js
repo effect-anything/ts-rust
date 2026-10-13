@@ -32,101 +32,24 @@ function where(code, offset) {
   return `${lines.length}:${lines[lines.length - 1].length + 1}`;
 }
 
-const VLQ = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-function encodeVLQ(value) {
-  let n = value < 0 ? (-value << 1) | 1 : value << 1;
-  let out = "";
-  do {
-    let digit = n & 31;
-    n >>>= 5;
-    if (n > 0) digit |= 32;
-    out += VLQ[digit];
-  } while (n > 0);
-  return out;
-}
-
-function indexAtByte(text, byte) {
-  const bytes = Buffer.from(text, "utf8");
-  return bytes.subarray(0, Math.min(byte, bytes.length)).toString("utf8").length;
-}
-
-function lineCol(text, index) {
-  let line = 0;
-  let column = 0;
-  const end = Math.min(index, text.length);
-  for (let i = 0; i < end; i++) {
-    if (text.charCodeAt(i) === 10) {
-      line += 1;
-      column = 0;
-    } else {
-      column += 1;
-    }
-  }
-  return [line, column];
-}
-
+// The session returns a Source Map v3 with exact per-token `mappings`
+// (UTF-16 columns, `sourcesContent`). Hand it to the bundler as is; the
+// raw spanmap `segments` are only for tools that compose span maps.
 function sourceMap(file, original, result) {
-  let segments = [];
+  let map;
   try {
-    segments = JSON.parse(result.sourceMap).segments ?? [];
+    map = JSON.parse(result.sourceMap);
   } catch {
     return null;
   }
-  const points = [];
-  for (const [start, length, originalStart, originalLength, kind] of segments) {
-    if (length <= 0) continue;
-    const genFrom = indexAtByte(result.code, start);
-    const genTo = indexAtByte(result.code, start + length);
-    const origFrom = indexAtByte(original, originalStart);
-    const sameBytes =
-      Buffer.from(result.code, "utf8")
-        .subarray(start, start + length)
-        .toString("utf8") ===
-      Buffer.from(original, "utf8")
-        .subarray(originalStart, originalStart + originalLength)
-        .toString("utf8");
-    const verbatim = kind === 0 && originalLength === length && sameBytes;
-    if (kind === 0 && !verbatim) continue;
-    let genIndex = genFrom;
-    let origIndex = origFrom;
-    let first = true;
-    while (genIndex < genTo) {
-      if (first || result.code.charCodeAt(genIndex - 1) === 10) {
-        points.push([...lineCol(result.code, genIndex), ...lineCol(original, origIndex)]);
-        first = false;
-      }
-      genIndex += 1;
-      if (verbatim) origIndex += 1;
-    }
-  }
-  points.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const lines = [];
-  let line = 0;
-  let column = 0;
-  let sourceLine = 0;
-  let sourceColumn = 0;
-  for (const [nextLine, nextColumn, nextSourceLine, nextSourceColumn] of points) {
-    while (lines.length <= nextLine) lines.push([]);
-    const sameLine = lines[nextLine].length > 0;
-    lines[nextLine].push(
-      encodeVLQ(nextColumn - (sameLine ? column : 0)) +
-        encodeVLQ(0) +
-        encodeVLQ(nextSourceLine - sourceLine) +
-        encodeVLQ(nextSourceColumn - sourceColumn),
-    );
-    line = nextLine;
-    column = nextColumn;
-    sourceLine = nextSourceLine;
-    sourceColumn = nextSourceColumn;
-  }
+  if (typeof map.mappings !== "string") return null;
   return {
     version: 3,
     file,
     sources: [file],
-    sourcesContent: [original],
-    names: [],
-    mappings: lines.map((groups) => groups.join(",")).join(";"),
+    sourcesContent: map.sourcesContent ?? [original],
+    names: map.names ?? [],
+    mappings: map.mappings,
   };
 }
 
