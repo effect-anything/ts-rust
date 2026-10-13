@@ -11,6 +11,12 @@
 //! `--fingerprint <file>...` prints one hash of each file's whole expansion
 //! (code, segments, origins, traces, diagnostics) in both phases instead,
 //! to compare two builds of the expander for identical output.
+//!
+//! `--edits <file>...` times the edit of one file in an editor: the file is
+//! expanded once, then each run expands it with a new comment inserted at
+//! the start of a line near its start, middle or end (modules and the
+//! previous version cached). Set `SWEETENER_EDIT_PROFILE=<n>` to repeat the
+//! middle edit n times (for a sampling profiler).
 
 use std::time::{Duration, Instant};
 
@@ -61,6 +67,11 @@ fn main() {
             }
             println!("{:016x} {file}", std::hash::Hasher::finish(&hasher));
         }
+        return;
+    }
+    if let Some(at) = args.iter().position(|a| a == "--edits") {
+        args.remove(at);
+        edits(runs, &args);
         return;
     }
     println!(
@@ -123,5 +134,64 @@ fn main() {
             first.code.len(),
             first.diagnostics.len()
         );
+    }
+}
+
+/// The byte offset of the first line start at or after `fraction` of `code`
+/// whose line is not blank.
+fn line_near(code: &str, fraction: f64) -> usize {
+    let target = (code.len() as f64 * fraction) as usize;
+    let mut offset = 0;
+    for line in code.split_inclusive('\n') {
+        if offset >= target && !line.trim().is_empty() {
+            return offset;
+        }
+        offset += line.len();
+    }
+    code.rfind('\n').map_or(0, |at| at + 1)
+}
+
+fn edits(runs: usize, files: &[String]) {
+    println!("| file | edit at | ms (median of {runs}) |");
+    println!("| --- | --- | ---: |");
+    let mut serial = 0usize;
+    for file in files {
+        let path = std::fs::canonicalize(file).expect("file");
+        let filename = path.display().to_string();
+        let code = std::fs::read_to_string(&path).expect("read");
+        let request = |code: &str| {
+            expand(ExpandRequest {
+                filename: &filename,
+                code,
+                phase: Phase::Check,
+            })
+        };
+        if let Ok(n) = std::env::var("SWEETENER_EDIT_PROFILE") {
+            let at = line_near(&code, 0.5);
+            request(&code);
+            for _ in 0..n.parse::<usize>().expect("n") {
+                serial += 1;
+                request(&format!("{}/*e{serial}*/ {}", &code[..at], &code[at..]));
+            }
+            return;
+        }
+        for (name, fraction) in [("start", 0.0), ("middle", 0.5), ("end", 0.97)] {
+            let at = line_near(&code, fraction);
+            clear_caches();
+            request(&code);
+            let took = time(
+                runs,
+                || {},
+                || {
+                    serial += 1;
+                    request(&format!("{}/*e{serial}*/ {}", &code[..at], &code[at..]));
+                },
+            );
+            println!(
+                "| {} | {name} | {} |",
+                path.file_name().unwrap().to_string_lossy(),
+                ms(took)
+            );
+        }
     }
 }

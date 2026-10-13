@@ -118,6 +118,51 @@ pub(crate) fn reset() {
     });
 }
 
+/// The counters of the running pass, for an item the expander replays: the
+/// charges so far, the macro they belong to, and the limits. `None` when no
+/// item may be replayed: no pass, a limit already passed, or a deadline
+/// (which depends on time, not on the text).
+pub(crate) struct Counters {
+    pub used: [u64; 5],
+    pub current: String,
+    pub limits: [u64; 5],
+}
+
+pub(crate) fn counters() -> Option<Counters> {
+    TRACKER.with(|t| {
+        let t = t.borrow();
+        let t = t.as_ref()?;
+        if t.exhausted.is_some() || t.budget.deadline.is_some() {
+            return None;
+        }
+        let b = &t.budget;
+        Some(Counters {
+            used: t.used,
+            current: t.current.clone(),
+            limits: [
+                b.max_input_tokens,
+                b.max_output_tokens,
+                b.max_expansion_steps,
+                b.max_template_steps,
+                b.max_matcher_steps,
+            ],
+        })
+    })
+}
+
+/// Add the charges of a replayed item (which the caller checked stay within
+/// the limits) and its last macro.
+pub(crate) fn replay(charges: &[u64; 5], current: &str) {
+    TRACKER.with(|t| {
+        if let Some(t) = t.borrow_mut().as_mut() {
+            for (used, charge) in t.used.iter_mut().zip(charges) {
+                *used = used.saturating_add(*charge);
+            }
+            current.clone_into(&mut t.current);
+        }
+    });
+}
+
 /// The macro the next charges belong to.
 pub(crate) fn enter(name: &str) {
     TRACKER.with(|t| {

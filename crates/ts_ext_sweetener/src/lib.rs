@@ -215,6 +215,22 @@ pub fn expand_with_budget(request: ExpandRequest<'_>, budget: ResourceBudget) ->
 #[doc(hidden)]
 pub fn clear_caches() {
     sweetener_cache::clear();
+    sweetener_expand::clear_item_logs();
+}
+
+/// Expand past the file memo, with incremental expansion (the item logs of
+/// earlier expansions of the same file) on or off. Tests compare the two.
+#[doc(hidden)]
+#[must_use]
+pub fn expand_uncached(request: ExpandRequest<'_>, incremental: bool) -> Expansion {
+    sweetener_expand::expand_uncached(request, incremental)
+}
+
+/// Items incremental expansion replayed and printed so far, in this process.
+#[doc(hidden)]
+#[must_use]
+pub fn incremental_stats() -> (usize, usize) {
+    sweetener_expand::incremental_stats()
 }
 
 /// Expand `code` as a `.sts` file on the calling thread, without the

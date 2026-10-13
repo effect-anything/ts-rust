@@ -10,7 +10,7 @@
 
 use super::sweetener_reader::{Delimiter, Syntax};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) struct Contexts {
     pub generator: bool,
     pub async_: bool,

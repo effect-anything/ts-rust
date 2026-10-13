@@ -225,7 +225,7 @@ const THREAD_LAST: &str = "->>";
 /// `(local, export)` pairs bound by top-level `for syntax` imports.
 /// Imports nested in a function or block do not count (upstream reads module
 /// imports only).
-fn imported_syntax_bindings(nodes: &[Syntax]) -> std::rc::Rc<Vec<(String, String)>> {
+pub(crate) fn imported_syntax_bindings(nodes: &[Syntax]) -> std::rc::Rc<Vec<(String, String)>> {
     let active = FILE_IMPORTS.with(|active| {
         active
             .borrow()

@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+mod items;
+
 /// Shared macro and class tables. A nested replacement clones the `Rc`,
 /// not the table.
 type SharedList<T> = Rc<Vec<T>>;
@@ -173,6 +175,35 @@ fn clamp_invocation(code: &str, (start, end): (u32, u32)) -> (u32, u32) {
     (start, end)
 }
 
+/// Expand on a thread of its own, as `expand` does, but past the file memo,
+/// with the item logs of incremental expansion used or not.
+pub(crate) fn expand_uncached(request: ExpandRequest<'_>, incremental: bool) -> Expansion {
+    let budget = super::sweetener_budget::configured();
+    let stack = super::sweetener_budget::stack_bytes(&budget);
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn_scoped(scope, move || {
+                super::sweetener_budget::with_budget(budget, || {
+                    items::with_incremental(incremental, || expand_here(request))
+                })
+            })
+            .expect("expansion thread")
+            .join()
+            .expect("expansion")
+    })
+}
+
+/// Items replayed and items printed by incremental expansion so far.
+pub(crate) fn incremental_stats() -> (usize, usize) {
+    items::stats()
+}
+
+/// Forget the item logs of incremental expansion.
+pub(crate) fn clear_item_logs() {
+    items::clear();
+}
+
 pub(crate) fn expand_here(request: ExpandRequest<'_>) -> Expansion {
     OWNER_FILTER.with(|filter| filter.borrow_mut().take());
     let first = expand_pass(&request, None);
@@ -322,6 +353,7 @@ fn expand_pass(
     ACTIVE_EXPANSIONS.with(|active| active.borrow_mut().clear());
     let imports = syntax_imports(source, &read.children);
     let names_again = names.clone();
+    let pass = names.is_some();
     let user_names = names.unwrap_or_else(|| user_spellings(&read.children));
     let mut loaded = load_macros(request.filename, source, &imports, &user_names);
     let mut local = HashMap::new();
@@ -435,7 +467,7 @@ fn expand_pass(
         dependencies: loaded.dependencies,
         depth: 0,
         printing_core: false,
-        user_names: user_names.clone(),
+        user_names: items::UserNames::new(user_names.clone()),
         pending_captures: None,
         consumed: Vec::new(),
         classes: share_list(loaded.classes),
@@ -469,13 +501,25 @@ fn expand_pass(
         file_nodes: &read.children,
         fine: Vec::new(),
         pending_pieces: None,
+        items: None,
+        macro_generation: 0,
+        nested_diagnostics: Vec::new(),
     };
     printer.diagnostics.extend(loaded.diagnostics);
+    printer.items = items::Recorder::new(&printer, request.filename, request.phase, pass);
+    if let Some(recorder) = &printer.items {
+        // The regions the first lookup would build, built now: the log keys
+        // an item by the regions around it.
+        printer.context_regions = Some(recorder.regions());
+    }
     super::sweetener_forms::with_file_imports(&read.children, || {
         printer.print_nodes(&read.children);
         printer.copy_until(source.len());
         printer.finish_fixture_tails();
     });
+    if let Some(recorder) = printer.items.take() {
+        items::finish(recorder);
+    }
     // A macro the rules refuse, or a delimiter the reader cannot pair, is
     // reported on the author token. The item that failed is already in
     // `out` as written (verbatim). Other files are separate expansions.
@@ -1003,7 +1047,7 @@ struct Printer<'a> {
     printing_core: bool,
     /// Spellings the user file already binds. A macro binding that collides
     /// is printed with a suffix; the user's spelling is not rewritten.
-    user_names: std::collections::HashSet<String>,
+    user_names: items::UserNames,
     /// Captures of the rule being instantiated at the top level, until its
     /// expansion is emitted.
     pending_captures: Option<Vec<String>>,
@@ -1041,6 +1085,14 @@ struct Printer<'a> {
     context_regions: Option<Vec<super::sweetener_context::Region>>,
     /// The contexts of the invocation being expanded, for nested printers.
     last_contexts: super::sweetener_context::Contexts,
+    /// The item log of the file's top level (`items`); only the file's own
+    /// printer has one.
+    items: Option<Box<items::Recorder>>,
+    /// Bumped by every change of `macros` or `classes` after the pass began.
+    macro_generation: u32,
+    /// Ranges of `diagnostics` a nested printer reported. Their positions
+    /// are in that printer's text, not this one's.
+    nested_diagnostics: Vec<(usize, usize)>,
     /// A macro rule rejected an item. That item stays as written; the rest
     /// of the file is still expanded. Nested expansion copies this flag up
     /// so the parent does not treat a refused hole as a successful rewrite.
@@ -1049,184 +1101,186 @@ struct Printer<'a> {
 
 impl<'a> Printer<'a> {
     fn macros_mut(&mut self) -> &mut Vec<Macro> {
+        self.macro_generation += 1;
         Rc::make_mut(&mut self.macros)
     }
 
     fn classes_mut(&mut self) -> &mut Vec<SyntaxClass> {
+        self.macro_generation += 1;
         Rc::make_mut(&mut self.classes)
     }
 
     fn print_nodes(&mut self, nodes: &[Syntax]) {
+        // The file's own top level is printed item by item through the item
+        // log, which replays an item an earlier expansion of this file
+        // already printed (see `items`).
+        let logged = self.depth == 0
+            && self.items.is_some()
+            && std::ptr::eq(nodes.as_ptr(), self.file_nodes.as_ptr())
+            && nodes.len() == self.file_nodes.len();
         let mut index = 0;
         while index < nodes.len() {
-            if self.depth == 0 && !self.imports_emitted && self.user_code_starts(nodes, index) {
-                self.emit_runtime_imports();
+            index = if logged {
+                items::step(self, nodes, index)
+            } else {
+                self.print_step(nodes, index)
+            };
+        }
+    }
+
+    /// Print the item of `nodes` that starts at `index`; the index after it.
+    fn print_step(&mut self, nodes: &[Syntax], index: usize) -> usize {
+        if self.depth == 0 && !self.imports_emitted && self.user_code_starts(nodes, index) {
+            self.emit_runtime_imports();
+        }
+        if self.try_drop_syntax_import(nodes, index) {
+            return skip_syntax_import(nodes, index);
+        }
+        // A bare signal read is not an infix operand. Claiming `count`
+        // before the form pass leaves the user spelling.
+        if self
+            .form_signals
+            .iter()
+            .any(|(name, _)| token_is(Some(&nodes[index]), name))
+            && self.try_form(nodes, index)
+        {
+            return self.last_form_next;
+        }
+        // An infix operator owns the expression, including a prefix
+        // macro on its left. Expanding the prefix first would split it.
+        // Channel `->` / `<-` are statement forms. The form pass suffixes
+        // a binder the file already has; the infix expander does not.
+        if let Some(at) = self.infix_in_expr(nodes, index) {
+            // `(->> ...)` is a prefix group. Its `>` is not an infix
+            // operator between the thread and the next statement.
+            // Channel `->` / `<-` are infix macros. Skipping them here
+            // left `2 -> table` for a form that never saw the operand.
+            let thread_group = grouped_prefix(nodes, index).is_some();
+            if !thread_group {
+                return self.expand_infix_expr(nodes, index, at);
             }
-            if self.try_drop_syntax_import(nodes, index) {
-                index = skip_syntax_import(nodes, index);
-                continue;
-            }
-            // A bare signal read is not an infix operand. Claiming `count`
-            // before the form pass leaves the user spelling.
-            if self
-                .form_signals
-                .iter()
-                .any(|(name, _)| token_is(Some(&nodes[index]), name))
-                && self.try_form(nodes, index)
-            {
-                index = self.last_form_next;
-                continue;
-            }
-            // An infix operator owns the expression, including a prefix
-            // macro on its left. Expanding the prefix first would split it.
-            // Channel `->` / `<-` are statement forms. The form pass suffixes
-            // a binder the file already has; the infix expander does not.
-            if let Some(at) = self.infix_in_expr(nodes, index) {
-                // `(->> ...)` is a prefix group. Its `>` is not an infix
-                // operator between the thread and the next statement.
-                // Channel `->` / `<-` are infix macros. Skipping them here
-                // left `2 -> table` for a form that never saw the operand.
-                let thread_group = grouped_prefix(nodes, index).is_some();
-                if !thread_group {
-                    index = self.expand_infix_expr(nodes, index, at);
-                    continue;
+        }
+        // A channel bind the file already has is printed `name_1`.
+        // Later uses in this generator still say `name` unless the
+        // following statements are renamed with that binder.
+        if let Some(step) = super::sweetener_forms::match_channel_stmt(self.source, nodes, index) {
+            if step.op == "<-" {
+                let printed = super::sweetener_forms::fresh_binder(&step.left);
+                if printed != step.left {
+                    self.channel_renames.insert(step.left.clone(), printed);
                 }
             }
-            // A channel bind the file already has is printed `name_1`.
-            // Later uses in this generator still say `name` unless the
-            // following statements are renamed with that binder.
-            if let Some(step) =
-                super::sweetener_forms::match_channel_stmt(self.source, nodes, index)
-            {
-                if step.op == "<-" {
-                    let printed = super::sweetener_forms::fresh_binder(&step.left);
-                    if printed != step.left {
-                        self.channel_renames.insert(step.left.clone(), printed);
-                    }
-                }
-            }
-            // An operator-headed prefix form: `#[a, b]` is `#` then a
-            // bracket group. `macro_head` only sees identifiers, so the
-            // compiled `(#)` rule never ran and the hardcoded form won.
-            // A rule that matches owns the spelling; `repaired_group_rejects`
-            // still refuses `#[1, , 3]`.
-            if matches!(nodes.get(index), Some(Syntax::Operator { .. })) {
-                if let Some(name) = macro_name_of(self.source, nodes, index) {
-                    if self
-                        .macros
-                        .iter()
-                        .any(|macro_| macro_.name == name && !macro_.fixity.operand_led())
-                        && !self.rules_reject(nodes, index)
-                    {
-                        index = self.expand_head(nodes, index, &name);
-                        continue;
-                    }
-                }
-            }
-            // A form rewrite that invents a repair is not a successful
-            // expansion. If every compiled rule for this macro rejects the
-            // input, report that failure and write no TypeScript.
-            // `#[1, , 3]` and `(-> value, call(), , filter())` are forms the
-            // form pass can fill in. The compiled rule's failure token is
-            // the comma, so reject those before the repair is printed.
-            if self.repaired_group_rejects(nodes, index) {
-                index = self.last_form_next;
-                continue;
-            }
-            // `data`, `match`, and `method` have compiled rules. The form
-            // pass prints a different program (no trailing comma, an arrow
-            // body instead of `return`).
-            if let Some(name) = nodes.get(index).and_then(macro_head) {
-                if name == "method"
-                    && macro_call_position(nodes, index)
-                    && self.compiled_rule_matches(nodes, index, name)
-                {
-                    index = self.expand_head(nodes, index, name);
-                    continue;
-                }
-            }
-            if self.try_form(nodes, index) {
-                index = self.last_form_next;
-                continue;
-            }
-            // An identifier a property access owns (`service.q`, `x.service`)
-            // or a parameter list owns (`(service) =>`) is ordinary code. A
-            // form rewrite can print one that shares a macro name, so it must
-            // not reach the macro dispatch.
-            // A macro name the expander holds as written: used before its
-            // definition, in a position its category cannot fill, or with
-            // nothing after it.
-            if self.depth == 0
-                && let Some(held) = self.held_name(nodes, index)
-            {
-                self.diagnostics.push(held);
-                self.print_node(&nodes[index]);
-                index += 1;
-                continue;
-            }
-            // Upstream reads item macros at module level and in namespace
-            // bodies only. Inside a block or function body the words are
-            // left as written.
-            if self.in_block
-                && let Some(name) = nodes.get(index).and_then(macro_head)
-                && self.is_item_only(name)
-            {
-                self.print_node(&nodes[index]);
-                index += 1;
-                continue;
-            }
-            if macro_call_position(nodes, index) {
-                if let Some(name) = macro_head(&nodes[index]) {
-                    if self.compiled_rule_matches(nodes, index, name) {
-                        index = self.expand_head(nodes, index, name);
-                        continue;
-                    }
-                    // `(service)` is a parameter. A bare name that no rule
-                    // claims is ordinary TypeScript. A following group or
-                    // token is a call the rules rejected.
-                    if !jsx_child_context(nodes, index)
-                        && macro_invocation(nodes, index)
-                        && self.rules_reject(nodes, index)
-                    {
-                        index = self.last_form_next;
-                        continue;
-                    }
-                }
-            }
-            // `{when (ready)} <a/> {end}`: the rule's pattern opens with a
-            // brace group whose first word is the macro's name, so the use
-            // starts at that group, not at the word inside it.
-            if let Some(name) = self.braced_head(nodes, index) {
-                index = self.expand_head(nodes, index, &name);
-                continue;
-            }
-            // `(-> value, call(...))` is one group. The operator is its
-            // first child, so the head walk never starts at the name.
-            if let Some(name) = grouped_prefix(nodes, index) {
+        }
+        // An operator-headed prefix form: `#[a, b]` is `#` then a
+        // bracket group. `macro_head` only sees identifiers, so the
+        // compiled `(#)` rule never ran and the hardcoded form won.
+        // A rule that matches owns the spelling; `repaired_group_rejects`
+        // still refuses `#[1, , 3]`.
+        if matches!(nodes.get(index), Some(Syntax::Operator { .. })) {
+            if let Some(name) = macro_name_of(self.source, nodes, index) {
                 if self
                     .macros
                     .iter()
                     .any(|macro_| macro_.name == name && !macro_.fixity.operand_led())
+                    && !self.rules_reject(nodes, index)
                 {
-                    index = self.expand_grouped(nodes, index, &name);
-                    continue;
+                    return self.expand_head(nodes, index, &name);
                 }
             }
-            if self.depth == 0 {
-                if let Some(end) = local_syntax_end(nodes, index) {
-                    let start = node_start(&nodes[index]);
-                    self.copy_until(start);
-                    self.last_original = end;
-                    index = nodes
-                        .iter()
-                        .position(|node| node_start(node) >= end)
-                        .unwrap_or(nodes.len());
-                    continue;
-                }
-            }
-            self.print_node(&nodes[index]);
-            index += 1;
         }
+        // A form rewrite that invents a repair is not a successful
+        // expansion. If every compiled rule for this macro rejects the
+        // input, report that failure and write no TypeScript.
+        // `#[1, , 3]` and `(-> value, call(), , filter())` are forms the
+        // form pass can fill in. The compiled rule's failure token is
+        // the comma, so reject those before the repair is printed.
+        if self.repaired_group_rejects(nodes, index) {
+            return self.last_form_next;
+        }
+        // `data`, `match`, and `method` have compiled rules. The form
+        // pass prints a different program (no trailing comma, an arrow
+        // body instead of `return`).
+        if let Some(name) = nodes.get(index).and_then(macro_head) {
+            if name == "method"
+                && macro_call_position(nodes, index)
+                && self.compiled_rule_matches(nodes, index, name)
+            {
+                return self.expand_head(nodes, index, name);
+            }
+        }
+        if self.try_form(nodes, index) {
+            return self.last_form_next;
+        }
+        // An identifier a property access owns (`service.q`, `x.service`)
+        // or a parameter list owns (`(service) =>`) is ordinary code. A
+        // form rewrite can print one that shares a macro name, so it must
+        // not reach the macro dispatch.
+        // A macro name the expander holds as written: used before its
+        // definition, in a position its category cannot fill, or with
+        // nothing after it.
+        if self.depth == 0
+            && let Some(held) = self.held_name(nodes, index)
+        {
+            self.diagnostics.push(held);
+            self.print_node(&nodes[index]);
+            return index + 1;
+        }
+        // Upstream reads item macros at module level and in namespace
+        // bodies only. Inside a block or function body the words are
+        // left as written.
+        if self.in_block
+            && let Some(name) = nodes.get(index).and_then(macro_head)
+            && self.is_item_only(name)
+        {
+            self.print_node(&nodes[index]);
+            return index + 1;
+        }
+        if macro_call_position(nodes, index) {
+            if let Some(name) = macro_head(&nodes[index]) {
+                if self.compiled_rule_matches(nodes, index, name) {
+                    return self.expand_head(nodes, index, name);
+                }
+                // `(service)` is a parameter. A bare name that no rule
+                // claims is ordinary TypeScript. A following group or
+                // token is a call the rules rejected.
+                if !jsx_child_context(nodes, index)
+                    && macro_invocation(nodes, index)
+                    && self.rules_reject(nodes, index)
+                {
+                    return self.last_form_next;
+                }
+            }
+        }
+        // `{when (ready)} <a/> {end}`: the rule's pattern opens with a
+        // brace group whose first word is the macro's name, so the use
+        // starts at that group, not at the word inside it.
+        if let Some(name) = self.braced_head(nodes, index) {
+            return self.expand_head(nodes, index, &name);
+        }
+        // `(-> value, call(...))` is one group. The operator is its
+        // first child, so the head walk never starts at the name.
+        if let Some(name) = grouped_prefix(nodes, index) {
+            if self
+                .macros
+                .iter()
+                .any(|macro_| macro_.name == name && !macro_.fixity.operand_led())
+            {
+                return self.expand_grouped(nodes, index, &name);
+            }
+        }
+        if self.depth == 0 {
+            if let Some(end) = local_syntax_end(nodes, index) {
+                let start = node_start(&nodes[index]);
+                self.copy_until(start);
+                self.last_original = end;
+                return nodes
+                    .iter()
+                    .position(|node| node_start(node) >= end)
+                    .unwrap_or(nodes.len());
+            }
+        }
+        self.print_node(&nodes[index]);
+        index + 1
     }
 
     /// `${... |> callee}` is still an operator use. The reader keeps the
@@ -2228,10 +2282,15 @@ impl<'a> Printer<'a> {
             file_nodes: self.file_nodes,
             fine: Vec::new(),
             pending_pieces: None,
+            items: None,
+            macro_generation: 0,
+            nested_diagnostics: Vec::new(),
         };
         nested.print_nodes(&read.children);
         nested.copy_until(owned.len());
+        let from = self.diagnostics.len();
         self.diagnostics.append(&mut nested.diagnostics);
+        self.nested_diagnostics.push((from, self.diagnostics.len()));
         if nested.failed {
             self.failed = true;
         }
@@ -2590,6 +2649,9 @@ impl<'a> Printer<'a> {
             file_nodes: self.file_nodes,
             fine: Vec::new(),
             pending_pieces: None,
+            items: None,
+            macro_generation: 0,
+            nested_diagnostics: Vec::new(),
         };
         // A form that already rewrote `function (...)` is TypeScript. Matching
         // it again as the function macro fails the file on the `return` the
@@ -2601,7 +2663,9 @@ impl<'a> Printer<'a> {
         }
         nested.print_nodes(&read.children);
         nested.copy_until(owned.len());
+        let from = self.diagnostics.len();
         self.diagnostics.append(&mut nested.diagnostics);
+        self.nested_diagnostics.push((from, self.diagnostics.len()));
         if nested.failed {
             self.failed = true;
         }
@@ -13894,11 +13958,7 @@ const after = 4;\n";
     }
 }
 
-fn fresh_name(
-    name: &str,
-    used: &std::collections::HashSet<String>,
-    hygiene: &HashMap<String, String>,
-) -> String {
+fn fresh_name(name: &str, used: &items::UserNames, hygiene: &HashMap<String, String>) -> String {
     if let Some(printed) = hygiene.get(name) {
         if !used.contains(printed) {
             return printed.clone();

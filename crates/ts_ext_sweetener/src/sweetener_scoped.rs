@@ -21,7 +21,7 @@ use ts_goport::frontend::parser::{SourceFileParseOptions, parse_source_file};
 
 use crate::Segment;
 
-const OPEN: &str = "__swp";
+pub(crate) const OPEN: &str = "__swp";
 const HOIST: &str = "/*__swlet ";
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -41,6 +41,30 @@ pub(crate) fn parameter_markers(param: &str, value: &str, required: bool) -> (St
             .insert(id, (param.to_owned(), value.to_owned(), required));
     });
     (format!("{OPEN}{id}("), ")".to_owned())
+}
+
+/// The header of region `id`, and a fresh id for the same header (an item
+/// the expander replays prints its regions under new ids).
+pub(crate) fn region(id: usize) -> Option<(String, String, bool)> {
+    REGIONS.with(|regions| regions.borrow().get(&id).cloned())
+}
+
+pub(crate) fn renumber_region(header: (String, String, bool)) -> usize {
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    REGIONS.with(|regions| regions.borrow_mut().insert(id, header));
+    id
+}
+
+pub(crate) fn unused_len() -> usize {
+    UNUSED.with(|list| list.borrow().len())
+}
+
+pub(crate) fn unused_since(from: usize) -> Vec<Unused> {
+    UNUSED.with(|list| list.borrow().get(from..).unwrap_or_default().to_vec())
+}
+
+pub(crate) fn lets_empty() -> bool {
+    LETS.with(|lets| lets.borrow().is_empty())
 }
 
 pub(crate) fn hoist_marker(binder: &str) -> String {

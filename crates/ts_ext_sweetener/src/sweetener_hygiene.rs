@@ -26,7 +26,7 @@ use ts_goport::frontend::parser::{SourceFileParseOptions, parse_source_file};
 
 use crate::Segment;
 
-const PREFIX: &str = "__swh";
+pub(crate) const PREFIX: &str = "__swh";
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 /// A fresh placeholder for one introduced binder named `name`.
@@ -55,6 +55,29 @@ pub(crate) fn in_scope<T>(f: impl FnOnce() -> T) -> T {
     let out = f();
     SCOPE.with(|scope| *scope.borrow_mut() = saved);
     out
+}
+
+/// A fresh placeholder id, for an item the expander replays (`items`).
+pub(crate) fn fresh_id() -> usize {
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Whether a `scoped` expansion is running.
+pub(crate) fn scope_active() -> bool {
+    SCOPE.with(|scope| scope.borrow().is_some())
+}
+
+/// The spellings handed to later forms so far.
+pub(crate) fn remembered() -> HashMap<String, String> {
+    REMEMBERED.with(|map| map.borrow().clone())
+}
+
+pub(crate) fn remembered_is_empty() -> bool {
+    REMEMBERED.with(|map| map.borrow().is_empty())
+}
+
+pub(crate) fn set_remembered(remembered: HashMap<String, String>) {
+    REMEMBERED.with(|map| *map.borrow_mut() = remembered);
 }
 
 /// Hand `printed` to the form that will print `name`'s declaration.

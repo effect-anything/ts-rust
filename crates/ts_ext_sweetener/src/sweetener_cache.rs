@@ -86,6 +86,13 @@ fn record(probe: Probe) {
     });
 }
 
+/// Record the observations of an item the expander replays.
+pub(crate) fn record_probes(probes: &[Probe]) {
+    for probe in probes {
+        record(probe.clone());
+    }
+}
+
 /// `std::fs::read_to_string`, recorded (hit or miss) for memo validation.
 pub fn read_file(path: &std::path::Path) -> Option<String> {
     let (probe, text) = Probe::observe_read(path);
