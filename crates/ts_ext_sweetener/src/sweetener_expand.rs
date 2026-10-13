@@ -2056,13 +2056,60 @@ impl<'a> Printer<'a> {
         template: &[Tpl],
         captures: &HashMap<String, Capture>,
     ) {
-        for part in template {
+        let mut at = 0;
+        // The words before the first hole are the core form itself
+        // (`#core(typeof $value)`, `#core(export function $name ...)`).
+        let mut leading = true;
+        while at < template.len() {
+            let part = &template[at];
+            at += 1;
+            if !matches!(part, Tpl::Text(_)) {
+                leading = false;
+            }
             match part {
                 Tpl::Core(inner) => self.render_core(out, inner, captures),
                 Tpl::Rep { inner, sep } => {
                     self.render_core_rep(out, inner, sep.as_deref(), captures)
                 }
-                Tpl::Text(text) => out.push_str(text),
+                Tpl::Text(text) => {
+                    // `gen $body;` inside `#core(...)`: the core form is the
+                    // wrapper, and a macro head the template writes still
+                    // applies to the holes after it. Render that use as one
+                    // piece and expand it, as upstream expands every subform
+                    // of a core form.
+                    if let Some(head_at) = self.trailing_macro_head(text).filter(|_| !leading) {
+                        out.push_str(&text[..head_at]);
+                        let mut use_text = text[head_at..].to_owned();
+                        let mut rest = String::new();
+                        while at < template.len() {
+                            if let Tpl::Text(next) = &template[at] {
+                                if let Some(end) = next.find([';', ',', ')', '}', ']']) {
+                                    use_text.push_str(&next[..end]);
+                                    rest = next[end..].to_owned();
+                                    at += 1;
+                                    break;
+                                }
+                            }
+                            let mut protected = Vec::new();
+                            render(
+                                &mut use_text,
+                                std::slice::from_ref(&template[at]),
+                                captures,
+                                &self.classes,
+                                &mut protected,
+                            );
+                            at += 1;
+                        }
+                        let was = self.printing_core;
+                        self.printing_core = false;
+                        let expanded = self.expand_replacement(&use_text);
+                        self.printing_core = was;
+                        out.push_str(&expanded);
+                        out.push_str(&rest);
+                    } else {
+                        out.push_str(text);
+                    }
+                }
                 Tpl::Var(name) => {
                     let pieces = capture_pieces(captures, name);
                     for text in pieces {
@@ -2557,6 +2604,26 @@ impl<'a> Printer<'a> {
             }
         }
         if plan.is_empty() { None } else { Some(plan) }
+    }
+
+    /// Byte offset of a word-named macro that ends `text` (only whitespace
+    /// after it), so the holes that follow are its input.
+    fn trailing_macro_head(&self, text: &str) -> Option<usize> {
+        let trimmed = text.trim_end();
+        if trimmed.len() == text.len() && !text.is_empty() {
+            return None;
+        }
+        let start = trimmed
+            .rfind(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '$')
+            .map_or(0, |at| at + 1);
+        let word = &trimmed[start..];
+        if word.is_empty() || start > 0 && trimmed[..start].ends_with('.') {
+            return None;
+        }
+        self.macros
+            .iter()
+            .any(|macro_| macro_.name == word && !macro_.fixity.operand_led())
+            .then_some(start)
     }
 
     fn replacement_needs_expand(&self, replacement: &str) -> bool {
@@ -8019,6 +8086,7 @@ fn match_pats_cont(
                 let mut many = Vec::new();
                 let saved_start = *cursor;
                 let mut row_end: Option<usize> = None;
+                let mut row_starts: Vec<usize> = Vec::new();
                 // A nested `$($parameter ...),*` reuses the head's hole names.
                 // Matching into the outer map overwrites `parameter`, so the
                 // last segment is the only one left. Each iteration matches
@@ -8100,6 +8168,7 @@ fn match_pats_cont(
                             row_end = Some(node_end(&nodes[*cursor - 1]));
                         }
                     }
+                    row_starts.push(saved);
                     many.push(one);
                     if *kind == RepKind::Optional {
                         break;
@@ -8116,6 +8185,20 @@ fn match_pats_cont(
                         }
                         *cursor = saved;
                         break;
+                    }
+                }
+                // A greedy separator-less repetition gives steps back when
+                // the rest of the pattern cannot match after it, as upstream's
+                // backtracking matcher does: `$($statements:stmt)*
+                // $result:expr` leaves the last expression to `$result`.
+                if sep.is_none() && !(pat_index + 1 == pattern.len() && matches!(cont, Cont::Free))
+                {
+                    let rest = Cont::Seq(&pattern[pat_index + 1..], cont);
+                    while !many.is_empty()
+                        && !cont_ok(source, nodes, *cursor, captures, classes, &rest)
+                    {
+                        many.pop();
+                        *cursor = row_starts.pop().unwrap_or(saved_start);
                     }
                 }
                 if *kind == RepKind::OneOrMore && many.is_empty() {
@@ -10401,6 +10484,11 @@ fn collect_capture_idents(value: &Capture, names: &mut std::collections::HashSet
             let trimmed = text.trim();
             if is_ident_text(trimmed) {
                 names.insert(trimmed.to_owned());
+            } else if !trimmed.is_empty() {
+                // `const doubled = value * 2;` captured as a statement is
+                // the user's binder, wherever the template puts it.
+                let read = sweetener_reader::read_syntax(trimmed);
+                names.extend(introduced_of(trimmed, &read.children));
             }
         }
         Capture::Record { fields, text } => {

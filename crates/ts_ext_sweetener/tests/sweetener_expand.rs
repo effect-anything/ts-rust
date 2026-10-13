@@ -1330,3 +1330,47 @@ const o = {
         "{flat}"
     );
 }
+
+/// The `effect` and implicit-return `function` forms run on their declared
+/// rules: a statement repetition gives its last step back to the `$result`
+/// after it, a macro head written inside `#core(...)` still expands the holes
+/// that follow it, and a binder inside a captured statement stays the user's.
+#[test]
+fn core_subforms_and_repetition_backtracking() {
+    let code = r#"syntax class Body {
+  fields { statements: stmt*; result: expr; }
+  rule { { $($statements:stmt)* $result:expr } }
+}
+syntax fn:expr {
+  rule { fn($x:binding) $body:Body } => {
+    #core(function($x) { $($body.statements)* return $body.result; })
+  }
+}
+syntax twice:expr {
+  rule { twice { $e:expr } } => { [$e, $e] }
+}
+syntax effect:item {
+  rule { effect $name:binding $body:tt } => {
+    #core(export const $name = () => twice $body;)
+  }
+}
+const doubled = "outer";
+const f = fn(value) {
+  const doubled = value * 2;
+  doubled + 1
+};
+effect run { 1 }
+"#;
+    let out = expand(ExpandRequest {
+        filename: "core.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    let flat: String = out.code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("function(value) { const doubled = value * 2; return doubled + 1; }"),
+        "{flat}"
+    );
+    assert!(flat.contains("export const run = () => [1, 1];"), "{flat}");
+}

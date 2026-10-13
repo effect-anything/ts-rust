@@ -61,18 +61,6 @@ fn try_expand_fixture_scoped(
     if let Some(read) = match_signal_read(nodes, index, signals) {
         return Some(read);
     }
-    if token_is(nodes.get(index), "effect") {
-        // The imported `effect` rule owns this form. A copy of the body
-        // here skips macros inside template literals.
-        let _ = signals;
-    } else if token_is(nodes.get(index), "function") && !imports_shadowing(file, "function") {
-        // `function` is a core form. The implicit-return macro intercepts it
-        // only where it was imported `for syntax shadows core`, as upstream
-        // (`expansion/src/core-shadowing.ts`); otherwise it is TypeScript.
-    } else if let Some(mut effect) = match_effect_item(source, nodes, index) {
-        effect.text = substitute_signal_reads(&effect.text, signals);
-        return Some(effect);
-    }
     if let Some(data) = match_data_item(source, nodes, index) {
         return Some(data);
     }
@@ -110,7 +98,6 @@ const HANDWRITTEN_FORMS: &[(&str, &str)] = &[
     ("data", "data"),
     ("when", "when"),
     ("each", "each"),
-    ("effect", "effect"),
 ];
 
 /// True when the node at `index` is a core form, or a handwritten library
@@ -280,28 +267,6 @@ fn collect_imported_syntax_names(nodes: &[Syntax], names: &mut Vec<(String, Stri
         }
         index += 1;
     }
-}
-
-/// A top-level `import { export } from "..." for syntax shadows core;`.
-fn imports_shadowing(file: &[Syntax], export: &str) -> bool {
-    (0..file.len()).any(|index| {
-        if !syntax_import_here(file, index) {
-            return false;
-        }
-        let statement: Vec<&Syntax> = file
-            .iter()
-            .skip(index)
-            .take_while(|node| !operator_is(Some(node), ";"))
-            .collect();
-        let shadows = statement
-            .windows(2)
-            .any(|pair| token_is(Some(pair[0]), "shadows") && token_is(Some(pair[1]), "core"));
-        let mut names = Vec::new();
-        if let Some(children) = group_children(file.get(index + 1), Delimiter::Brace) {
-            collect_import_binding_names(children, &mut names);
-        }
-        shadows && names.iter().any(|(_, exported)| exported == export)
-    })
 }
 
 fn syntax_import_here(nodes: &[Syntax], index: usize) -> bool {
@@ -996,12 +961,6 @@ pub struct FixtureRewrite {
     pub binds: Vec<(String, String)>,
 }
 
-/// `effect { body... }` => `createEffect(() => { body... })`.
-pub fn expand_effect(body: &str) -> String {
-    // The `effect` rule's template ends with `;` after the call.
-    format!("createEffect(() => {{ {body} }});")
-}
-
 /// `#join($name, prefix, suffix, casing)` once `$name` is known.
 pub fn join_ident(name: &str, prefix: &str, suffix: &str, casing: &str) -> String {
     let cased = match casing {
@@ -1183,77 +1142,6 @@ fn match_signal_read(
     })
 }
 
-/// `function(value: number) { const doubled = value * 2; doubled + 1 }`
-/// keeps the statements and returns the final expression. A statement that
-/// is already `return` is left as the result, not `return return`.
-fn match_implicit_function(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    let params = group_interior(source, nodes.get(index + 1)?, Delimiter::Paren)?.trim();
-    let body = group_interior(source, nodes.get(index + 2)?, Delimiter::Brace)?;
-    let (statements, result) = split_function_body(body)?;
-    let mut inner = String::new();
-    for statement in &statements {
-        inner.push_str(statement);
-        if !statement.trim_end().ends_with(';') {
-            inner.push(';');
-        }
-        inner.push(' ');
-    }
-    let result = result.trim().trim_end_matches(';').trim();
-    if result.starts_with("return") {
-        inner.push_str(result);
-        if !result.ends_with(';') {
-            inner.push(';');
-        }
-    } else if !result.is_empty() {
-        inner.push_str("return ");
-        inner.push_str(result);
-        inner.push(';');
-    }
-    let mut end = node_end(nodes.get(index + 2)?);
-    let mut next = index + 3;
-    if operator_is(nodes.get(index + 3), ";") {
-        end = node_end(&nodes[index + 3]);
-        next = index + 4;
-    }
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end,
-        next,
-        text: format!("function({params}) {{ {inner} }};"),
-        binds: Vec::new(),
-    })
-}
-
-fn split_function_body(body: &str) -> Option<(Vec<String>, String)> {
-    let mut statements = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0i32;
-    for ch in body.chars() {
-        match ch {
-            '(' | '{' | '[' => depth += 1,
-            ')' | '}' | ']' => depth -= 1,
-            ';' if depth == 0 => {
-                let statement = current.trim().to_owned();
-                if !statement.is_empty() {
-                    statements.push(statement);
-                }
-                current.clear();
-                continue;
-            }
-            _ => {}
-        }
-        current.push(ch);
-    }
-    let tail = current.trim().to_owned();
-    if tail.is_empty() {
-        // `{ const doubled = value * 2; }` has no final expression and no
-        // `return`. Treating the last statement as the result reprints
-        // `return const doubled`.
-        return None;
-    }
-    Some((statements, tail))
-}
-
 fn file_binds(source: &str, name: &str) -> bool {
     let read = sweetener_reader::read_syntax(source);
     region_binds_value(&read.children, name)
@@ -1285,30 +1173,6 @@ fn region_binds_value(nodes: &[Syntax], name: &str) -> bool {
         index += 1;
     }
     false
-}
-
-fn match_effect_item(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    if token_is(nodes.get(index), "function") {
-        return match_implicit_function(source, nodes, index);
-    }
-    if !token_is(nodes.get(index), "effect") {
-        return None;
-    }
-    let body_node = nodes.get(index + 1)?;
-    let body = group_interior(source, body_node, Delimiter::Brace)?.trim();
-    let mut end = node_end(body_node);
-    let mut next = index + 2;
-    if operator_is(nodes.get(index + 2), ";") {
-        end = node_end(&nodes[index + 2]);
-        next = index + 3;
-    }
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end,
-        next,
-        text: expand_effect(body),
-        binds: Vec::new(),
-    })
 }
 
 fn match_signal_use(
@@ -1436,37 +1300,6 @@ fn read_assign(nodes: &[Syntax], index: usize) -> Option<(String, usize)> {
         break;
     }
     None
-}
-
-fn substitute_signal_reads(text: &str, signals: &[(String, String)]) -> String {
-    let bytes = text.as_bytes();
-    let mut out = String::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let ch = bytes[index] as char;
-        if ch == '_' || ch.is_ascii_alphabetic() {
-            let start = index;
-            index += 1;
-            while index < bytes.len() {
-                let next = bytes[index] as char;
-                if next == '_' || next.is_ascii_alphanumeric() {
-                    index += 1;
-                } else {
-                    break;
-                }
-            }
-            let word = &text[start..index];
-            if let Some((_, signal)) = signals.iter().find(|(name, _)| name == word) {
-                out.push_str(&format!("{signal}.get()"));
-            } else {
-                out.push_str(word);
-            }
-            continue;
-        }
-        out.push(ch);
-        index += 1;
-    }
-    out
 }
 
 fn is_signal_assign(op: &str) -> bool {
