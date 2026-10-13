@@ -28,11 +28,10 @@ pub fn try_expand_fixture(
     nodes: &[Syntax],
     index: usize,
     signals: &[(String, String)],
-    methods: &[MethodBinding],
 ) -> Option<FixtureRewrite> {
     // One form expansion is one hygiene scope.
     super::sweetener_hygiene::in_scope(|| {
-        try_expand_fixture_scoped(source, file, nodes, index, signals, methods)
+        try_expand_fixture_scoped(source, file, nodes, index, signals)
     })
 }
 
@@ -42,7 +41,6 @@ fn try_expand_fixture_scoped(
     nodes: &[Syntax],
     index: usize,
     signals: &[(String, String)],
-    methods: &[MethodBinding],
 ) -> Option<FixtureRewrite> {
     // Handwritten forms are library macros. They run only where this file
     // imported the spelling. Core TypeScript forms are not in that set.
@@ -54,83 +52,6 @@ fn try_expand_fixture_scoped(
     // key on the export name, so dispatch on a copy whose head is that name.
     let aliased = aliased_nodes(file, nodes, index);
     let nodes = aliased.as_deref().unwrap_or(nodes);
-    if let Some(item) = match_method_item(source, &nodes[index..]) {
-        let end = if item.requests.is_empty() {
-            method_item_end(nodes, index)
-        } else {
-            // `method query { ... }` is the brace immediately after the name.
-            // Nested request braces are not the item boundary.
-            nodes
-                .get(index + 2)
-                .filter(|node| group_children(Some(node), Delimiter::Brace).is_some())
-                .map(node_end)
-                .unwrap_or_else(|| method_item_end(nodes, index))
-        };
-
-        let head_params = param_pairs(source, item.head_params);
-        let mut segments = Vec::new();
-        for (_name, params) in &item.segments {
-            segments.push(param_pairs(source, params));
-        }
-        let method = MethodBinding {
-            head: item.head.clone(),
-            head_params,
-            segments,
-            result: item.result.to_owned(),
-            body: item.body.to_owned(),
-            requests: item.requests,
-        };
-        // The second `method` rule emits `#syntax`, which is not printed.
-        // The binding is what a later call expands. The grammar form is
-        // different: its requests become ordinary `syntax` rules.
-        // `#syntax` is not printed. The grammar is kept on the binding so
-        // a later `query(...)` call can fill the request template itself.
-        let text = String::new();
-        return Some(FixtureRewrite {
-            start: node_start(&nodes[index]),
-            end,
-            next: end_index(nodes, index, end),
-            text: strip_line_comments(&text),
-            binds: Vec::new(),
-            method: Some(method),
-        });
-    }
-    if let Some(call) = match_method_call(source, nodes, index, methods) {
-        return Some(call);
-    }
-    if let Some(query) = match_query_call(source, nodes, index, methods) {
-        return Some(query);
-    }
-    if let Some(step) = match_channel_stmt(source, nodes, index) {
-        let mut end = node_end(
-            nodes
-                .get(step.next.saturating_sub(1))
-                .unwrap_or(&nodes[index]),
-        );
-        let text = if step.op == "->" {
-            expand_channel_send(&step.left, &step.right)
-        } else {
-            let printed = super::sweetener_hygiene::take_remembered(&step.left)
-                .unwrap_or_else(|| fresh_param(&step.left));
-            expand_channel_receive(&printed, &step.right)
-        };
-        // The source `;` is the statement terminator. The form text has
-        // none, so dropping the source one joins the next statement.
-        // Include it in the span and print it with the replacement.
-        let mut text = text;
-        if operator_is(nodes.get(step.next.saturating_sub(1)), ";") {
-            end = node_end(&nodes[step.next - 1]);
-            text.push(';');
-        }
-        return Some(FixtureRewrite {
-            start: node_start(&nodes[index]),
-            end,
-            next: step.next,
-            text,
-            binds: Vec::new(),
-            method: None,
-        });
-    }
     if let Some(item) = match_do_steps(source, nodes, index) {
         let steps: Vec<DoStep<'_>> = item
             .steps
@@ -150,33 +71,6 @@ fn try_expand_fixture_scoped(
             // that spelling; it does not print `left_1`.
             text: expand_do_steps_hygiene(item.monad, &steps, &item.result),
             binds: Vec::new(),
-            method: None,
-        });
-    }
-    if let Some(item) = match_thread(source, nodes, index) {
-        let text = expand_thread_nodes(source, item.value, item.body, !item.last);
-        if text.is_empty() {
-            return Some(FixtureRewrite {
-                start: node_start(&nodes[index]),
-                end: node_end(&nodes[index]),
-                next: item.next,
-                text: String::new(),
-                binds: Vec::new(),
-                method: None,
-            });
-        }
-        let end = node_end(
-            nodes
-                .get(item.next.saturating_sub(1))
-                .unwrap_or(&nodes[index]),
-        );
-        return Some(FixtureRewrite {
-            start: node_start(&nodes[index]),
-            end,
-            next: item.next,
-            text,
-            binds: Vec::new(),
-            method: None,
         });
     }
     if let Some(control) = match_jsx_block(source, nodes, index) {
@@ -187,11 +81,6 @@ fn try_expand_fixture_scoped(
     }
     if let Some(read) = match_signal_read(nodes, index, signals) {
         return Some(read);
-    }
-    // `dbg` is the imported macro. A hardcoded `console.error` does not
-    // match a template that prints with `console.log`.
-    if let Some(asserted) = match_assert_stmt(source, nodes, index) {
-        return Some(asserted);
     }
     if token_is(nodes.get(index), "effect") {
         // The imported `effect` rule owns this form. A copy of the body
@@ -205,28 +94,11 @@ fn try_expand_fixture_scoped(
         effect.text = substitute_signal_reads(&effect.text, signals);
         return Some(effect);
     }
-    if let Some(vector) = match_hash_vector(source, nodes, index) {
-        return Some(vector);
-    }
-    // `#[1, , 3]` is one group. A missing element is a failed `#`, not a
-    // vector and not the original brackets.
-    if let Some(failed) = failed_hash_group(nodes, index) {
-        return Some(failed);
-    }
-    if let Some(failed) = failed_thread_group(nodes, index) {
-        return Some(failed);
-    }
     if let Some(data) = match_data_item(source, nodes, index) {
         return Some(data);
     }
     if let Some(matched) = match_sweetener_match(source, nodes, index) {
         return Some(matched);
-    }
-    if let Some(protocol) = match_protocol_item(source, nodes, index) {
-        return Some(protocol);
-    }
-    if let Some(implemented) = match_implements_item(source, nodes, index) {
-        return Some(implemented);
     }
     // Library and sample app macros that the expander still prints as source.
     if let Some(app) = super::sweetener_apps::expand_apps(source, nodes, index) {
@@ -256,23 +128,11 @@ fn try_expand_fixture_scoped(
 /// imports it.
 const HANDWRITTEN_FORMS: &[(&str, &str)] = &[
     ("match", "match"),
-    ("#", "#"),
     ("data", "data"),
-    ("protocol", "protocol"),
-    ("implements", "implements"),
     ("doSteps", "doSteps"),
-    ("->", "->"),
-    ("->>", "->>"),
-    ("<-", "<-"),
     ("when", "when"),
     ("each", "each"),
-    ("assert", "assert"),
     ("effect", "effect"),
-    ("method", "method"),
-    ("error", "error"),
-    ("service", "service"),
-    ("handle", "handle"),
-    ("gen", "gen"),
 ];
 
 /// True when the node at `index` is a core form, or a handwritten library
@@ -282,7 +142,7 @@ const HANDWRITTEN_FORMS: &[(&str, &str)] = &[
 /// local binding and authorized by the export it names, so a renamed import
 /// (`match as mymatch`) authorizes `mymatch` and not `match`.
 /// A local `export syntax` is not an import and does not authorize the form.
-/// Callers that already proved a use (`form_signals`, `form_methods`) pass
+/// Callers that already proved a use (`form_signals`) pass
 /// that proof in `active`.
 pub fn handwritten_form_in_scope(
     file: &[Syntax],
@@ -513,149 +373,6 @@ fn collect_import_binding_names(children: &[Syntax], names: &mut Vec<(String, St
     }
 }
 
-/// Prefix `(#)`: `#[a, b]` is `vector(a, b)`. The spelling is an operator,
-/// so the identifier-head expander never sees it.
-/// `#[1, , 3]` — the `#` rule wanted an expression after the comma.
-fn failed_hash_group(nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    let node = nodes.get(index)?;
-    let (children, hash_at) = if operator_is(Some(node), "#") {
-        let children = group_children(nodes.get(index + 1), Delimiter::Bracket)?;
-        (children, 0)
-    } else {
-        let children = group_children(Some(node), Delimiter::Bracket)?;
-        if !children
-            .first()
-            .is_some_and(|child| operator_is(Some(child), "#"))
-        {
-            return None;
-        }
-        (children, 1)
-    };
-    let _ = hash_at;
-    let mut cursor = 1;
-    let mut broken = false;
-    while cursor < children.len() {
-        cursor = skip_trivia(children, cursor);
-        if cursor >= children.len() {
-            break;
-        }
-        if operator_is(children.get(cursor), ",") {
-            let next = skip_trivia(children, cursor + 1);
-            if next >= children.len() || operator_is(children.get(next), ",") {
-                broken = true;
-                break;
-            }
-        }
-        cursor += 1;
-    }
-    if !broken {
-        return None;
-    }
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end: node_end(&nodes[index]),
-        next: index + 1,
-        text: String::new(),
-        binds: Vec::new(),
-        method: None,
-    })
-}
-
-/// `(-> value, call(), , filter())` — a comma with no call step.
-fn failed_thread_group(nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    let node = nodes.get(index)?;
-    let (children, width) = if operator_is(Some(node), "->") || operator_is(Some(node), "->>") {
-        (group_children(nodes.get(index + 1), Delimiter::Paren)?, 0)
-    } else {
-        let children = group_children(Some(node), Delimiter::Paren)?;
-        let op = joined_op(children, 0)?;
-        if op.raw != "->" && op.raw != "->>" {
-            return None;
-        }
-        let width = op.width;
-        (children, width)
-    };
-    let mut cursor = width;
-    let mut broken = false;
-    while cursor < children.len() {
-        cursor = skip_trivia(children, cursor);
-        if cursor >= children.len() {
-            break;
-        }
-        if operator_is(children.get(cursor), ",") {
-            let next = skip_trivia(children, cursor + 1);
-            if next >= children.len() || operator_is(children.get(next), ",") {
-                broken = true;
-                break;
-            }
-        }
-        cursor += 1;
-    }
-    if !broken {
-        return None;
-    }
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end: node_end(&nodes[index]),
-        next: index + 1,
-        text: String::new(),
-        method: None,
-        binds: Vec::new(),
-    })
-}
-
-pub fn expand_hash_vector(elements: &[String]) -> String {
-    format!("vector({})", elements.join(", "))
-}
-
-fn match_hash_vector(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    if !operator_is(nodes.get(index), "#") {
-        return None;
-    }
-    let group = nodes.get(index + 1)?;
-    let children = group_children(Some(group), Delimiter::Bracket)?;
-    let mut elements = Vec::new();
-    let mut cursor = 0;
-    while cursor < children.len() {
-        while matches!(children.get(cursor), Some(Syntax::Comment { .. })) {
-            cursor += 1;
-        }
-        if cursor >= children.len() {
-            break;
-        }
-        if operator_is(children.get(cursor), ",") {
-            // `#[1, , 3]` has no expression after the comma. The rule is
-            // `$($element:expr),*`, so this is a failed expansion, not a
-            // vector with a hole filled in.
-            let next = skip_trivia(children, cursor + 1);
-            if next >= children.len() || operator_is(children.get(next), ",") {
-                return None;
-            }
-            cursor += 1;
-            continue;
-        }
-        let start = node_start(&children[cursor]);
-        let mut end_at = cursor;
-        while end_at + 1 < children.len() && !operator_is(children.get(end_at + 1), ",") {
-            end_at += 1;
-        }
-        let end = node_end(&children[end_at]);
-        let element = source.get(start..end)?.trim();
-        if !element.is_empty() {
-            elements.push(element.to_owned());
-        }
-        cursor = end_at + 1;
-    }
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end: node_end(group),
-        next: index + 2,
-        text: expand_hash_vector(&elements),
-        binds: Vec::new(),
-        method: None,
-    })
-}
-
 /// `data Name<T> = A(field: T) | B();` — the union and one constructor each.
 fn match_data_item(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
     if !token_is(nodes.get(index), "data") {
@@ -706,7 +423,6 @@ fn match_data_item(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
         next: cursor + 1,
         text: expand_data_decl_hygiene(&name, &type_param, &variants),
         binds: Vec::new(),
-        method: None,
     })
 }
 
@@ -841,7 +557,6 @@ fn match_sweetener_match(source: &str, nodes: &[Syntax], index: usize) -> Option
         next,
         text,
         binds: Vec::new(),
-        method: None,
     })
 }
 
@@ -1301,20 +1016,6 @@ pub struct FixtureRewrite {
     pub text: String,
     /// `(user name, signal name)` introduced by `state`.
     pub binds: Vec<(String, String)>,
-    pub method: Option<MethodBinding>,
-}
-
-/// A multi-part method definition, kept so a later call can build the function.
-#[derive(Clone, Debug)]
-pub struct MethodBinding {
-    pub head: String,
-    pub head_params: Vec<(String, String)>,
-    pub segments: Vec<Vec<(String, String)>>,
-    pub result: String,
-    pub body: String,
-    /// Grammar requests, when this is `method query { request ... }` rather
-    /// than a curried segment method.
-    pub requests: Vec<(String, String)>,
 }
 
 /// `effect { body... }` => `createEffect(() => { body... })`.
@@ -1355,95 +1056,6 @@ pub fn apply_signal_use(name: &str, signal: &str, op: Option<&str>, value: Optio
     }
 }
 
-/// `multi-part-methods`: the second `method` rule, not the `#syntax` wrapper.
-///
-/// ```text
-/// method $head($($headParameter: $headType),*)
-///   $($segment($($parameter: $parameterType),*))+ : $result { $($body)* }
-/// ```
-///
-/// becomes one call of the curried function the rule builds. The reference
-/// drops the block's `return`, so the arrow body is the returned expression
-/// when the block is only that return. A parameter the user file already
-/// binds is printed `name_1` in the generated function only.
-#[cfg(test)]
-pub fn expand_method_call(
-    head_params: &[(&str, &str)],
-    head_args: &[&str],
-    segments: &[MethodSegment<'_>],
-    result: &str,
-    body: &str,
-) -> String {
-    expand_method_call_hygiene(head_params, head_args, segments, result, body, false)
-}
-
-fn expand_method_call_hygiene(
-    head_params: &[(&str, &str)],
-    head_args: &[&str],
-    segments: &[MethodSegment<'_>],
-    result: &str,
-    body: &str,
-    // Whether the parameters are the definition's own binders.
-    hygienic: bool,
-) -> String {
-    let mut params = String::new();
-    let mut args = String::new();
-    let mut names = Vec::new();
-    for (index, (name, ty)) in head_params.iter().enumerate() {
-        if index > 0 {
-            params.push_str(", ");
-            args.push_str(", ");
-        }
-        let printed = if hygienic {
-            fresh_param(name)
-        } else {
-            user_binder(name)
-        };
-        names.push((*name, printed.clone()));
-        params.push_str(&printed);
-        params.push_str(": ");
-        params.push_str(ty);
-        if let Some(arg) = head_args.get(index) {
-            args.push_str(arg);
-        }
-    }
-    for segment in segments {
-        for (name, ty) in segment.params {
-            if !params.is_empty() {
-                params.push_str(", ");
-            }
-            let printed = if hygienic {
-                fresh_param(name)
-            } else {
-                user_binder(name)
-            };
-            names.push((*name, printed.clone()));
-            params.push_str(&printed);
-            params.push_str(": ");
-            params.push_str(ty);
-        }
-        for arg in segment.args {
-            if !args.is_empty() {
-                args.push_str(", ");
-            }
-            args.push_str(arg);
-        }
-    }
-    let body = rename_params(&arrow_body(body), &names);
-    // Theirs keeps a trailing comma unless hygiene renamed a parameter;
-    // the names are only known on the output, so the comma is a marker.
-    let params = if params.is_empty() || params.trim_end().ends_with(',') {
-        params
-    } else {
-        let printed: Vec<&str> = names.iter().map(|(_, printed)| printed.as_str()).collect();
-        format!(
-            "{params}{}",
-            super::sweetener_hygiene::comma_unless_renamed(&printed)
-        )
-    };
-    format!("(({params}): {result} => {body})({args})")
-}
-
 /// A channel binder the form introduces. Its printed name is chosen on the
 /// output (`sweetener_hygiene::assign`). The receive form that prints the
 /// declaration takes the same placeholder.
@@ -1451,12 +1063,6 @@ pub fn fresh_binder(name: &str) -> String {
     let printed = super::sweetener_hygiene::placeholder(name);
     super::sweetener_hygiene::remember(name, &printed);
     printed
-}
-
-/// A binder the form's own template introduces: one class per spelling per
-/// form expansion, named on the output like every other introduced binder.
-fn fresh_param(name: &str) -> String {
-    super::sweetener_hygiene::scoped(name)
 }
 
 /// A binder the user spelled. It is the user's name and is never renamed.
@@ -1502,27 +1108,6 @@ fn rename_param_nodes(
             _ => dotted = false,
         }
     }
-}
-
-/// One `lower(minimum: number)` segment and the arguments at the call.
-#[derive(Clone, Copy, Debug)]
-pub struct MethodSegment<'a> {
-    pub params: &'a [(&'a str, &'a str)],
-    pub args: &'a [&'a str],
-}
-
-/// `csp`: `export operator (->)` / `(<-)` in a generator.
-///
-/// `rule { $value:expr -> $channel:expr; }` => `yield put($channel, $value)`.
-/// `rule { $name:binding <- $channel:expr; }` binds `$name` and emits
-/// `const $name = yield take($channel)`.
-pub fn expand_channel_send(value: &str, channel: &str) -> String {
-    // The statement's own `;` stays in the source. Do not emit a second one.
-    format!("yield put({channel}, {value})")
-}
-
-pub fn expand_channel_receive(name: &str, channel: &str) -> String {
-    format!("const {name} = yield take({channel})")
 }
 
 /// `do-notation`: `export rec syntax doSteps` plus `syntax class Bind`.
@@ -1612,115 +1197,6 @@ pub fn expand_jsx_each(items: &str, item: &str, index: Option<&str>, body: &str)
     format!("{{({items}).map(({params}) => {body})}}")
 }
 
-/// Read `method head(params) segment(params): result { body }` without the
-/// `#syntax` wrapper the first `method` rule would emit.
-pub fn match_method_item<'a>(source: &'a str, nodes: &'a [Syntax]) -> Option<MethodItem<'a>> {
-    let mut index = 0;
-    if !token_is(nodes.get(index), "method") {
-        return None;
-    }
-    index += 1;
-    let head = token_raw(nodes.get(index))?;
-    index += 1;
-    // `method query { request { ... } expect ...; => { ... } }` is the
-    // grammar rule. It has no parameter group on the head.
-    if group_children(nodes.get(index), Delimiter::Brace).is_some() {
-        let requests = method_requests(source, nodes.get(index)?);
-        if requests.is_empty() {
-            return None;
-        }
-        return Some(MethodItem {
-            head,
-            head_params: &[],
-            segments: Vec::new(),
-            result: "",
-            body: "",
-            requests,
-        });
-    }
-    let head_group = group_children(nodes.get(index), Delimiter::Paren)?;
-    index += 1;
-    let mut segments = Vec::new();
-    while index < nodes.len() && !operator_is(nodes.get(index), ":") {
-        let segment = token_raw(nodes.get(index))?;
-        let params = group_children(nodes.get(index + 1), Delimiter::Paren)?;
-        segments.push((segment, params));
-        index += 2;
-    }
-    if !operator_is(nodes.get(index), ":") || segments.is_empty() {
-        return None;
-    }
-    let result_node = nodes.get(index + 1)?;
-    let result = sweetener_reader::slice(source, result_node).trim();
-    let body_group = nodes.get(index + 2)?;
-    let body = group_interior(source, body_group, Delimiter::Brace)?;
-    Some(MethodItem {
-        head,
-        head_params: head_group,
-        segments,
-        result,
-        body: body.trim(),
-        requests: Vec::new(),
-    })
-}
-
-/// `method query { request { ... } expect "..."; => { ... } }` becomes the
-/// pattern and expansion a later `query(...)` call fills in. `expect` is
-/// the failure the matcher reports; it is not part of the expansion.
-fn method_requests(source: &str, body: &Syntax) -> Vec<(String, String)> {
-    let Some(children) = group_children(Some(body), Delimiter::Brace) else {
-        return Vec::new();
-    };
-    let mut requests = Vec::new();
-    let mut index = 0;
-    while index < children.len() {
-        if !token_is(children.get(index), "request") {
-            index += 1;
-            continue;
-        }
-        let Some(pattern) = group_interior(
-            source,
-            children.get(index + 1).unwrap_or(&children[index]),
-            Delimiter::Brace,
-        ) else {
-            index += 1;
-            continue;
-        };
-        index += 2;
-        if token_is(children.get(index), "expect") {
-            index += 2;
-            if operator_is(children.get(index), ";") {
-                index += 1;
-            }
-        }
-        if !operator_is(children.get(index), "=>") {
-            continue;
-        }
-        let Some(expansion) = group_interior(
-            source,
-            children.get(index + 1).unwrap_or(&children[index]),
-            Delimiter::Brace,
-        ) else {
-            index += 1;
-            continue;
-        };
-        requests.push((pattern.trim().to_owned(), expansion.trim().to_owned()));
-        index += 2;
-    }
-    requests
-}
-
-/// Pieces of a multi-part method item. Parameter groups are still token trees;
-/// [`expand_method_call`] wants the printed pairs.
-pub struct MethodItem<'a> {
-    pub head: String,
-    pub head_params: &'a [Syntax],
-    pub segments: Vec<(String, &'a [Syntax])>,
-    pub result: &'a str,
-    pub body: &'a str,
-    requests: Vec<(String, String)>,
-}
-
 /// `2 -> table` or `received <- table` at statement position.
 pub fn match_channel_stmt(source: &str, nodes: &[Syntax], index: usize) -> Option<ChannelStmt> {
     let left = nodes.get(index)?;
@@ -1742,350 +1218,12 @@ pub fn match_channel_stmt(source: &str, nodes: &[Syntax], index: usize) -> Optio
     Some(ChannelStmt {
         op: op.to_owned(),
         left: sweetener_reader::slice(source, left).trim().to_owned(),
-        right: sweetener_reader::slice(source, right).trim().to_owned(),
-        next: index + 3 + usize::from(operator_is(nodes.get(index + 3), ";")),
     })
 }
 
 pub struct ChannelStmt {
     pub op: String,
     pub left: String,
-    pub right: String,
-    pub next: usize,
-}
-
-/// `protocol Equal<T> { equals(left: T, right: T): boolean; }`.
-///
-/// The captured print keeps a comma after `getPrototypeOf(...)[0]!` and
-/// before `as`. A method missing `: returnType` is not this form; the
-/// compiled rule reports that failure.
-fn match_protocol_item(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    if !token_is(nodes.get(index), "protocol") {
-        return None;
-    }
-    let name = token_raw(nodes.get(index + 1))?;
-    if !operator_is(nodes.get(index + 2), "<") {
-        return None;
-    }
-    let subject = token_raw(nodes.get(index + 3))?;
-    if !operator_is(nodes.get(index + 4), ">") {
-        return None;
-    }
-    let body = group_children(nodes.get(index + 5), Delimiter::Brace)?;
-    let methods = protocol_methods(source, body)?;
-    if methods.is_empty() {
-        return None;
-    }
-    let mut text = expand_protocol(&name, &subject, &methods);
-    let mut end = node_end(&nodes[index + 5]);
-    let mut next = index + 6;
-    // `User implements ...` is an infix rule. Reprinting it drops the
-    // method object's trailing comma. When it follows this protocol, print
-    // both here and mark the text so that reprint does not run.
-    if let Some(implemented) = following_implements(source, nodes, next) {
-        text.push_str(&implemented.text);
-        end = implemented.end;
-        next = implemented.next;
-    }
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end,
-        next,
-        text,
-        binds: Vec::new(),
-        method: None,
-    })
-}
-
-fn following_implements(
-    source: &str,
-    nodes: &[Syntax],
-    mut index: usize,
-) -> Option<FixtureRewrite> {
-    let mut prefix = String::new();
-    let start = nodes.get(index).map(node_start)?;
-    while index < nodes.len() {
-        match &nodes[index] {
-            Syntax::Comment { .. } => index += 1,
-            Syntax::Token { raw, .. } if raw == "class" => {
-                let class_end = skip_class_item(nodes, index)?;
-                let class_at = node_end(nodes.get(class_end.saturating_sub(1))?);
-                prefix.push_str(source.get(node_start(&nodes[index])..class_at)?);
-                index = class_end;
-            }
-            Syntax::Token { .. } => {
-                let mut item = match_implements_item(source, nodes, index)?;
-                if !prefix.is_empty() {
-                    item.text.insert_str(0, &prefix);
-                    item.start = start;
-                }
-                return Some(item);
-            }
-            _ => return None,
-        }
-    }
-    None
-}
-
-fn skip_class_item(nodes: &[Syntax], index: usize) -> Option<usize> {
-    let mut cursor = index + 1;
-    while cursor < nodes.len() {
-        if group_children(nodes.get(cursor), Delimiter::Brace).is_some() {
-            return Some(cursor + 1);
-        }
-        if token_is(nodes.get(cursor), "class") || token_is(nodes.get(cursor), "protocol") {
-            return None;
-        }
-        cursor += 1;
-        if cursor > index + 30 {
-            return None;
-        }
-    }
-    None
-}
-
-/// `User implements Equal<User> { equals(...) { ... } }`.
-///
-/// The registered method object keeps a trailing comma. A missing method
-/// body is not this form.
-fn match_implements_item(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    let class = token_raw(nodes.get(index))?;
-    if !token_is(nodes.get(index + 1), "implements") {
-        return None;
-    }
-    let protocol = token_raw(nodes.get(index + 2))?;
-    if !operator_is(nodes.get(index + 3), "<") {
-        return None;
-    }
-    let subject_end = skip_type_args(nodes, index + 4)?;
-    if !operator_is(nodes.get(subject_end), ">") {
-        return None;
-    }
-    let body = group_children(nodes.get(subject_end + 1), Delimiter::Brace)?;
-    let methods = implementation_methods(source, body)?;
-    if methods.is_empty() {
-        return None;
-    }
-    let text = expand_implementation(&protocol, &class, &methods);
-    let end = node_end(&nodes[subject_end + 1]);
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end,
-        next: subject_end + 2,
-        text,
-        binds: Vec::new(),
-        method: None,
-    })
-}
-
-struct ProtocolMethodForm {
-    name: String,
-    params: Vec<(String, String)>,
-    result: String,
-    body: Option<String>,
-}
-
-fn protocol_methods(source: &str, body: &[Syntax]) -> Option<Vec<ProtocolMethodForm>> {
-    let mut methods = Vec::new();
-    let mut cursor = 0;
-    while cursor < body.len() {
-        cursor = skip_trivia(body, cursor);
-        if cursor >= body.len() {
-            break;
-        }
-        let method = one_method(source, body, cursor, false)?;
-        cursor = method.next;
-        methods.push(method.form);
-    }
-    Some(methods)
-}
-
-fn implementation_methods(source: &str, body: &[Syntax]) -> Option<Vec<ProtocolMethodForm>> {
-    let mut methods = Vec::new();
-    let mut cursor = 0;
-    while cursor < body.len() {
-        cursor = skip_trivia(body, cursor);
-        if cursor >= body.len() {
-            break;
-        }
-        let method = one_method(source, body, cursor, true)?;
-        cursor = method.next;
-        methods.push(method.form);
-    }
-    Some(methods)
-}
-
-struct ParsedMethod {
-    form: ProtocolMethodForm,
-    next: usize,
-}
-
-fn one_method(
-    source: &str,
-    nodes: &[Syntax],
-    index: usize,
-    needs_body: bool,
-) -> Option<ParsedMethod> {
-    let name = token_raw(nodes.get(index))?;
-    let params_at = index + 1;
-    let params_group = group_children(nodes.get(params_at), Delimiter::Paren)?;
-    let params = typed_params(source, params_group)?;
-    let mut cursor = params_at + 1;
-    if !operator_is(nodes.get(cursor), ":") {
-        return None;
-    }
-    cursor += 1;
-    let result_start = node_start(nodes.get(cursor)?);
-    let mut result_end = result_start;
-    while cursor < nodes.len() {
-        if group_children(nodes.get(cursor), Delimiter::Brace).is_some()
-            || operator_is(nodes.get(cursor), ";")
-        {
-            break;
-        }
-        result_end = node_end(&nodes[cursor]);
-        cursor += 1;
-    }
-    let result = source.get(result_start..result_end)?.trim();
-    if result.is_empty() {
-        return None;
-    }
-    let body = if group_children(nodes.get(cursor), Delimiter::Brace).is_some() {
-        let text = group_interior(source, &nodes[cursor], Delimiter::Brace)?
-            .trim()
-            .to_owned();
-        cursor += 1;
-        Some(text)
-    } else if needs_body {
-        return None;
-    } else {
-        None
-    };
-    if operator_is(nodes.get(cursor), ";") {
-        cursor += 1;
-    }
-    Some(ParsedMethod {
-        form: ProtocolMethodForm {
-            name,
-            params,
-            result: result.to_owned(),
-            body,
-        },
-        next: cursor,
-    })
-}
-
-fn typed_params(source: &str, nodes: &[Syntax]) -> Option<Vec<(String, String)>> {
-    let mut params = Vec::new();
-    let mut cursor = 0;
-    while cursor < nodes.len() {
-        cursor = skip_trivia(nodes, cursor);
-        if cursor >= nodes.len() {
-            break;
-        }
-        if operator_is(nodes.get(cursor), ",") {
-            return None;
-        }
-        let name = token_raw(nodes.get(cursor))?;
-        if !operator_is(nodes.get(cursor + 1), ":") {
-            return None;
-        }
-        let type_start = node_start(nodes.get(cursor + 2)?);
-        let mut type_end = type_start;
-        cursor += 2;
-        while cursor < nodes.len() && !operator_is(nodes.get(cursor), ",") {
-            type_end = node_end(&nodes[cursor]);
-            cursor += 1;
-        }
-        let ty = source.get(type_start..type_end)?.trim();
-        if ty.is_empty() {
-            return None;
-        }
-        params.push((name, ty.to_owned()));
-        if operator_is(nodes.get(cursor), ",") {
-            cursor += 1;
-        }
-    }
-    Some(params)
-}
-
-fn skip_type_args(nodes: &[Syntax], mut cursor: usize) -> Option<usize> {
-    let mut depth = 1i32;
-    while cursor < nodes.len() && depth > 0 {
-        if operator_is(nodes.get(cursor), "<") {
-            depth += 1;
-        } else if operator_is(nodes.get(cursor), ">") {
-            depth -= 1;
-            if depth == 0 {
-                return Some(cursor);
-            }
-        }
-        cursor += 1;
-    }
-    None
-}
-
-fn expand_protocol(name: &str, subject: &str, methods: &[ProtocolMethodForm]) -> String {
-    let mut iface = format!("interface {name}<{subject}> {{");
-    for method in methods {
-        iface.push_str(&format!(
-            "{method_name}({params}): {result};",
-            method_name = method.name,
-            params = join_typed(&method.params),
-            result = method.result,
-        ));
-    }
-    iface.push('}');
-    let impl_name = fresh_param("implementations");
-    // `implementation` in `register` is a parameter. An outer const of that
-    // spelling suffixes the parameter and the later local.
-    let impl_param = fresh_param("implementation");
-    let mut value = format!(
-        "const {name} = (() => {{ const {impl_name} = new globalThis.WeakMap<object, {name}<unknown>>(); return {{ register<ImplementationSubject>(prototype: object, {impl_param}: {name}<ImplementationSubject>,): void {{ {impl_name}.set(prototype, {impl_param} as {name}<unknown>); }},"
-    );
-    for method in methods {
-        let impl_local = fresh_param("implementation");
-        let params = join_typed(&method.params);
-        let names = method
-            .params
-            .iter()
-            .map(|(param, _)| param.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        value.push_str(&format!(
-            "{method_name}<{subject} extends object>({params}): {result} {{ const {impl_local} = {impl_name}.get(globalThis.Object.getPrototypeOf([{names}][0]!),) as {name}<{subject}> | undefined; if ({impl_local} === undefined) {{ throw new globalThis.Error(\"Missing \" + \"{name}\" + \" implementation\"); }} return {impl_local}.{method_name}({names}); }},",
-            method_name = method.name,
-            result = method.result,
-        ));
-    }
-    value.push_str("}; })();");
-    format!("{iface}{value}")
-}
-
-fn expand_implementation(protocol: &str, class: &str, methods: &[ProtocolMethodForm]) -> String {
-    let mut fields = String::new();
-    for (index, method) in methods.iter().enumerate() {
-        if index > 0 {
-            fields.push_str(", ");
-        }
-        let body = method.body.as_deref().unwrap_or("");
-        let method_name = &method.name;
-        let params = join_typed(&method.params);
-        let result = &method.result;
-        fields.push_str(&format!("{method_name}({params}): {result} {{ {body} }},"));
-    }
-    // The comma after the last method is the captured object. Putting
-    // `implements` in the protocol item lets this register be written
-    // here, where the infix rule cannot drop it.
-    format!("{protocol}.register({class}.prototype, {{ {fields} }});")
-}
-
-fn join_typed(params: &[(String, String)]) -> String {
-    params
-        .iter()
-        .map(|(name, ty)| format!("{name}: {ty}"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Split a `doSteps(monad) { steps; return result }` expression.
@@ -2119,376 +1257,6 @@ pub struct DoStepsItem<'a> {
     pub next: usize,
 }
 
-/// Split `(-> value, call(...), ...)` or `(->> value, call(...), ...)`.
-pub fn match_thread<'a>(
-    source: &'a str,
-    nodes: &'a [Syntax],
-    index: usize,
-) -> Option<ThreadItem<'a>> {
-    // `(-> value, call(...), ...)` is one paren group. The operator is its
-    // first child, and `->>` is the two tokens `->` and `>`.
-    let children = group_children(nodes.get(index), Delimiter::Paren)?;
-    let op = joined_op(children, 0)?;
-    if op.raw != "->" && op.raw != "->>" {
-        return None;
-    }
-    let value = children.get(op.width)?;
-    Some(ThreadItem {
-        last: op.raw == "->>",
-        value: sweetener_reader::slice(source, value).trim(),
-        body: &children[op.width..],
-        next: index + 1,
-    })
-}
-
-struct JoinedOp {
-    raw: String,
-    width: usize,
-}
-
-fn joined_op(nodes: &[Syntax], index: usize) -> Option<JoinedOp> {
-    let mut raw = String::new();
-    let mut cursor = index;
-    while let Some(part) = nodes.get(cursor).and_then(operator_raw) {
-        if part.chars().all(|ch| "<>-".contains(ch)) && raw.len() < 3 {
-            raw.push_str(part);
-            cursor += 1;
-            if raw == "<-"
-                || raw == "->>"
-                || (raw == "->" && nodes.get(cursor).and_then(operator_raw) != Some(">"))
-            {
-                return Some(JoinedOp {
-                    raw,
-                    width: cursor - index,
-                });
-            }
-            continue;
-        }
-        break;
-    }
-    None
-}
-
-pub struct ThreadItem<'a> {
-    pub last: bool,
-    pub value: &'a str,
-    pub body: &'a [Syntax],
-    pub next: usize,
-}
-
-/// `query(students) Where(adult) OrderBy(name) Select(name)` against the
-/// request grammar stored on the method. The first request whose keywords
-/// appear, in order, wins. Missing optional groups are empty.
-fn match_query_call(
-    source: &str,
-    nodes: &[Syntax],
-    index: usize,
-    methods: &[MethodBinding],
-) -> Option<FixtureRewrite> {
-    let name = token_raw(nodes.get(index))?;
-    let method = methods
-        .iter()
-        .find(|method| method.head == name && !method.requests.is_empty())?;
-    let mut best: Option<(String, usize)> = None;
-    for (pattern, expansion) in &method.requests {
-        if let Some((text, next)) = apply_query(source, nodes, index, pattern, expansion) {
-            let replace = best.as_ref().is_none_or(|(_, end)| next > *end);
-            if replace {
-                best = Some((text, next));
-            }
-        }
-    }
-    let (text, next) = best?;
-    let end = node_end(nodes.get(next.saturating_sub(1)).unwrap_or(&nodes[index]));
-    let _ = (source, end);
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end,
-        next,
-        text,
-        binds: Vec::new(),
-        method: None,
-    })
-}
-
-fn apply_query(
-    source: &str,
-    nodes: &[Syntax],
-    index: usize,
-    pattern: &str,
-    expansion: &str,
-) -> Option<(String, usize)> {
-    let read = sweetener_reader::read_syntax(pattern);
-    let mut captures: Vec<(String, Vec<String>)> = Vec::new();
-    let next = match_query_pats(source, nodes, index, &read.children, &mut captures)?;
-    let text = fill_query(expansion, &captures);
-    Some((text, next))
-}
-
-fn match_query_pats(
-    source: &str,
-    nodes: &[Syntax],
-    mut cursor: usize,
-    pattern: &[Syntax],
-    captures: &mut Vec<(String, Vec<String>)>,
-) -> Option<usize> {
-    let mut index = 0;
-    while index < pattern.len() {
-        if operator_is(pattern.get(index), "$") && token_is(pattern.get(index + 1), "(") {
-            return None;
-        }
-        // `$(Where($filter:expr))+` or `$(...)?` or `$(...)*`
-        if operator_is(pattern.get(index), "$")
-            && group_children(pattern.get(index + 1), Delimiter::Paren).is_some()
-        {
-            let inner = group_children(pattern.get(index + 1), Delimiter::Paren)?;
-            let mut quant = index + 2;
-            if operator_is(pattern.get(quant), ",") || operator_is(pattern.get(quant), ";") {
-                quant += 1;
-            }
-            let kind = operator_raw(pattern.get(quant)?).unwrap_or("");
-            if kind != "+" && kind != "*" && kind != "?" {
-                return None;
-            }
-            let mut times = 0usize;
-            loop {
-                let saved = captures.len();
-                let saved_cursor = cursor;
-                if let Some(next) = match_query_pats(source, nodes, cursor, inner, captures) {
-                    cursor = next;
-                    times += 1;
-                    if kind == "?" {
-                        break;
-                    }
-                    continue;
-                }
-                captures.truncate(saved);
-                cursor = saved_cursor;
-                break;
-            }
-            if kind == "+" && times == 0 {
-                return None;
-            }
-            index = quant + 1;
-            continue;
-        }
-        if operator_is(pattern.get(index), "$") {
-            let hole = token_raw(pattern.get(index + 1))?;
-            let (text, next) = take_query_hole(source, nodes, cursor)?;
-            push_capture(captures, &hole, text);
-            cursor = next;
-            index += 2;
-            if operator_is(pattern.get(index), ":") {
-                index += 2;
-            }
-            continue;
-        }
-        if let Some(children) = group_children(pattern.get(index), Delimiter::Paren) {
-            let group = group_children(nodes.get(cursor), Delimiter::Paren)?;
-            match_query_pats(source, group, 0, children, captures)?;
-            cursor += 1;
-            index += 1;
-            continue;
-        }
-        let expected = token_raw(pattern.get(index)).or_else(|| {
-            pattern
-                .get(index)
-                .and_then(|node| operator_raw(node).map(str::to_owned))
-        })?;
-        if expected.chars().all(|ch| ch.is_whitespace()) {
-            index += 1;
-            continue;
-        }
-        let found = token_raw(nodes.get(cursor))
-            .or_else(|| nodes.get(cursor).and_then(operator_raw).map(str::to_owned))?;
-        if found != expected {
-            return None;
-        }
-        cursor += 1;
-        index += 1;
-    }
-    Some(cursor)
-}
-
-fn take_query_hole(source: &str, nodes: &[Syntax], index: usize) -> Option<(String, usize)> {
-    let node = nodes.get(index)?;
-    if group_children(Some(node), Delimiter::Paren).is_some()
-        && index > 0
-        && token_raw(nodes.get(index - 1)).is_some()
-    {
-        // A hole is an expression, not the argument list of the next keyword.
-    }
-    if let Some(text) = source.get(node_start(node)..node_end(node)) {
-        // `adult` or `(student) => ...`. An arrow continues through the body.
-        if nodes.get(index + 1).and_then(operator_raw) == Some("=>") {
-            let mut end = index + 2;
-            // `=> student.age` is the arrow and its body, not just `student`.
-            while end < nodes.len() && end < index + 8 {
-                if operator_is(nodes.get(end), ")")
-                    || operator_is(nodes.get(end), ";")
-                    || operator_is(nodes.get(end), ",")
-                {
-                    break;
-                }
-                if token_raw(nodes.get(end)).is_some_and(|word| {
-                    word.chars()
-                        .next()
-                        .is_some_and(|ch| ch.is_ascii_uppercase())
-                        || matches!(
-                            word.as_str(),
-                            "const" | "let" | "function" | "export" | "return" | "class"
-                        )
-                }) {
-                    break;
-                }
-                end += 1;
-            }
-            let text = source.get(node_start(node)..node_end(&nodes[end - 1]))?;
-            return Some((text.trim().to_owned(), end));
-        }
-        return Some((text.trim().to_owned(), index + 1));
-    }
-    None
-}
-
-fn push_capture(captures: &mut Vec<(String, Vec<String>)>, name: &str, text: String) {
-    if let Some((_, values)) = captures.iter_mut().find(|(have, _)| have == name) {
-        values.push(text);
-    } else {
-        captures.push((name.to_owned(), vec![text]));
-    }
-}
-
-fn strip_line_comments(text: &str) -> String {
-    let mut out = String::new();
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//") {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(line);
-    }
-    out
-}
-
-fn fill_query(expansion: &str, captures: &[(String, Vec<String>)]) -> String {
-    let mut out = String::new();
-    let bytes = expansion.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'(') {
-            if let Some(end) = expansion[index + 2..].find(")") {
-                let inner = &expansion[index + 2..index + 2 + end];
-                let hole = inner.trim().trim_start_matches('$');
-                let hole = hole.split(':').next().unwrap_or(hole).trim();
-                let values = captures
-                    .iter()
-                    .find(|(name, _)| name == hole)
-                    .map(|(_, values)| values.as_slice())
-                    .unwrap_or(&[]);
-                let rest = &expansion[index + 2 + end + 1..];
-                let sep = if rest.starts_with(',') { ", " } else { "" };
-                out.push_str(&values.join(if sep.is_empty() { "" } else { sep }));
-                index = index + 2 + end + 1;
-                if rest.starts_with(',') {
-                    index += 1;
-                }
-                if bytes.get(index) == Some(&b'*') || bytes.get(index) == Some(&b'+') {
-                    index += 1;
-                }
-                continue;
-            }
-        }
-        if bytes[index] == b'$' {
-            let name: String = expansion[index + 1..]
-                .chars()
-                .take_while(|ch| *ch == '_' || ch.is_ascii_alphanumeric())
-                .collect();
-            if !name.is_empty() {
-                if let Some((_, values)) = captures.iter().find(|(have, _)| have == &name) {
-                    if let Some(value) = values.first() {
-                        out.push_str(value);
-                        index += 1 + name.len();
-                        continue;
-                    }
-                }
-            }
-        }
-        out.push(bytes[index] as char);
-        index += 1;
-    }
-    out
-}
-
-fn match_method_call(
-    source: &str,
-    nodes: &[Syntax],
-    index: usize,
-    methods: &[MethodBinding],
-) -> Option<FixtureRewrite> {
-    let name = token_raw(nodes.get(index))?;
-    let method = methods.iter().find(|method| method.head == name)?;
-    // A grammar method (`method query { request ... }`) is expanded by the
-    // `syntax` it defines, not by flattening segments it does not have.
-    if method.segments.is_empty() {
-        return None;
-    }
-    let mut groups = Vec::new();
-    let mut cursor = index + 1;
-    if group_children(nodes.get(cursor), Delimiter::Paren).is_none() {
-        return None;
-    }
-    groups.push(nodes.get(cursor)?);
-    cursor += 1;
-    while groups.len() < method.segments.len() + 1 {
-        if matches!(nodes.get(cursor), Some(Syntax::Token { .. })) {
-            cursor += 1;
-        }
-        let group = nodes.get(cursor)?;
-        if group_children(Some(group), Delimiter::Paren).is_none() {
-            // `between(3) lower(1)` stops before `upper`. That is the
-            // missing argument segment, not a shorter method.
-            return None;
-        }
-        groups.push(group);
-        cursor += 1;
-    }
-    let head_owned = split_call_args(source, groups[0]);
-    let head_args = leak_args(&head_owned);
-    let mut segment_args = Vec::new();
-    for group in groups.iter().skip(1) {
-        segment_args.push(split_call_args(source, group));
-    }
-    let segments: Vec<MethodSegment<'_>> = method
-        .segments
-        .iter()
-        .zip(segment_args.iter())
-        .map(|(params, args)| MethodSegment {
-            params: leak_pairs(params),
-            args: leak_args(args),
-        })
-        .collect();
-    let text = expand_method_call_hygiene(
-        leak_pairs(&method.head_params),
-        head_args,
-        &segments,
-        &method.result,
-        &method.body,
-        true,
-    );
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end: node_end(*groups.last()?),
-        next: cursor,
-        text,
-        binds: Vec::new(),
-        method: None,
-    })
-}
-
 fn match_signal_read(
     nodes: &[Syntax],
     index: usize,
@@ -2512,63 +1280,7 @@ fn match_signal_read(
         next: index + 1,
         text: apply_signal_use(&name, &signal.1, None, None),
         binds: Vec::new(),
-        method: None,
     })
-}
-
-fn param_pairs(source: &str, nodes: &[Syntax]) -> Vec<(String, String)> {
-    let mut pairs = Vec::new();
-    let mut index = 0;
-    while index < nodes.len() {
-        if operator_is(nodes.get(index), ",") {
-            index += 1;
-            continue;
-        }
-        let Some(name) = token_raw(nodes.get(index)) else {
-            break;
-        };
-        if !operator_is(nodes.get(index + 1), ":") {
-            break;
-        }
-        let ty = type_text(source, nodes, index + 2);
-        pairs.push((name, ty));
-        index += 2;
-        while index < nodes.len() && !operator_is(nodes.get(index), ",") {
-            index += 1;
-        }
-    }
-    pairs
-}
-
-fn type_text(source: &str, nodes: &[Syntax], index: usize) -> String {
-    let Some(start_node) = nodes.get(index) else {
-        return String::new();
-    };
-    let start = node_start(start_node);
-    let mut end = node_end(start_node);
-    let mut cursor = index + 1;
-    while cursor < nodes.len() && !operator_is(nodes.get(cursor), ",") {
-        end = node_end(&nodes[cursor]);
-        cursor += 1;
-    }
-    source.get(start..end).unwrap_or("").trim().to_owned()
-}
-
-fn leak_pairs(pairs: &[(String, String)]) -> &'static [(&'static str, &'static str)] {
-    let leaked: Vec<(&'static str, &'static str)> = pairs
-        .iter()
-        .map(|(name, ty)| (leak_str(name.clone()), leak_str(ty.clone())))
-        .collect();
-    Box::leak(leaked.into_boxed_slice())
-}
-
-fn leak_args(args: &[String]) -> &'static [&'static str] {
-    let leaked: Vec<&'static str> = args.iter().cloned().map(leak_str).collect();
-    Box::leak(leaked.into_boxed_slice())
-}
-
-fn leak_str(text: String) -> &'static str {
-    Box::leak(text.into_boxed_str())
 }
 
 /// `function(value: number) { const doubled = value * 2; doubled + 1 }`
@@ -2609,7 +1321,6 @@ fn match_implicit_function(source: &str, nodes: &[Syntax], index: usize) -> Opti
         next,
         text: format!("function({params}) {{ {inner} }};"),
         binds: Vec::new(),
-        method: None,
     })
 }
 
@@ -2641,137 +1352,6 @@ fn split_function_body(body: &str) -> Option<(Vec<String>, String)> {
         return None;
     }
     Some((statements, tail))
-}
-
-/// `assert(left >= right)` and `assert(left === right)` name both sides.
-/// A condition with no comparison operator is the catch-all rule.
-fn match_assert_stmt(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    if !token_is(nodes.get(index), "assert") {
-        return None;
-    }
-    let args_node = nodes.get(index + 1)?;
-    let args = group_interior(source, args_node, Delimiter::Paren)?.trim();
-    if args.is_empty() {
-        return None;
-    }
-    let mut end = node_end(args_node);
-    let mut next = index + 2;
-    if operator_is(nodes.get(index + 2), ";") {
-        end = node_end(&nodes[index + 2]);
-        next = index + 3;
-    }
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end,
-        next,
-        text: expand_assert(source, nodes, index, args),
-        binds: Vec::new(),
-        method: None,
-    })
-}
-
-fn expand_assert(source: &str, nodes: &[Syntax], index: usize, condition: &str) -> String {
-    let read = sweetener_reader::read_syntax(condition);
-    if let Some((left, op, right)) = split_assert_compare(condition, &read.children) {
-        let left = left.trim();
-        let right = right.trim();
-        let line = "\\n  ";
-        if op == "===" {
-            let actual = assert_binder(source, nodes, index, "actual", "===");
-            let expected = assert_binder(source, nodes, index, "expected", "===");
-            return format!(
-                "{{ const {actual} = {left}; const {expected} = {right}; if (!globalThis.Object.is({actual}, {expected})) {{ throw new globalThis.Error(`assertion failed: ${{{quoted}}} === ${{{right_q}}}` + `{line}${{{quoted}}} = ${{globalThis.JSON.stringify({actual})}}` + `{line}${{{right_q}}} = ${{globalThis.JSON.stringify({expected})}}`,); }} }}",
-                quoted = string_source(left),
-                right_q = string_source(right),
-            );
-        }
-        if op == ">=" {
-            let actual = assert_binder(source, nodes, index, "actual", ">=");
-            let bound = assert_binder(source, nodes, index, "bound", ">=");
-            return format!(
-                "{{ const {actual} = {left}; const {bound} = {right}; if (!({actual} >= {bound})) {{ throw new globalThis.Error(`assertion failed: ${{{quoted}}} >= ${{{right_q}}}` + `{line}${{{quoted}}} = ${{globalThis.JSON.stringify({actual})}}` + `{line}${{{right_q}}} = ${{globalThis.JSON.stringify({bound})}}`,); }} }}",
-                quoted = string_source(left),
-                right_q = string_source(right),
-            );
-        }
-    }
-    format!(
-        "if (!({condition})) {{ throw new globalThis.Error(`assertion failed: ${{{quoted}}}`); }}",
-        quoted = string_source(condition),
-    )
-}
-
-/// Earlier comparison asserts in this file already introduced the binder.
-/// The expander's hygiene map does not see a form rewrite, so the suffix
-/// is chosen here. `actual` from `>=` collides with `actual` from `===`.
-fn assert_binder(source: &str, nodes: &[Syntax], index: usize, name: &str, op: &str) -> String {
-    let mut nth = usize::from(file_binds(source, name));
-    let mut cursor = 0;
-    while cursor < index {
-        if token_is(nodes.get(cursor), "assert") {
-            if let Some(args_node) = nodes.get(cursor + 1) {
-                if let Some(args) = group_interior(source, args_node, Delimiter::Paren) {
-                    let read = sweetener_reader::read_syntax(args);
-                    if let Some((_, found, _)) = split_assert_compare(args, &read.children) {
-                        let introduces =
-                            found == op || (name == "actual" && (found == "===" || found == ">="));
-                        if introduces {
-                            nth += 1;
-                        }
-                    }
-                }
-            }
-        }
-        cursor += 1;
-    }
-    if nth == 0 {
-        name.to_owned()
-    } else {
-        format!("{name}_{nth}")
-    }
-}
-
-fn split_assert_compare<'a>(
-    source: &'a str,
-    nodes: &[Syntax],
-) -> Option<(&'a str, String, &'a str)> {
-    // A group is one node, so a comparison inside a call is not this rule.
-    // The reader splits `>=` into `>` `=` and `===` into `==` `=`.
-    let mut index = 0;
-    while index < nodes.len() {
-        if let Some((op, width)) = compare_op_at(nodes, index) {
-            let left = slice_span(source, nodes, 0, index)?;
-            let right = slice_span(source, nodes, index + width, nodes.len())?;
-            if left.trim().is_empty() || right.trim().is_empty() {
-                return None;
-            }
-            return Some((left, op, right));
-        }
-        index += 1;
-    }
-    None
-}
-
-fn compare_op_at(nodes: &[Syntax], index: usize) -> Option<(String, usize)> {
-    let raw = operator_raw(nodes.get(index)?)?;
-    let next = nodes.get(index + 1).and_then(operator_raw);
-    if raw == ">" && next == Some("=") {
-        return Some((">=".to_owned(), 2));
-    }
-    if raw == "==" && next == Some("=") {
-        return Some(("===".to_owned(), 2));
-    }
-    if raw == "=" && next == Some("=") && nodes.get(index + 2).and_then(operator_raw) == Some("=") {
-        return Some(("===".to_owned(), 3));
-    }
-    None
-}
-
-fn slice_span<'a>(source: &'a str, nodes: &[Syntax], start: usize, end: usize) -> Option<&'a str> {
-    if start >= end || end > nodes.len() {
-        return None;
-    }
-    source.get(node_start(&nodes[start])..node_end(&nodes[end - 1]))
 }
 
 fn file_binds(source: &str, name: &str) -> bool {
@@ -2807,20 +1387,6 @@ fn region_binds_value(nodes: &[Syntax], name: &str) -> bool {
     false
 }
 
-fn string_source(text: &str) -> String {
-    let mut out = String::from("\"");
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            _ => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
-}
-
 fn match_effect_item(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
     if token_is(nodes.get(index), "function") {
         return match_implicit_function(source, nodes, index);
@@ -2842,7 +1408,6 @@ fn match_effect_item(source: &str, nodes: &[Syntax], index: usize) -> Option<Fix
         next,
         text: expand_effect(body),
         binds: Vec::new(),
-        method: None,
     })
 }
 
@@ -2874,7 +1439,6 @@ fn match_signal_use(
         next,
         text,
         binds: Vec::new(),
-        method: None,
     })
 }
 
@@ -2933,7 +1497,6 @@ fn match_jsx_block(source: &str, nodes: &[Syntax], index: usize) -> Option<Fixtu
         next: end_at + 1,
         text,
         binds: Vec::new(),
-        method: None,
     })
 }
 
@@ -2949,32 +1512,6 @@ fn split_each_args(args: &str) -> Option<(&str, &str, Option<&str>)> {
     let item = parts.next()?;
     let index = parts.next().filter(|part| !part.is_empty());
     Some((items.trim(), item, index))
-}
-
-fn split_call_args(source: &str, node: &Syntax) -> Vec<String> {
-    let Some(children) = group_children(Some(node), Delimiter::Paren) else {
-        return Vec::new();
-    };
-    let mut args = Vec::new();
-    let mut start = node_start(node) + 1;
-    for child in children {
-        if operator_is(Some(child), ",") {
-            if let Some(text) = source.get(start..node_start(child)) {
-                let text = text.trim();
-                if !text.is_empty() {
-                    args.push(text.to_owned());
-                }
-            }
-            start = node_end(child);
-        }
-    }
-    if let Some(text) = source.get(start..node_end(node).saturating_sub(1)) {
-        let text = text.trim();
-        if !text.is_empty() {
-            args.push(text.to_owned());
-        }
-    }
-    args
 }
 
 fn read_assign(nodes: &[Syntax], index: usize) -> Option<(String, usize)> {
@@ -3076,107 +1613,6 @@ fn take_value<'a>(
     Some((source.get(start..end)?, end, next))
 }
 
-fn method_item_end(nodes: &[Syntax], index: usize) -> usize {
-    // The method item ends at its own brace: `method head(...) seg(): T { }`
-    // or `method head { request ... }`. A later `{` belongs to the next item.
-    let mut cursor = index + 1;
-    while cursor < nodes.len() && cursor < index + 80 {
-        if token_is(nodes.get(cursor), "method")
-            || token_is(nodes.get(cursor), "const")
-            || token_is(nodes.get(cursor), "let")
-            || token_is(nodes.get(cursor), "function")
-            || token_is(nodes.get(cursor), "export")
-            || token_is(nodes.get(cursor), "class")
-        {
-            break;
-        }
-        if matches!(
-            nodes.get(cursor),
-            Some(Syntax::Group {
-                delimiter: Delimiter::Brace,
-                close: Some(_),
-                ..
-            })
-        ) {
-            let end = node_end(&nodes[cursor]);
-            if operator_is(nodes.get(cursor + 1), ";") {
-                return node_end(&nodes[cursor + 1]);
-            }
-            return end;
-        }
-        cursor += 1;
-    }
-    item_end(nodes, index)
-}
-
-fn item_end(nodes: &[Syntax], index: usize) -> usize {
-    let mut cursor = index;
-    while cursor < nodes.len() {
-        if operator_is(nodes.get(cursor), ";") {
-            return node_end(&nodes[cursor]);
-        }
-        cursor += 1;
-        if cursor > index + 40 {
-            break;
-        }
-    }
-    nodes.get(index).map(node_end).unwrap_or(0)
-}
-
-fn end_index(nodes: &[Syntax], index: usize, end: usize) -> usize {
-    let mut cursor = index;
-    while cursor < nodes.len() && node_start(&nodes[cursor]) < end {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn expand_thread_nodes(source: &str, value: &str, body: &[Syntax], first: bool) -> String {
-    let mut current = value.trim().to_owned();
-    // `body` starts at the value. Steps follow it.
-    let mut index = 1;
-    while index < body.len() {
-        if operator_is(body.get(index), ",") {
-            // `(-> value, map(...), , filter(...))` has no step after the
-            // comma. Skipping it would emit a repaired call.
-            let next = skip_trivia(body, index + 1);
-            if next >= body.len() || operator_is(body.get(next), ",") {
-                return String::new();
-            }
-            index += 1;
-            continue;
-        }
-        let Some(callee) = token_raw(body.get(index)) else {
-            break;
-        };
-        let Some(args_node) = body.get(index + 1) else {
-            break;
-        };
-        if group_children(Some(args_node), Delimiter::Paren).is_none() {
-            break;
-        }
-        let args = split_call_args(source, args_node);
-        let empty_step = args.is_empty();
-        let mut call_args = Vec::new();
-        if first {
-            call_args.push(current);
-            call_args.extend(args.clone());
-        } else {
-            call_args.extend(args);
-            call_args.push(current);
-        }
-        let mut joined = call_args.join(", ");
-        // `$next($value, $($argument),*)` keeps the comma when the step
-        // has no arguments of its own: `sum()` becomes `sum(value,)`.
-        if first && empty_step {
-            joined.push(',');
-        }
-        current = format!("{callee}({joined})");
-        index += 2;
-    }
-    current
-}
-
 #[cfg(test)]
 fn thread_calls(value: &str, steps: &[ThreadStep<'_>], first: bool) -> String {
     let mut current = value.trim().to_owned();
@@ -3212,20 +1648,6 @@ fn split_do_body(body: &str) -> Option<(Vec<(String, String)>, String)> {
         steps.push((name.trim().to_owned(), source.trim().to_owned()));
     }
     None
-}
-
-fn arrow_body(body: &str) -> String {
-    // The reference drops a block that is only `return expr`. Theirs prints
-    // the expression, not `{ return expr; }`. A trailing comma after the
-    // parameter list is part of that print.
-    let trimmed = body.trim();
-    if let Some(rest) = trimmed.strip_prefix("return ") {
-        let expr = rest.trim().trim_end_matches(';').trim();
-        if !expr.is_empty() && !expr.contains(';') {
-            return expr.to_owned();
-        }
-    }
-    format!("{{ {trimmed} }}")
 }
 
 fn upper_first(text: &str) -> String {
@@ -3338,38 +1760,7 @@ mod tests {
     }
 
     #[test]
-    fn method_call_is_one_function() {
-        let printed = expand_method_call(
-            &[("value", "number")],
-            &["3"],
-            &[
-                MethodSegment {
-                    params: &[("minimum", "number")],
-                    args: &["1"],
-                },
-                MethodSegment {
-                    params: &[("maximum", "number")],
-                    args: &["5"],
-                },
-            ],
-            "boolean",
-            "return value > minimum && value < maximum;",
-        );
-        let printed = crate::sweetener_hygiene::assign(&printed, &mut [], false);
-        assert_eq!(
-            printed,
-            "((value: number, minimum: number, maximum: number,): boolean => value > minimum && value < maximum)(3, 1, 5)"
-        );
-        assert!(!printed.contains("#syntax"));
-    }
-
-    #[test]
     fn channel_do_thread_and_jsx() {
-        assert_eq!(expand_channel_send("2", "table"), "yield put(table, 2)");
-        assert_eq!(
-            expand_channel_receive("received", "table"),
-            "const received = yield take(table)"
-        );
         let done = expand_do_steps(
             "box",
             &[

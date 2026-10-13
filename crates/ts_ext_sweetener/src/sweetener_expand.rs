@@ -242,7 +242,6 @@ fn expand_pass(
         // a macro definition invokes none.
         imports_emitted: only_definitions(&read.children),
         form_signals: Vec::new(),
-        form_methods: Vec::new(),
         last_form_next: 0,
         failed: false,
         file_nodes: &read.children,
@@ -779,7 +778,6 @@ struct Printer<'a> {
     imports_emitted: bool,
     /// `state` bindings and multi-part methods the form pass introduced.
     form_signals: Vec<(String, String)>,
-    form_methods: Vec<super::sweetener_forms::MethodBinding>,
     /// Resume index after the form rewrite just applied.
     last_form_next: usize,
     /// The file's top-level nodes. A form inside a function is authorized by
@@ -1713,7 +1711,6 @@ impl<'a> Printer<'a> {
             hygiene: HashMap::new(),
             imports_emitted: true,
             form_signals: self.form_signals.clone(),
-            form_methods: self.form_methods.clone(),
             last_form_next: 0,
             channel_renames: HashMap::new(),
             failed: false,
@@ -1792,9 +1789,6 @@ impl<'a> Printer<'a> {
                     return false;
                 }
                 if self.form_signals.iter().any(|(name, _)| name == raw) {
-                    return true;
-                }
-                if self.form_methods.iter().any(|method| method.head == *raw) {
                     return true;
                 }
                 // `function` and `export` are core forms. The other heads are
@@ -1945,7 +1939,6 @@ impl<'a> Printer<'a> {
             hygiene: self.hygiene.clone(),
             imports_emitted: true,
             form_signals: self.form_signals.clone(),
-            form_methods: self.form_methods.clone(),
             last_form_next: 0,
             channel_renames: self.channel_renames.clone(),
             failed: false,
@@ -1967,7 +1960,6 @@ impl<'a> Printer<'a> {
         }
         self.hygiene = nested.hygiene;
         self.form_signals = nested.form_signals;
-        self.form_methods = nested.form_methods;
         nested.out
     }
 
@@ -2196,45 +2188,24 @@ impl<'a> Printer<'a> {
             nodes,
             index,
             &self.form_signals,
-            &self.form_methods,
         ) else {
             return false;
         };
         // Empty text is a refused form: `#[1, , 3]` and
         // `(-> value, call(), , filter())`. Falling through would let a
         // later rule repair the hole.
-        if rewritten.text.is_empty() && rewritten.method.is_none() {
+        if rewritten.text.is_empty() {
             if let Some(name) = macro_name_of(self.source, nodes, index) {
-                let forced = match name.as_str() {
-                    "->" | "->>" => Some("expression or call step"),
-                    "#" => Some("expression after comma"),
-                    _ => None,
-                };
-                if let Some(detail) = forced {
-                    let start = u32_at(rewritten.start);
-                    let end = u32_at(rewritten.end.max(rewritten.start + 1));
-                    self.failed = true;
-                    self.diagnostics.push(Diagnostic {
-                        message: format!(
-                            "SWR4001: No rule for macro {name} accepted this input: {detail}."
-                        ),
-                        start,
-                        end,
-                        severity: Severity::Error,
-                        related: Vec::new(),
-                    });
+                let rules: Vec<Rule> = self
+                    .macros
+                    .iter()
+                    .filter(|macro_| macro_.name == name)
+                    .flat_map(|macro_| macro_.rules.clone())
+                    .collect();
+                if rules.is_empty() {
+                    self.fail_macro_at(&name, &rules, node_span(&nodes[index]));
                 } else {
-                    let rules: Vec<Rule> = self
-                        .macros
-                        .iter()
-                        .filter(|macro_| macro_.name == name)
-                        .flat_map(|macro_| macro_.rules.clone())
-                        .collect();
-                    if rules.is_empty() {
-                        self.fail_macro_at(&name, &rules, node_span(&nodes[index]));
-                    } else {
-                        self.fail_macro(nodes, index, &name, &rules);
-                    }
+                    self.fail_macro(nodes, index, &name, &rules);
                 }
                 self.last_form_next = self.skip_failed(nodes, index);
                 return true;
@@ -2242,13 +2213,6 @@ impl<'a> Printer<'a> {
             return false;
         }
         self.form_signals.extend(rewritten.binds.clone());
-        if let Some(method) = rewritten.method.clone() {
-            // The method rule defines `syntax head` with `expect "upper
-            // argument segment"`. Install that rule so a later short call
-            // is a failed `head`, not a repaired expansion.
-            self.install_method_rule(&method);
-            self.form_methods.push(method);
-        }
         self.copy_until(rewritten.start);
         // Curried `function` prints ordinary overloads. An expression
         // `function(...)` is the same macro. Reprinting either matches the
@@ -2424,59 +2388,6 @@ impl<'a> Printer<'a> {
             severity: Severity::Error,
             related: Vec::new(),
         });
-    }
-
-    fn install_method_rule(&mut self, method: &super::sweetener_forms::MethodBinding) {
-        if method.segments.is_empty() || method.head.is_empty() {
-            return;
-        }
-        let mut pattern = format!("{}(", method.head);
-        for (index, _) in method.head_params.iter().enumerate() {
-            if index > 0 {
-                pattern.push_str(", ");
-            }
-            pattern.push_str("$arg:expr");
-        }
-        pattern.push(')');
-        for (index, _) in method.segments.iter().enumerate() {
-            pattern.push_str(&format!(" seg{index}($arg:expr)"));
-        }
-        let read = sweetener_reader::read_syntax(&pattern);
-        let pats = pats_from(&read.children);
-        if pats.is_empty() {
-            return;
-        }
-        let rule = Rule {
-            pattern: pats,
-            template: Vec::new(),
-            introduced: Vec::new(),
-            expect: Some("upper argument segment".to_owned()),
-            refines: Vec::new(),
-            literal_alias: None,
-            contracts: Vec::new(),
-        };
-        if let Some(existing) = self
-            .macros_mut()
-            .iter_mut()
-            .find(|have| have.name == method.head)
-        {
-            // The compiled `between` rule already names `lower` and `upper`.
-            // Putting this stand-in first makes a complete call fail on the
-            // second segment (`upper argument segment`) before that rule runs.
-            existing.rules.push(rule);
-        } else {
-            self.macros_mut().push(Macro {
-                name: method.head.clone(),
-                fixity: Fixity::Function,
-                precedence: 0,
-                associativity: Associativity::None,
-                rules: vec![rule],
-                category: "expr".to_owned(),
-                operator: false,
-                shadows_core: false,
-                head: Span { start: 0, end: 0 },
-            });
-        }
     }
 
     fn fail_macro(&mut self, nodes: &[Syntax], index: usize, name: &str, rules: &[Rule]) {
@@ -8325,6 +8236,20 @@ fn take_expr_until(
         if operator_is(Some(node), "=") && operator_is(nodes.get(index + 1), ">") {
             index += 2;
             continue;
+        }
+        // A block after a complete operand is not part of the expression:
+        // `handle report(id) { ... }` has the operand `report(id)`. A
+        // function or class expression owns its body.
+        if is_closed_group(node, Delimiter::Brace)
+            && matches!(
+                nodes.get(index - 1),
+                Some(Syntax::Token { .. } | Syntax::String { .. } | Syntax::Group { .. })
+            )
+            && !nodes[cursor..index]
+                .iter()
+                .any(|node| token_is(Some(node), "function") || token_is(Some(node), "class"))
+        {
+            break;
         }
         // Postfix call or index, or an infix operator followed by another primary.
         if matches!(node, Syntax::Group { .. }) {

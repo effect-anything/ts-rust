@@ -1034,3 +1034,16 @@ const s = both(p, q !);\n",
     assert!(code.contains("const r = [x, z];"), "{code}");
     assert!(code.contains("const s = [p, q];"), "{code}");
 }
+
+#[test]
+fn expr_hole_stops_before_brace_block_after_operand() {
+    let code = expand_ok(
+        "handle.sts",
+        "export syntax handle:stmt {\n  rule { handle $t:expr { $($b:stmt)* } } => {\n    try { $($b)* } catch (e) { $t(e); }\n  }\n}\n\
+handle report { work(); }\nconst f = function () { return 1; };\n",
+    );
+    assert!(
+        code.contains("try { work(); } catch (e) { report(e); }"),
+        "{code}"
+    );
+}
