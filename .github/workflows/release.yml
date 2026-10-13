@@ -18,19 +18,32 @@
 # (build-release.sh has it): BOLT refuses the static Linux bin (build-bolt.sh), its Mach-O support
 # is experimental, macOS has no perf branch sampling for its profile, and BOLT has no PE support.
 # Linux is static musl and non-PIE, so it starts on any x86-64 or arm64 Linux, Alpine too
-# (npm/README.md, "Linux libc"). Each Linux tsc builds natively on a Blacksmith runner of its arch.
+# (npm/README.md, "Linux libc"). Each Linux tsc builds natively on a runner of its arch.
 # Windows (x86_64-pc-windows-msvc, aarch64-pc-windows-msvc) builds in Git Bash, with the C runtime
 # linked in (+crt-static), so tsc.exe needs no Visual C++ redistributable. jemalloc does not build
 # there: it uses the system allocator. Each tsc builds natively, so the PGO training runs on its
 # own platform: Blacksmith has no Intel Mac and no arm64 Windows runner, so darwin-x64 builds on
 # GitHub's macos-15-intel (4 vCPU) and
 # win32-arm64 on GitHub's windows-11-arm (4 vCPU).
+#
+# Fork setup (effect-anything/ts-rust): free GitHub-hosted runners only (linux-arm64 on
+# ubuntu-24.04-arm, win32-arm64 on windows-11-arm, darwin-x64 on macos-15-intel: free for public
+# repos). PGO (three fat-LTO builds) runs on tags and on a manual run with `pgo` set; pull requests
+# and other runs ship the plain fat-LTO tsc, so they fit the free runners' time. The publish runs
+# only for a tag, and only when the repo has the secret NPM_TOKEN or the variable
+# NPM_TRUSTED_PUBLISHING=true; without either the run still builds, packs, verifies and uploads the
+# artifact `release` (the .tgz packages and archives), and the publish step is skipped.
 name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      pgo:
+        type: boolean
+        description: PGO-train the tsc (three fat-LTO builds per platform; slow on free runners)
+        default: false
   pull_request:
     paths:
       - ".github/workflows/release.yml"
@@ -48,7 +61,7 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -87,20 +100,20 @@ jobs:
         include:
           - platform: linux-x64
             target: x86_64-unknown-linux-musl
-            runner: blacksmith-16vcpu-ubuntu-2404
+            runner: ubuntu-latest
           - platform: linux-arm64
             target: aarch64-unknown-linux-musl
-            runner: blacksmith-16vcpu-ubuntu-2404-arm
+            runner: ubuntu-24.04-arm
           # jemalloc does not cross-build for macOS with zig, so this builds on a Mac.
           - platform: darwin-arm64
             target: aarch64-apple-darwin
-            runner: blacksmith-12vcpu-macos-26
+            runner: macos-latest
           - platform: darwin-x64
             target: x86_64-apple-darwin
             runner: macos-15-intel
           - platform: win32-x64
             target: x86_64-pc-windows-msvc
-            runner: blacksmith-16vcpu-windows-2025
+            runner: windows-latest
             exe: .exe
           - platform: win32-arm64
             target: aarch64-pc-windows-msvc
@@ -108,8 +121,10 @@ jobs:
             exe: .exe
             linker: rust-lld
     runs-on: ${{ matrix.runner }}
-    # The 4 vCPU GitHub-hosted runners (darwin-x64, win32-arm64) build slower.
-    timeout-minutes: 180
+    # Free runners have 3 to 4 vCPU; a PGO run is three fat-LTO builds. GitHub's limit is 360.
+    timeout-minutes: 340
+    env:
+      PGO: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.pgo) }}
     # Git Bash on Windows.
     defaults:
       run:
@@ -118,6 +133,13 @@ jobs:
       # LF in the working tree, as on the other hosts (README.md, "Develop on Windows").
       - if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
+      # GitHub-hosted Linux runners have about 14 GB free; a release build of the workspace needs
+      # more. Drop preinstalled SDKs this workflow never uses (about 25 GB).
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
+          df -h /
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
@@ -144,7 +166,8 @@ jobs:
           node-version: 24
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          shared-key: release-${{ matrix.target }}
+          cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' }}
       # As build-release.sh: the musl build compiles jemalloc with musl-gcc, links static with no PIE,
       # and has bin/tsgo.rs JEMALLOC_CONF built in, so the tsc does not exec itself at start. No
@@ -174,10 +197,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/plain"
           cp "target/${{ matrix.target }}/goport/tsgo${{ matrix.exe }}" "$RUNNER_TEMP/plain/tsc${{ matrix.exe }}"
       - name: PGO training set
+        if: env.PGO == 'true'
         run: scripts/goport/pgo-train.sh setup "$RUNNER_TEMP/train"
       # The same build with -Cprofile-generate, the training set, then -Cprofile-use. PGO_LINK (from
       # the Build step) gives the RUSTFLAGS of the plain build. Separate target dirs (not cached).
       - name: PGO build
+        if: env.PGO == 'true'
         env:
           PGO_TARGET: ${{ matrix.target }}
           PGO_BINS: tsgo
@@ -188,7 +213,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/out"
           cp "$RUNNER_TEMP/pgo/target-use/goport/tsgo${{ matrix.exe }}" "$RUNNER_TEMP/out/tsc${{ matrix.exe }}"
       - name: Check the PGO tsc against the plain tsc
+        if: env.PGO == 'true'
         run: scripts/goport/pgo-train.sh compare "$RUNNER_TEMP/train" "$RUNNER_TEMP/plain/tsc${{ matrix.exe }}" "$RUNNER_TEMP/out/tsc${{ matrix.exe }}"
+      - name: Ship the plain tsc (no PGO)
+        if: env.PGO != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          cp "$RUNNER_TEMP/plain/tsc${{ matrix.exe }}" "$RUNNER_TEMP/out/tsc${{ matrix.exe }}"
       - name: Check the tsc
         env:
           EXE: ${{ matrix.exe }}
@@ -267,7 +298,7 @@ jobs:
 
   package:
     needs: [version, build]
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -297,6 +328,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: go-pin/package-lock.json
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: go-pin
       - uses: actions/download-artifact@v5
@@ -447,12 +480,26 @@ jobs:
       id-token: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      # Publish gate: a token, or trusted publishing set up on npm (npm/README.md).
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      NPM_TRUSTED_PUBLISHING: ${{ vars.NPM_TRUSTED_PUBLISHING }}
     steps:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Publish gate
+        id: gate
+        run: |
+          if [[ -n $NPM_TOKEN || $NPM_TRUSTED_PUBLISHING == true ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::npm publish skipped: no NPM_TOKEN secret and NPM_TRUSTED_PUBLISHING is not true. The packages are in the artifact 'release'."
+          fi
       # Trusted publishing needs npm 11.5.1 or later.
-      - run: npm install -g npm@11 && npm --version
+      - if: steps.gate.outputs.publish == 'true'
+        run: npm install -g npm@11 && npm --version
       - uses: actions/download-artifact@v5
         with:
           name: release
@@ -462,6 +509,10 @@ jobs:
       # makes no provenance; from a public repo it adds it by itself.
       # A version with a prerelease part (a "-") is a prerelease: dist-tag `next`. Else `latest`.
       - name: Publish to npm
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          # Empty with trusted publishing: npm then authenticates with OIDC.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           tag=latest
           [[ $VERSION != *-* ]] || tag=next

@@ -3,12 +3,17 @@
 # the revision pipeline (scripts/goport/candidate.sh). This workflow is a fast check that the tree
 # builds and its own tests pass on Linux (x64 and arm64), macOS and Windows (x64, MSVC), that
 # the tsc compiles for Intel macOS, and that the wasm module (npm/wasm) passes its package tests.
+#
+# Fork CI (effect-anything/ts-rust, a public repo): free GitHub-hosted runners only (4 vCPU Linux and
+# Windows, 3 vCPU macOS arm64). Caches: Swatinem/rust-cache per job and runner (dependencies only;
+# the workspace crates rebuild), saved on pushes to main and wip and restored by pull requests,
+# which read the caches of their base branch.
 name: CI
 
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, wip]
     paths:
       - "crates/**"
       - "tools/**"
@@ -36,8 +41,8 @@ env:
 jobs:
   lint:
     name: fmt, codegen, clippy
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
         with:
@@ -45,7 +50,9 @@ jobs:
       - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal -c rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: lint
+          cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' }}
       - run: cargo fmt --all -- --check
       - name: Generated AST files match the codegen
         run: |
@@ -59,15 +66,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Blacksmith runners (the pingdotgg org has the app), as T3 Code uses. The Windows runner
-        # builds x86_64-pc-windows-msvc.
+        # Free GitHub-hosted runners. macos-latest is arm64; the Windows runner builds
+        # x86_64-pc-windows-msvc.
         runner:
-          - blacksmith-16vcpu-ubuntu-2404
-          - blacksmith-16vcpu-ubuntu-2404-arm
-          - blacksmith-12vcpu-macos-26
-          - blacksmith-16vcpu-windows-2025
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - windows-latest
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    # 4 vCPU (3 on macOS): the release build of the workspace and go_baselines take longer than on
+    # the 12 to 16 vCPU runners upstream uses. GitHub's limit is 360.
+    timeout-minutes: 300
     # Git Bash on Windows.
     defaults:
       run:
@@ -80,6 +89,13 @@ jobs:
       # gives the test fixtures and the scripts CRLF (README.md, "Develop on Windows").
       - if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
+      # GitHub-hosted Linux runners have about 14 GB free; a release build of the workspace needs
+      # more. Drop preinstalled SDKs this workflow never uses (about 25 GB).
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
+          df -h /
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
@@ -121,9 +137,13 @@ jobs:
           curl -sSfL "$url" | tar xz -C go-pin/node_modules/typescript --strip-components=1
           jq -r .version go-pin/node_modules/typescript/package.json
       - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      # One cache per runner (OS and arch). Only dependencies are kept (about 1 GB each), so the
+      # four test caches, lint and the release caches fit the 10 GB repo budget.
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: test-${{ matrix.runner }}
+          cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' }}
       - name: Build
         run: |
           cargo test --release --locked --workspace --no-run

@@ -3,6 +3,9 @@
 # the working tree to it and runs one command. The setup matches the Linux test job of ci.yml, with
 # zbook's toolchains. Sticky disks keep target/ and the cargo registry warm between testboxes.
 # A pull request that changes this file, testbox-data.sh or testbox-data.txt runs it in validation mode (no testbox_id).
+#
+# Fork: needs the Blacksmith app and its runners, which effect-anything does not have. The job runs
+# only when the repo variable BLACKSMITH_TESTBOX is "true".
 name: Blacksmith Testbox
 
 on:
@@ -34,6 +37,7 @@ env:
 
 jobs:
   testbox:
+    if: vars.BLACKSMITH_TESTBOX == 'true'
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 360
     steps:
