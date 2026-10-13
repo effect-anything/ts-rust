@@ -54,10 +54,14 @@ use crate::{Diagnostic, ExpandRequest, Expansion, Segment, SegmentKind, Severity
 
 use super::sweetener_reader::{self, Delimiter, Span, Syntax};
 
-/// `#fresh` hint that panics while a template is rendered. Test-only: a
-/// unit test writes it to force [`SWR_EXPANDER_PANIC`]. The expander never
-/// produces this hint itself. It has to be a legal identifier, because an
-/// ill-formed `#fresh` argument is `SWR2017` and is never rendered.
+/// `#fresh` hint that panics while a template is rendered.
+///
+/// Compiled only for this crate's unit tests (`cfg(test)`). A normal build,
+/// including a release build and the library an integration test links, has
+/// no such hint: `#fresh("swrPanic")` is an ordinary fresh binder there.
+/// The expander never produces this hint itself. It has to be a legal
+/// identifier, because an ill-formed `#fresh` argument is `SWR2017` and is
+/// never rendered.
 #[cfg(test)]
 pub(crate) const PANIC_FRESH_HINT: &str = "swrPanic";
 
@@ -88,7 +92,16 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
             .name("sweetener-expand".to_owned())
             .stack_size(stack)
             .spawn_scoped(scope, move || {
-                super::sweetener_budget::with_budget(budget, || expand_here(request))
+                super::sweetener_budget::with_budget(budget, || {
+                    // Catch inside this thread. Its invocation stack is a
+                    // thread local, so the span has to be read before the
+                    // thread (and that local) goes away, and another
+                    // expansion running concurrently cannot see it.
+                    std::panic::catch_unwind(|| expand_here(request)).unwrap_or_else(|panic| {
+                        let at = take_panicked_invocation();
+                        internal_error(code, panic.as_ref(), at)
+                    })
+                })
             })
             .ok()
             .map(|handle| handle.join())
@@ -96,13 +109,9 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     .map_or_else(
         || crate::unchanged(code),
         |joined| {
-            joined.unwrap_or_else(|panic| {
-                // The panicking thread is already gone, and its thread
-                // locals with it. The guard copied the invocation span out
-                // before unwinding, which is the only span still available.
-                let at = take_panic_invocation();
-                internal_error(code, panic.as_ref(), at)
-            })
+            // Only a panic outside the catch above lands here, which is
+            // before any invocation was entered.
+            joined.unwrap_or_else(|panic| internal_error(code, panic.as_ref(), (0, 0)))
         },
     )
 }
@@ -11622,20 +11631,19 @@ thread_local! {
     static BUDGET: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
     /// The macro invocation being expanded, outermost first. A panic reports
-    /// [`SWR_EXPANDER_PANIC`] at the innermost span still entered.
+    /// [`SWR_EXPANDER_PANIC`] at the innermost span still entered. This is
+    /// this expansion thread's own stack: two expansions cannot share it.
     static CURRENT_INVOCATION: std::cell::RefCell<Vec<(u32, u32)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The invocation whose guard unwound, recorded before that guard pops
+    /// it. Read by the `catch_unwind` in this same thread.
+    static PANICKED_AT: std::cell::RefCell<Option<(u32, u32)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// The invocation span a panic already copied out of the expander thread.
-/// Thread locals die with that thread, so the guard writes here before the
-/// unwind and [`take_panic_invocation`] reads it from the thread that joins.
-static PANIC_INVOCATION: std::sync::Mutex<Option<(u32, u32)>> = std::sync::Mutex::new(None);
-
 /// Enter `span` as the invocation being expanded. Dropping the guard leaves
-/// it, including when the expansion panics: the span is copied to
-/// [`PANIC_INVOCATION`] first, because this thread's locals do not survive
-/// the unwind that `expand` catches.
+/// it. On unwind the span is kept in [`PANICKED_AT`] first: the guard pops
+/// before `catch_unwind` resumes, and both live only on this thread.
 fn enter_invocation(span: (u32, u32)) -> InvocationGuard {
     CURRENT_INVOCATION.with(|stack| stack.borrow_mut().push(span));
     InvocationGuard { span }
@@ -11648,9 +11656,10 @@ struct InvocationGuard {
 impl Drop for InvocationGuard {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            if let Ok(mut slot) = PANIC_INVOCATION.lock() {
-                slot.get_or_insert(self.span);
-            }
+            // The innermost guard drops first and wins.
+            PANICKED_AT.with(|slot| {
+                slot.borrow_mut().get_or_insert(self.span);
+            });
         }
         CURRENT_INVOCATION.with(|stack| {
             let mut stack = stack.borrow_mut();
@@ -11661,14 +11670,10 @@ impl Drop for InvocationGuard {
     }
 }
 
-/// The invocation copied out by the guard that unwound, then forget it.
-/// `(0, 0)` when the panic was outside every invocation.
-fn take_panic_invocation() -> (u32, u32) {
-    PANIC_INVOCATION
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
-        .unwrap_or((0, 0))
+/// The invocation the unwinding guard recorded, then forget it. `(0, 0)`
+/// when the panic was outside every invocation.
+fn take_panicked_invocation() -> (u32, u32) {
+    PANICKED_AT.with(|slot| slot.borrow_mut().take().unwrap_or((0, 0)))
 }
 
 thread_local! {
