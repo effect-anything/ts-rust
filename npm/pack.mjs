@@ -18,7 +18,8 @@
 // (tsc-ext.node). The --ext platforms must be exactly the --exe platforms. Each platform package then
 // has lib/tsc, lib/tsc-ext and lib/tsc-ext.node; the main package has the bins `tsc` and `tsc-ext`
 // (bin/tsc-ext is a Node launcher that runs the platform's lib/tsc-ext), the tsconfig
-// `contentMappers` manifest (typescript.contentMapper.exec ./bin/tsc-ext), and the Node API
+// `contentMappers` manifest (typescript.contentMapper.platformExec, the platform's lib/tsc-ext,
+// with exec ./bin/tsc-ext as the fallback), and the Node API
 // (crates/ts_ext_syntax/js as lib/ext, the package root export; TypeScript's root export, the
 // version, moves to "./version"). The tsc keeps reporting the TypeScript version
 // (--version): the compiler matches `typesVersions` against it, so a tsc that reported 0.1.0 would
@@ -250,7 +251,15 @@ else {
     fs.chmodSync(path.join(mainDir, "bin", "tsc-ext"), 0o755);
     const extJs = path.join(repoRoot, "crates", "ts_ext_syntax", "js");
     fs.cpSync(extJs, path.join(mainDir, "lib", "ext"), { recursive: true });
-    mainPackage.typescript = { contentMapper: { exec: ["./bin/tsc-ext"] } };
+    // tsc starts the platform package's native lib/tsc-ext directly (platformExec, resolved from
+    // this package; a PORT addition to the manifest). exec, the Node launcher, is the fallback
+    // when that package is not installed, and for hosts that do not read platformExec.
+    mainPackage.typescript = {
+        contentMapper: {
+            exec: ["./bin/tsc-ext"],
+            platformExec: `${mainPackage.name}-\${platform}-\${arch}/lib/tsc-ext`,
+        },
+    };
     const rootExport = { types: "./lib/ext/index.d.ts", default: "./lib/ext/index.cjs" };
     const exports = {};
     for (const [key, value] of Object.entries(mainPackage.exports ?? {})) {

@@ -66,8 +66,12 @@ file that tools and browsers read. `--build` prints the bundler output instead (
 `Transformer` result under the tsconfig's options).
 
 `tsc` starts the mapper from the package's `typescript.contentMapper.exec` (`./bin/tsc-ext`), run
-in the package directory. In the published package that is a Node launcher that runs `lib/tsc-ext`
-of the platform package `@effect-x/tsc-<platform>-<arch>`; here (development) `bin/tsc-ext` is a
+in the package directory. The published package also declares
+`"platformExec": "@effect-x/tsc-${platform}-${arch}/lib/tsc-ext"`: `tsc` resolves that platform
+package from `@effect-x/tsc` and starts its native `lib/tsc-ext` directly (a PORT addition to the
+manifest; `crates/ts_goport/src/frontend/tsoptions/content_mappers.rs`). `bin/tsc-ext` is a Node
+launcher of the same binary, the fallback when the platform package is missing and the command a
+shell runs; here (development) `bin/tsc-ext` is a
 link to `target/debug/tsc-ext` (`ext/examples/link-debug.mjs`). `tsc` runs content mappers only
 with `--runExternalCode`.
 

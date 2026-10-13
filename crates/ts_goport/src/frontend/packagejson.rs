@@ -679,6 +679,11 @@ pub struct ContentMapperFields {
     pub exec: Expected<Vec<String>>,
     pub compiler_options: Expected<Vec<String>>,
     pub dynamic_config: Expected<bool>,
+    // PORT: not in tsgo. `platformExec` names a native executable in a
+    // per-platform package, e.g. `"@scope/pkg-${platform}-${arch}/bin/x"`,
+    // so the host starts it directly instead of a launcher script. See
+    // `resolve_platform_exec` in `tsoptions/content_mappers.rs`.
+    pub platform_exec: Expected<String>,
 }
 
 // PORT: the JSON v2 struct arshaler for `ContentMapperFields` (tags `exec`,
@@ -691,6 +696,7 @@ impl UnmarshalerFrom for ContentMapperFields {
                     "exec" => json_unmarshal_decode(dec, &mut self.exec)?,
                     "compilerOptions" => json_unmarshal_decode(dec, &mut self.compiler_options)?,
                     "dynamicConfig" => json_unmarshal_decode(dec, &mut self.dynamic_config)?,
+                    "platformExec" => json_unmarshal_decode(dec, &mut self.platform_exec)?,
                     _ => return Ok(false),
                 }
                 Ok(true)
