@@ -14,6 +14,7 @@ mod sweetener_forms;
 mod sweetener_hygiene;
 mod sweetener_reader;
 mod sweetener_scoped;
+mod sweetener_validate;
 
 /// Why a virtual span exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

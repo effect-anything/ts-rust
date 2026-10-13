@@ -1142,3 +1142,33 @@ fn item_macros_expand_only_at_module_and_namespace_level() {
         assert!(code.contains(piece), "missing {piece}: {code}");
     }
 }
+
+#[test]
+fn definition_diagnostics_from_upstream_compilers() {
+    for (code, expected) in [
+        (
+            "export syntax foo:stmt {\n  rule { foo $a:binding in $b:expr ; }\n  bind $a in $b as sequential value;\n  => { 1; }\n}\n",
+            "SWR3004: Binding-contract repetitions are not alignable.",
+        ),
+        (
+            "export syntax foo:expr {\n  rule { foo($x:expr) } => { #nosuch($x) }\n}\nconst a = foo(1);\n",
+            "SWR2018: Template has no operation #nosuch.",
+        ),
+        (
+            "export syntax foo:expr {\n  rule { foo($x:expr) } => { $y }\n}\nconst a = foo(1);\n",
+            "SWR2011: Template refers to unknown capture $y.",
+        ),
+        (
+            "export operator (+++):expr {\n  fixity sideways;\n  rule { $a:expr +++ $b:expr } => { $a }\n}\n",
+            "SWR4006: Invalid operator +++: fixity must be prefix, infix, or postfix.",
+        ),
+    ] {
+        let out = expand(ExpandRequest {
+            filename: "defs.sts",
+            code,
+            phase: Phase::Check,
+        });
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(messages, [expected], "{code}");
+    }
+}

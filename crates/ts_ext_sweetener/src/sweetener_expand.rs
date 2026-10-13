@@ -196,6 +196,7 @@ fn expand_pass(
     if !spellings.is_empty() {
         return sweetener_reader::with_operators(&spellings, || expand_pass(request, names_again));
     }
+    let local_names: Vec<String> = local.keys().cloned().collect();
     let mut local: Vec<Macro> = local.into_values().collect();
     local.sort_by_key(|macro_| macro_.head.start);
     for macro_ in local {
@@ -222,6 +223,28 @@ fn expand_pass(
     loaded
         .classes
         .extend(collect_classes(source, &read.children));
+    let known: Vec<super::sweetener_validate::KnownClass> = loaded
+        .classes
+        .iter()
+        .map(|class| super::sweetener_validate::KnownClass {
+            name: class.name.clone(),
+            fields: class
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect(),
+        })
+        .collect();
+    let (invalid_definitions, unbound) =
+        super::sweetener_validate::validate(&read.children, &known);
+    loaded.diagnostics.extend(invalid_definitions);
+    if !unbound.is_empty() {
+        let local_names: std::collections::HashSet<&str> =
+            local_names.iter().map(String::as_str).collect();
+        loaded.macros.retain(|macro_| {
+            !(unbound.contains(&macro_.name) && local_names.contains(macro_.name.as_str()))
+        });
+    }
     let mut printer = Printer {
         source,
         out: String::new(),
@@ -2477,7 +2500,8 @@ impl<'a> Printer<'a> {
                     format!("SWR2017: Invalid argument for template operation {operation}.")
                 }
                 None => format!(
-                    "SWR4001: Sweetener macro error: template directive `{name}` is not implemented"
+                    "SWR2018: Template has no operation #{}.",
+                    name.trim_start_matches('#')
                 ),
             };
             self.diagnostics.push(Diagnostic {
@@ -2538,9 +2562,6 @@ impl<'a> Printer<'a> {
         });
     }
 
-    /// The rules of macro `name` that may run at `at`: a rule with a
-    /// `context` clause runs only where the invocation stands in it. The
-    /// others are kept so a failure can say which context was missing.
     /// Whether `yield` / `await` are expressions at `at` of this printer's
     /// source. A nested printer's source is a replacement standing where
     /// its invocation stood, so its top level has that invocation's contexts.
@@ -2555,6 +2576,9 @@ impl<'a> Printer<'a> {
         here
     }
 
+    /// The rules of macro `name` that may run at `at`: a rule with a
+    /// `context` clause runs only where the invocation stands in it. The
+    /// others are kept so a failure can say which context was missing.
     fn rules_named(&mut self, name: &str, at: usize) -> Vec<Rule> {
         let contexts = self.contexts_at(at);
         let mut kept = Vec::new();
@@ -4239,10 +4263,59 @@ fn contract_diagnostics(macro_: &Macro) -> Vec<Diagnostic> {
                 out.push(diagnostic(format!(
                     "SWR3005: Binding space {space} is invalid for this macro category."
                 )));
+                continue;
+            }
+            // A sequential binder scopes each repetition over its own part
+            // of the region, so the two must share a repetition.
+            if contract.kind.as_deref() == Some("sequential") {
+                let mut groups = HashMap::new();
+                hole_groups(&rule.pattern, &mut Vec::new(), &mut 0, &mut groups);
+                let binder_groups = groups.get(&binder.0).cloned().unwrap_or_default();
+                let region_groups = match &contract.region {
+                    Some(Some(path)) => groups.get(&path.0).cloned().unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                if binder_groups
+                    .iter()
+                    .all(|group| !region_groups.contains(group))
+                {
+                    out.push(diagnostic(
+                        "SWR3004: Binding-contract repetitions are not alignable.".to_owned(),
+                    ));
+                }
             }
         }
     }
     out
+}
+
+/// The repetitions each capture is nested in, outermost first.
+fn hole_groups(
+    pattern: &[Pat],
+    stack: &mut Vec<usize>,
+    next: &mut usize,
+    out: &mut HashMap<String, Vec<usize>>,
+) {
+    for pat in pattern {
+        match pat {
+            Pat::Hole { name, .. } => {
+                out.entry(name.clone()).or_insert_with(|| stack.clone());
+            }
+            Pat::Group { inner, .. } => hole_groups(inner, stack, next, out),
+            Pat::Rep { inner, .. } => {
+                stack.push(*next);
+                *next += 1;
+                hole_groups(inner, stack, next, out);
+                stack.pop();
+            }
+            Pat::Choice(alternatives) => {
+                for alternative in alternatives {
+                    hole_groups(alternative, stack, next, out);
+                }
+            }
+            Pat::Lit(_) => {}
+        }
+    }
 }
 
 fn pattern_holes(pattern: &[Pat], out: &mut Vec<(String, HoleKind)>) {
