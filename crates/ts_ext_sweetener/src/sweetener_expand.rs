@@ -165,10 +165,31 @@ fn expand_pass(
     let source = request.code;
     let read = sweetener_reader::read_syntax(source);
     let imports = syntax_imports(&read.children);
+    let names_again = names.clone();
     let user_names = names.unwrap_or_else(|| user_spellings(&read.children));
     let mut loaded = load_macros(request.filename, source, &imports, &user_names);
     let mut local = HashMap::new();
     collect_macros(source, &read.children, &mut local);
+    // An operator this file defines or imports with a spelling the reader
+    // splits (`@@`) is one token to upstream's reader. Read everything again
+    // with those spellings, the macro modules included.
+    let spellings: Vec<String> = loaded
+        .macros
+        .iter()
+        .chain(local.values())
+        .filter(|macro_| macro_.operator)
+        .map(|macro_| macro_.name.clone())
+        .filter(|name| {
+            name.chars().count() >= 2
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_punctuation() && !"()[]{}\"'`$;,".contains(ch))
+                && !sweetener_reader::reads_as_one(name)
+        })
+        .collect();
+    if !spellings.is_empty() {
+        return sweetener_reader::with_operators(&spellings, || expand_pass(request, names_again));
+    }
     for macro_ in local.into_values() {
         if macro_.shadows_core && !core_shadow_valid(&macro_) {
             loaded.diagnostics.push(Diagnostic {
@@ -1046,7 +1067,16 @@ impl<'a> Printer<'a> {
     /// Lowest-precedence imported infix operator in the expression that
     /// starts at `index`, if one is waiting to be expanded.
     fn infix_in_expr(&self, nodes: &[Syntax], index: usize) -> Option<usize> {
-        if !is_expr_start(&nodes[index]) {
+        // A prefix operator macro binds tighter than an infix operator of
+        // lower precedence: `~~ y @@ z` is `pair(twice(y), z)` when `~~` is
+        // above `@@`. An infix at or above the prefix stays in its operand.
+        let prefix_bound = operator_spelling(&nodes[index]).and_then(|name| {
+            self.macros
+                .iter()
+                .find(|macro_| macro_.name == name && macro_.fixity == Fixity::Prefix)
+                .map(|macro_| macro_.precedence)
+        });
+        if !is_expr_start(&nodes[index]) && prefix_bound.is_none() {
             return None;
         }
         let mut cursor = index;
@@ -1063,7 +1093,10 @@ impl<'a> Printer<'a> {
                 let member = cursor > index
                     && matches!(&nodes[cursor - 1], Syntax::Operator { raw, .. } if raw == ".");
                 if !member {
-                    if let Some(prec) = self.infix_precedence(name) {
+                    if let Some(prec) = self
+                        .infix_precedence(name)
+                        .filter(|prec| prefix_bound.is_none_or(|bound| *prec < bound))
+                    {
                         let replace = match found {
                             None => true,
                             Some((_, best)) if prec < best => true,

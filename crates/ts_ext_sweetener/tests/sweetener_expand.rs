@@ -733,6 +733,48 @@ const b = 1 + x ::;\n\
     assert!(code.contains("const b = assertDefined(1 + x);"), "{code}");
 }
 
+/// A macro can define a multi-character operator spelling the reader does
+/// not know (`@@`, `~~`, `%%`): the file is re-read with those spellings as
+/// one token. A prefix operator binds tighter than an infix of lower
+/// precedence, and a postfix operator applies at its own precedence.
+#[test]
+fn macro_defined_operator_spellings_and_precedence() {
+    let code = expand_ok(
+        "ops.sts",
+        "export operator (@@):expr {\n\
+  fixity infix;\n\
+  associativity left;\n\
+  precedence 40;\n\
+  rule { $left:expr @@ $right:expr } => { pair($left, $right) }\n\
+}\n\
+export operator (~~):expr {\n\
+  fixity prefix;\n\
+  precedence 90;\n\
+  rule { ~~ $value:expr } => { twice($value) }\n\
+}\n\
+export operator (%%):expr {\n\
+  fixity postfix;\n\
+  precedence 95;\n\
+  rule { $value:expr %% } => { bang($value) }\n\
+}\n\
+const a = ~~ y @@ z;\n\
+const b = x @@ y %%;\n\
+const d = ~~ y %%;\n\
+const g = x %% @@ y;\n\
+const h = [x %%];\n\
+",
+    );
+    for piece in [
+        "const a = pair(twice(y), z);",
+        "const b = pair(x, bang(y));",
+        "const d = twice(bang(y));",
+        "const g = pair(bang(x), y);",
+        "const h = [bang(x)];",
+    ] {
+        assert!(code.contains(piece), "missing {piece}: {code}");
+    }
+}
+
 /// Hygiene asks the output, as upstream does: a binder the user wrote inside
 /// input a macro consumed (and did not print again) does not force a rename,
 /// one still printed does.

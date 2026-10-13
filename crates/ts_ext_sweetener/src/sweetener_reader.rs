@@ -78,6 +78,42 @@ pub struct ReadSyntax {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+thread_local! {
+    /// Operator spellings the file's operator definitions add, longest first.
+    static EXTRA_OPERATORS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Spellings the reader already reads as one operator.
+const BUILTIN_SPELLINGS: &[&str] = &["|>", "==", "=>", "**", "->", "<-", "::"];
+
+/// Whether the reader reads `spelling` as one token now.
+#[must_use]
+pub fn reads_as_one(spelling: &str) -> bool {
+    BUILTIN_SPELLINGS.contains(&spelling)
+        || EXTRA_OPERATORS.with(|extra| extra.borrow().iter().any(|have| have == spelling))
+}
+
+/// Run `f` with the reader also reading each of `spellings` as one operator
+/// token, as upstream's reader does for the operators a file defines or
+/// imports (`@@`, `~~`).
+pub fn with_operators<T>(spellings: &[String], f: impl FnOnce() -> T) -> T {
+    let saved = EXTRA_OPERATORS.with(|extra| {
+        let mut extra = extra.borrow_mut();
+        let saved = extra.clone();
+        for spelling in spellings {
+            if !extra.contains(spelling) {
+                extra.push(spelling.clone());
+            }
+        }
+        extra.sort_by_key(|spelling| std::cmp::Reverse(spelling.len()));
+        saved
+    });
+    let out = f();
+    EXTRA_OPERATORS.with(|extra| *extra.borrow_mut() = saved);
+    out
+}
+
 /// Read `source` into a token tree. Unmatched delimiters are diagnostics
 /// whose message names this as a Sweetener reader error, not a TypeScript
 /// parse error. Codes follow the reference reader (`SWR1002`, `SWR1003`).
@@ -257,6 +293,20 @@ impl<'a> Reader<'a> {
                 }
             }
             return Syntax::Token {
+                span: span(start, self.index),
+                raw: self.source[start..self.index].to_owned(),
+            };
+        }
+        let extra = EXTRA_OPERATORS.with(|extra| {
+            extra
+                .borrow()
+                .iter()
+                .find(|spelling| self.source[start..].starts_with(spelling.as_str()))
+                .map(String::len)
+        });
+        if let Some(width) = extra {
+            self.index = start + width;
+            return Syntax::Operator {
                 span: span(start, self.index),
                 raw: self.source[start..self.index].to_owned(),
             };
