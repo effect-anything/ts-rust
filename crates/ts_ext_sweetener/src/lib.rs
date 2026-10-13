@@ -8,6 +8,7 @@ pub mod structure;
 
 mod sweetener;
 mod sweetener_apps;
+mod sweetener_context;
 mod sweetener_expand;
 mod sweetener_forms;
 mod sweetener_hygiene;

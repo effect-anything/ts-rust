@@ -239,6 +239,10 @@ fn expand_pass(
         runtime_imports: loaded.runtime_imports,
         hygiene: HashMap::new(),
         channel_renames: HashMap::new(),
+        context_rejected: Vec::new(),
+        context_base: super::sweetener_context::MODULE,
+        context_regions: None,
+        last_contexts: super::sweetener_context::MODULE,
         // Theirs synthesizes a macro module's runtime imports only for a
         // file that invoked one of its macros. A module whose every item is
         // a macro definition invokes none.
@@ -788,6 +792,12 @@ struct Printer<'a> {
     file_nodes: &'a [Syntax],
     /// Channel binders this generator must print with a suffix.
     channel_renames: HashMap<String, String>,
+    context_rejected: Vec<(Rule, String)>,
+    /// The contexts this printer's top level stands in.
+    context_base: super::sweetener_context::Contexts,
+    context_regions: Option<Vec<super::sweetener_context::Region>>,
+    /// The contexts of the invocation being expanded, for nested printers.
+    last_contexts: super::sweetener_context::Contexts,
     /// A macro rule rejected an item. That item stays as written; the rest
     /// of the file is still expanded. Nested expansion copies this flag up
     /// so the parent does not treat a refused hole as a successful rewrite.
@@ -1186,6 +1196,60 @@ impl<'a> Printer<'a> {
         Some((self.expand_replacement(&combined), end, stop))
     }
 
+    /// Upstream's first two ways to read a macro operator's right operand
+    /// (expansion spec, section 7): a literal run some rule spells after the
+    /// operator when nothing after it continues an operand, then an arrow
+    /// function when the operator declares `operand arrow;`, whose body ends
+    /// at the next use of the same operator.
+    fn special_right_operand(
+        &self,
+        nodes: &[Syntax],
+        op_at: usize,
+        name: &str,
+    ) -> Option<(String, usize, usize)> {
+        let operators: Vec<&Macro> = self
+            .macros
+            .iter()
+            .filter(|macro_| macro_.name == name && macro_.fixity.operand_led())
+            .collect();
+        for rule in operators.iter().flat_map(|macro_| macro_.rules.iter()) {
+            let Some(run) = literal_right_run(&rule.pattern, name) else {
+                continue;
+            };
+            let run: Vec<&String> = run.iter().filter(|lit| *lit != ";").collect();
+            if run.is_empty() {
+                continue;
+            }
+            let written = run.iter().enumerate().all(|(offset, lit)| {
+                let node = nodes.get(op_at + 1 + offset);
+                token_is(node, lit) || operator_spelling_is(node, lit)
+            });
+            let after = op_at + 1 + run.len();
+            if written && !continues_operand(nodes.get(after)) {
+                let end = node_end(&nodes[after - 1]);
+                let text =
+                    sweetener_reader::slice_range(self.source, node_start(&nodes[op_at + 1]), end);
+                return Some((text.trim().to_owned(), end, after));
+            }
+        }
+        if operators.iter().any(|macro_| macro_.operand_arrow) && arrow_starts(nodes, op_at + 1) {
+            let mut stop = op_at + 1;
+            while stop < nodes.len()
+                && operator_spelling(&nodes[stop]) != Some(name)
+                && !operator_is(nodes.get(stop), ";")
+                && !operator_is(nodes.get(stop), ",")
+            {
+                stop += 1;
+            }
+            let end = node_end(&nodes[stop - 1]);
+            let text =
+                sweetener_reader::slice_range(self.source, node_start(&nodes[op_at + 1]), end);
+            // The arrow is one operand wherever the template places it.
+            return Some((format!("({})", text.trim()), end, stop));
+        }
+        None
+    }
+
     fn infix_associativity(&self, name: &str) -> Associativity {
         self.macros
             .iter()
@@ -1220,7 +1284,11 @@ impl<'a> Printer<'a> {
         // A right-associative chain keeps the next `**` on the right.
         // `take_expr` stops before infix operators so a pattern hole does not
         // swallow `|>`; that would leave `3 ** 2` unexpanded here.
-        let (right, right_end, next) = if right_assoc {
+        let special = self.special_right_operand(nodes, op_at, &name);
+        let read_specially = special.is_some();
+        let (right, right_end, next) = if let Some(read) = special {
+            Some(read)
+        } else if right_assoc {
             take_right_assoc_operand(self.source, nodes, op_at + 1)
         } else {
             take_expr(self.source, nodes, op_at + 1)
@@ -1229,12 +1297,7 @@ impl<'a> Printer<'a> {
         // `received <-;` has no channel expression. Binding the hole to
         // empty text would print `yield take()`.
         if right.trim().is_empty() {
-            let rules: Vec<Rule> = self
-                .macros
-                .iter()
-                .filter(|macro_| macro_.name == name)
-                .flat_map(|macro_| macro_.rules.clone())
-                .collect();
+            let rules: Vec<Rule> = self.rules_named(&name, node_start(&nodes[index]));
             let at = nodes
                 .get(op_at + 1)
                 .map(node_span)
@@ -1242,12 +1305,7 @@ impl<'a> Printer<'a> {
             self.fail_macro_at(&name, &rules, at);
             return self.skip_failed(nodes, op_at);
         }
-        let rules: Vec<Rule> = self
-            .macros
-            .iter()
-            .filter(|macro_| macro_.name == name)
-            .flat_map(|macro_| macro_.rules.clone())
-            .collect();
+        let rules: Vec<Rule> = self.rules_named(&name, node_start(&nodes[index]));
         for rule in &rules {
             // `User implements Equal<User> { ... }` is an item. The two-hole
             // expression binder would stop at the type and leave the body.
@@ -1325,16 +1383,26 @@ impl<'a> Printer<'a> {
                         replacement.push(';');
                     }
                 }
-                let expanded = self.expand_replacement(&replacement);
+                let mut expanded = self.expand_replacement(&replacement);
                 self.printing_core = was_core;
                 let start = node_span(&nodes[index]).start;
                 self.copy_until(start as usize);
-                let (emit_end, resume) =
+                let (mut emit_end, mut resume) =
                     if pattern_ends_with_semi(&rule.pattern) && operator_is(nodes.get(next), ";") {
                         (node_end(&nodes[next]), next + 1)
                     } else {
                         (right_end, next)
                     };
+                // A specially read right operand stopped at the next use of
+                // the operator; the chain continues from this expansion.
+                if read_specially
+                    && let Some((folded, chain_end, chain_next)) =
+                        self.fold_left_chain(nodes, resume, &name, &expanded)
+                {
+                    expanded = folded;
+                    emit_end = chain_end;
+                    resume = chain_next;
+                }
                 self.emit(start, u32_at(emit_end), &expanded, SegmentKind::Atom);
                 self.last_original = emit_end;
                 return resume;
@@ -1363,12 +1431,7 @@ impl<'a> Printer<'a> {
         )
         .trim()
         .to_owned();
-        let rules: Vec<Rule> = self
-            .macros
-            .iter()
-            .filter(|macro_| macro_.name == name)
-            .flat_map(|macro_| macro_.rules.clone())
-            .collect();
+        let rules: Vec<Rule> = self.rules_named(&name, node_start(&nodes[index]));
         for rule in &rules {
             let [Pat::Hole { name: hole, .. }, Pat::Lit(op)] = rule.pattern.as_slice() else {
                 continue;
@@ -1423,12 +1486,7 @@ impl<'a> Printer<'a> {
             });
             return self.skip_failed(nodes, index);
         }
-        let rules: Vec<Rule> = self
-            .macros
-            .iter()
-            .filter(|macro_| macro_.name == name)
-            .flat_map(|macro_| macro_.rules.clone())
-            .collect();
+        let rules: Vec<Rule> = self.rules_named(&name, node_start(&nodes[index]));
         let start_at = 0;
         let mut best: Option<(&Rule, Match)> = None;
         for rule in &rules {
@@ -1499,12 +1557,7 @@ impl<'a> Printer<'a> {
         let head = &nodes[index];
         let head_span = node_span(head);
         self.copy_until(head_span.start as usize);
-        let rules: Vec<Rule> = self
-            .macros
-            .iter()
-            .filter(|macro_| macro_.name == name)
-            .flat_map(|macro_| macro_.rules.clone())
-            .collect();
+        let rules: Vec<Rule> = self.rules_named(&name, node_start(&nodes[index]));
         if rules.is_empty() && name == "unless" {
             // keep going; the diagnostic below names the macro
         }
@@ -1715,6 +1768,10 @@ impl<'a> Printer<'a> {
             form_signals: self.form_signals.clone(),
             last_form_next: 0,
             channel_renames: HashMap::new(),
+            context_rejected: Vec::new(),
+            context_base: self.last_contexts,
+            context_regions: None,
+            last_contexts: self.last_contexts,
             failed: false,
             file_nodes: self.file_nodes,
         };
@@ -1987,6 +2044,10 @@ impl<'a> Printer<'a> {
             form_signals: self.form_signals.clone(),
             last_form_next: 0,
             channel_renames: self.channel_renames.clone(),
+            context_rejected: Vec::new(),
+            context_base: self.last_contexts,
+            context_regions: None,
+            last_contexts: self.last_contexts,
             failed: false,
             file_nodes: self.file_nodes,
         };
@@ -2172,12 +2233,7 @@ impl<'a> Printer<'a> {
         if accepted {
             return false;
         }
-        let rules: Vec<Rule> = self
-            .macros
-            .iter()
-            .filter(|macro_| macro_.name == name)
-            .flat_map(|macro_| macro_.rules.clone())
-            .collect();
+        let rules: Vec<Rule> = self.rules_named(&name, node_start(&nodes[index]));
         if rules.is_empty() {
             return false;
         }
@@ -2228,6 +2284,8 @@ impl<'a> Printer<'a> {
         if !self.form_candidate(nodes, index) {
             return false;
         }
+        // The form's text is expanded again by a nested printer standing here.
+        self.contexts_at(node_start(&nodes[index]));
         let Some(rewritten) = super::sweetener_forms::try_expand_fixture(
             self.source,
             self.file_nodes,
@@ -2242,12 +2300,7 @@ impl<'a> Printer<'a> {
         // later rule repair the hole.
         if rewritten.text.is_empty() {
             if let Some(name) = macro_name_of(self.source, nodes, index) {
-                let rules: Vec<Rule> = self
-                    .macros
-                    .iter()
-                    .filter(|macro_| macro_.name == name)
-                    .flat_map(|macro_| macro_.rules.clone())
-                    .collect();
+                let rules: Vec<Rule> = self.rules_named(&name, node_start(&nodes[index]));
                 if rules.is_empty() {
                     self.fail_macro_at(&name, &rules, node_span(&nodes[index]));
                 } else {
@@ -2436,7 +2489,72 @@ impl<'a> Printer<'a> {
         });
     }
 
+    /// The rules of macro `name` that may run at `at`: a rule with a
+    /// `context` clause runs only where the invocation stands in it. The
+    /// others are kept so a failure can say which context was missing.
+    /// Whether `yield` / `await` are expressions at `at` of this printer's
+    /// source. A nested printer's source is a replacement standing where
+    /// its invocation stood, so its top level has that invocation's contexts.
+    fn contexts_at(&mut self, at: usize) -> super::sweetener_context::Contexts {
+        let base = self.context_base;
+        let source = self.source;
+        let regions = self.context_regions.get_or_insert_with(|| {
+            super::sweetener_context::regions(&sweetener_reader::read_syntax(source).children, base)
+        });
+        let here = super::sweetener_context::lookup(regions, at, base);
+        self.last_contexts = here;
+        here
+    }
+
+    fn rules_named(&mut self, name: &str, at: usize) -> Vec<Rule> {
+        let contexts = self.contexts_at(at);
+        let mut kept = Vec::new();
+        self.context_rejected.clear();
+        for rule in self
+            .macros
+            .iter()
+            .filter(|macro_| macro_.name == name)
+            .flat_map(|macro_| macro_.rules.iter())
+        {
+            match rule
+                .contexts
+                .iter()
+                .find(|(context, _)| !contexts.has(context))
+            {
+                Some((missing, _)) => self.context_rejected.push((rule.clone(), missing.clone())),
+                None => kept.push(rule.clone()),
+            }
+        }
+        kept
+    }
+
     fn fail_macro(&mut self, nodes: &[Syntax], index: usize, name: &str, rules: &[Rule]) {
+        // A rule that matched but needs a context the invocation is not in.
+        let missing = self.context_rejected.iter().find_map(|(rule, context)| {
+            match_rule_with(
+                self.source,
+                nodes,
+                index,
+                &rule.pattern,
+                &self.classes,
+                &rule.refines,
+            )
+            .map(|_| context.clone())
+        });
+        if let Some(context) = missing {
+            let span = node_span(&nodes[index]);
+            self.failed = true;
+            self.diagnostics.push(Diagnostic {
+                message: format!(
+                    "SWR4001: No rule for macro {name} accepted this input: {context} context."
+                ),
+                start: span.start,
+                end: span.end,
+                severity: Severity::Error,
+                related: Vec::new(),
+            });
+            return;
+        }
         let (span, expect) = self.rule_failure(nodes, index, rules);
         self.failed = true;
         // `module { record Cons(head:, tail) }` fails inside `record`.
@@ -2600,6 +2718,8 @@ struct Macro {
     operator: bool,
     /// The definition wrote `shadows core`.
     shadows_core: bool,
+    /// `operand arrow;`: the right operand may be an arrow function.
+    operand_arrow: bool,
     /// The definition keyword (`syntax`/`operator`), where upstream reports
     /// a definition-level diagnostic. Empty for a synthesized macro.
     head: Span,
@@ -2646,6 +2766,9 @@ struct Rule {
     literal_alias: Option<String>,
     /// `bind $name in following as recursive value;` clauses.
     contracts: Vec<Contract>,
+    /// `context generator;` / `context async;`: the rule is used only where
+    /// the invocation stands in those contexts.
+    contexts: Vec<(String, Span)>,
 }
 
 /// One declarative binding contract, upstream's `BindingContract`:
@@ -3590,6 +3713,7 @@ fn collect_macros(source: &str, nodes: &[Syntax], out: &mut HashMap<String, Macr
                         operator,
                         shadows_core,
                         head,
+                        operand_arrow: operator && declares_operand_arrow(body),
                     });
                 }
             }
@@ -3662,6 +3786,14 @@ fn syntax_parameters(nodes: &[Syntax]) -> Vec<String> {
         }
     }
     out
+}
+
+fn declares_operand_arrow(body: &Syntax) -> bool {
+    let Syntax::Group { children, .. } = body else {
+        return false;
+    };
+    (0..children.len())
+        .any(|index| token_at(children, index, "operand") && token_at(children, index + 1, "arrow"))
 }
 
 fn macro_fixity(operator: bool, body: &Syntax) -> (Fixity, u8, Associativity) {
@@ -3787,7 +3919,15 @@ fn rules_in_source(source: &str, body: &Syntax) -> Vec<Rule> {
         };
         // `expect` may follow `bind` clauses. It still sits before `=>`.
         let expect = expect_before_arrow(source, children, index);
+        let mut contexts = Vec::new();
         while index < children.len() && !is_arrow(children, index) {
+            // `context generator;` / `context async;`
+            if token_at(children, index, "context")
+                && let Some(Syntax::Token { raw, span }) = children.get(index + 1)
+                && raw != ";"
+            {
+                contexts.push((raw.clone(), *span));
+            }
             index += 1;
         }
         if index < children.len() && is_arrow(children, index) {
@@ -3820,6 +3960,7 @@ fn rules_in_source(source: &str, body: &Syntax) -> Vec<Rule> {
                 refines: refines_after(source, children, group_index(children, pattern_group)),
                 literal_alias: literal_alias_before(children, index),
                 contracts: contracts_after(children, group_index(children, pattern_group)),
+                contexts,
             });
         }
     }
@@ -3987,6 +4128,17 @@ fn category_allows_space(category: &str, space: &str) -> bool {
 fn contract_diagnostics(macro_: &Macro) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for rule in &macro_.rules {
+        for (name, span) in &rule.contexts {
+            if name != "generator" && name != "async" {
+                out.push(Diagnostic {
+                    message: format!("SWR4008: Unknown macro context {name}."),
+                    start: span.start,
+                    end: span.end,
+                    severity: Severity::Error,
+                    ..Default::default()
+                });
+            }
+        }
         let mut holes = Vec::new();
         pattern_holes(&rule.pattern, &mut holes);
         for contract in &rule.contracts {
@@ -6865,6 +7017,26 @@ fn prefix_was_written(source: &str, nodes: &[Syntax], index: usize, pattern: &[P
         .get(span.end as usize..node_start(&nodes[index]))
         .unwrap_or("");
     if between.contains('\n') {
+        return true;
+    }
+    // A keyword that takes an expression (`return id(6)`, `yield m(x)`)
+    // leaves an operand position; the invocation starts here.
+    if matches!(
+        raw.as_str(),
+        "return"
+            | "yield"
+            | "await"
+            | "typeof"
+            | "void"
+            | "delete"
+            | "throw"
+            | "case"
+            | "in"
+            | "of"
+            | "else"
+            | "do"
+            | "extends"
+    ) {
         return true;
     }
     declaration_modifier(raw)
@@ -11787,12 +11959,75 @@ fn infix_rule_binds(
             _ => {}
         }
     }
+    // `$value:expr |> await`: the right operand is the literal run.
+    if saw_op
+        && holes.len() == 1
+        && let Some(run) = literal_right_run(pattern, name)
+    {
+        let written: String = right.split_whitespace().collect();
+        if written != run.concat() {
+            return false;
+        }
+        captures.insert(holes[0].clone(), Capture::Text(left.trim().to_owned()));
+        return true;
+    }
     if !saw_op || holes.len() < 2 {
         return false;
     }
     captures.insert(holes[0].clone(), Capture::Text(left.trim().to_owned()));
     captures.insert(holes[1].clone(), Capture::Text(right.trim().to_owned()));
     true
+}
+
+/// The literal tokens a rule spells after its operator, when that is all
+/// of its right side: `$value:expr |> await`.
+fn literal_right_run(pattern: &[Pat], name: &str) -> Option<Vec<String>> {
+    let op = pattern
+        .iter()
+        .position(|pat| matches!(pat, Pat::Lit(lit) if lit == name))?;
+    let run: Vec<String> = pattern[op + 1..]
+        .iter()
+        .map(|pat| match pat {
+            Pat::Lit(lit) => Some(lit.clone()),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    (!run.is_empty()).then_some(run)
+}
+
+/// Whether `node`, after an operand, continues it: a call, an index, a
+/// member access, or another operand word.
+fn continues_operand(node: Option<&Syntax>) -> bool {
+    match node {
+        None => false,
+        Some(Syntax::Group { delimiter, .. }) => *delimiter != Delimiter::Brace,
+        Some(Syntax::Token { .. } | Syntax::String { .. }) => true,
+        Some(Syntax::Operator { raw, .. }) => matches!(raw.as_str(), "." | "?." | "!"),
+        Some(Syntax::Comment { .. }) => false,
+    }
+}
+
+/// Whether an arrow function starts at `at`: `x =>`, `(a, b) =>`,
+/// `async x =>`, `async (a) =>`.
+fn arrow_starts(nodes: &[Syntax], at: usize) -> bool {
+    let at = if token_is(nodes.get(at), "async") {
+        at + 1
+    } else {
+        at
+    };
+    let head = matches!(
+        nodes.get(at),
+        Some(Syntax::Token { .. })
+            | Some(Syntax::Group {
+                delimiter: Delimiter::Paren,
+                ..
+            })
+    );
+    head && operator_spelling_is(nodes.get(at + 1), "=>")
+}
+
+fn operator_spelling_is(node: Option<&Syntax>, spelling: &str) -> bool {
+    node.and_then(operator_spelling) == Some(spelling) || token_is(node, spelling)
 }
 
 fn strip_already_printed(source: &str, head: usize, expanded: &str) -> String {

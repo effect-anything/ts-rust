@@ -1073,3 +1073,56 @@ fn expansion_cycles_and_depth_are_budgeted() {
         assert!(code[at..].starts_with(&kept[10..]), "{at}");
     }
 }
+
+#[test]
+fn context_clauses_select_rules_by_yield_and_await() {
+    let defs = "export syntax next:expr {\n  rule { next($x:expr) }\n  context generator;\n  => { yield $x }\n  rule { next($x:expr) } => { $x }\n}\nexport syntax wait:expr {\n  rule { wait($x:expr) }\n  context async;\n  => { await $x }\n}\n";
+    let code = expand_ok(
+        "ctx.sts",
+        &format!(
+            "{defs}function* g() {{ const a = next(1); const f = () => next(2); }}\nconst b = next(3);\nasync function k() {{ return wait(5); }}\nconst top = wait(6);\nclass C {{ *m() {{ return next(7); }} }}\nasync function* ag() {{ const q = async () => wait(8); function inner() {{ return next(9); }} }}\n"
+        ),
+    );
+    for piece in [
+        "const a = yield 1; const f = () => 2;",
+        "const b = 3;",
+        "return await 5;",
+        "const top = await 6;",
+        "return yield 7;",
+        "async () => await 8;",
+        "return 9;",
+    ] {
+        assert!(code.contains(piece), "missing {piece}: {code}");
+    }
+    let bad = format!(
+        "{defs}export syntax odd:expr {{\n  rule {{ odd() }}\n  context weird;\n  => {{ 1 }}\n}}\nfunction h() {{ return wait(4); }}\n"
+    );
+    let out = expand(ExpandRequest {
+        filename: "bad.sts",
+        code: &bad,
+        phase: Phase::Check,
+    });
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "SWR4008: Unknown macro context weird.",
+            "SWR4001: No rule for macro wait accepted this input: async context.",
+        ]
+    );
+}
+
+#[test]
+fn operator_right_operand_literal_run_and_arrow() {
+    let code = expand_ok(
+        "pipe.sts",
+        "export operator (|>):expr {\n  fixity infix;\n  associativity left;\n  precedence 1;\n  operand arrow;\n  rule { $value:expr |> await } => { await $value }\n  rule { $value:expr |> $f:expr } => { $f($value) }\n}\nconst a = 1 |> n => f(n) |> g;\nasync function h(p) { return p |> await |> f; }\nconst c = x |> double;\n",
+    );
+    for piece in [
+        "const a = g((n => f(n))(1));",
+        "return f(await p);",
+        "const c = double(x);",
+    ] {
+        assert!(code.contains(piece), "missing {piece}: {code}");
+    }
+}
