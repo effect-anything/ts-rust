@@ -1013,6 +1013,13 @@ impl<'a> Printer<'a> {
                     }
                 }
             }
+            // `{when (ready)} <a/> {end}`: the rule's pattern opens with a
+            // brace group whose first word is the macro's name, so the use
+            // starts at that group, not at the word inside it.
+            if let Some(name) = self.braced_head(nodes, index) {
+                index = self.expand_head(nodes, index, &name);
+                continue;
+            }
             // `(-> value, call(...))` is one group. The operator is its
             // first child, so the head walk never starts at the name.
             if let Some(name) = grouped_prefix(nodes, index) {
@@ -2386,6 +2393,32 @@ impl<'a> Printer<'a> {
         self.rules_reject(nodes, index)
     }
 
+    /// The macro a `{name ...}` group at `index` opens, when one of its
+    /// rules is written that way.
+    fn braced_head(&self, nodes: &[Syntax], index: usize) -> Option<String> {
+        let Some(Syntax::Group {
+            delimiter: Delimiter::Brace,
+            children,
+            ..
+        }) = nodes.get(index)
+        else {
+            return None;
+        };
+        let Some(Syntax::Token { raw, .. }) = children.first() else {
+            return None;
+        };
+        let opens = |pattern: &[Pat]| {
+            matches!(pattern.first(), Some(Pat::Group { delimiter: Delimiter::Brace, inner })
+                if matches!(inner.first(), Some(Pat::Lit(word)) if word == raw))
+        };
+        self.macros
+            .iter()
+            .any(|macro_| {
+                macro_.name == *raw && macro_.rules.iter().any(|rule| opens(&rule.pattern))
+            })
+            .then(|| raw.clone())
+    }
+
     /// True when a known macro is at `index` and no compiled rule accepts it.
     /// The form pass must not then print a repaired expansion.
     fn rules_reject(&mut self, nodes: &[Syntax], index: usize) -> bool {
@@ -3257,6 +3290,8 @@ enum HoleKind {
     Member {
         type_member: bool,
     },
+    /// `$body:jsxChild`: one JSX element, expression container, or text run.
+    JsxChild,
     /// `$state:State` — a user syntax class, matched by its rules.
     Class(String),
 }
@@ -5578,7 +5613,7 @@ fn hole_kind(raw: &str) -> HoleKind {
         "tt" | "token" => HoleKind::TokenTree,
         // Positions, not user syntax classes. `$body:item` is one item.
         "item" => HoleKind::Item,
-        "jsx" | "jsxChild" => HoleKind::Stmt,
+        "jsx" | "jsxChild" => HoleKind::JsxChild,
         // A user syntax class (`State`, `Segment`) is not a builtin hole.
         // Matching looks the class up by this spelling.
         other => HoleKind::Class(other.to_owned()),
@@ -8684,6 +8719,7 @@ fn take_hole(
         }
         HoleKind::Member { type_member } => take_member(source, nodes, index, *type_member),
         HoleKind::Type => take_type(source, nodes, index),
+        HoleKind::JsxChild => take_jsx_child(source, nodes, index),
         HoleKind::TokenTree => {
             // `$($rest:tt)+` is the remaining steps of a thread, which start
             // with an identifier (`map(...)`). A repetition step spans a
@@ -8962,6 +8998,84 @@ fn take_type(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, u
         }
     }
     Some((source[start..end].to_owned(), end, index))
+}
+
+/// One JSX child: an element through its matching closing tag (or `/>`), a
+/// `{...}` container, or a run of text up to the next tag or container.
+fn take_jsx_child(source: &str, nodes: &[Syntax], cursor: usize) -> Option<(String, usize, usize)> {
+    let mut index = cursor;
+    skip_comments(nodes, &mut index);
+    let first = nodes.get(index)?;
+    let start = node_start(first);
+    if is_closed_group(first, Delimiter::Brace) {
+        let end = node_end(first);
+        return Some((source[start..end].to_owned(), end, index + 1));
+    }
+    let is_open = |node: Option<&Syntax>| operator_is(node, "<");
+    if !is_open(Some(first)) {
+        // Text: everything up to the next tag or container.
+        let mut end_index = index;
+        while let Some(node) = nodes.get(end_index) {
+            if is_open(Some(node))
+                || matches!(
+                    node,
+                    Syntax::Group {
+                        delimiter: Delimiter::Brace,
+                        ..
+                    }
+                )
+                || is_expr_stop(node)
+            {
+                break;
+            }
+            end_index += 1;
+        }
+        if end_index == index {
+            return None;
+        }
+        let end = node_end(&nodes[end_index - 1]);
+        return Some((source[start..end].to_owned(), end, end_index));
+    }
+    let mut depth = 0usize;
+    let mut at = index;
+    while at < nodes.len() {
+        if !is_open(nodes.get(at)) {
+            at += 1;
+            continue;
+        }
+        let closing = operator_is(nodes.get(at + 1), "/");
+        // Walk to the `>` that ends this tag. Attribute values are groups or
+        // strings, so a bare `>` is the tag's end.
+        let mut tag_end = at + 1;
+        let mut self_closing = false;
+        while let Some(node) = nodes.get(tag_end) {
+            if let Syntax::Operator { raw, .. } = node {
+                if raw == "/>" {
+                    self_closing = true;
+                    break;
+                }
+                if raw == ">" {
+                    self_closing = !closing && operator_is(nodes.get(tag_end - 1), "/");
+                    break;
+                }
+            }
+            tag_end += 1;
+        }
+        if tag_end >= nodes.len() {
+            return None;
+        }
+        if closing {
+            depth = depth.checked_sub(1)?;
+        } else if !self_closing {
+            depth += 1;
+        }
+        at = tag_end + 1;
+        if depth == 0 {
+            let end = node_end(&nodes[tag_end]);
+            return Some((source[start..end].to_owned(), end, at));
+        }
+    }
+    None
 }
 
 /// `$name:binding` is one identifier, not the call or type that follows it.

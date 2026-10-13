@@ -52,9 +52,6 @@ fn try_expand_fixture_scoped(
     // key on the export name, so dispatch on a copy whose head is that name.
     let aliased = aliased_nodes(file, nodes, index);
     let nodes = aliased.as_deref().unwrap_or(nodes);
-    if let Some(control) = match_jsx_block(source, nodes, index) {
-        return Some(control);
-    }
     if let Some(use_) = match_signal_use(source, nodes, index, signals) {
         return Some(use_);
     }
@@ -87,7 +84,7 @@ fn try_expand_fixture_scoped(
 /// including `match`, `#`, `data`, `protocol`, `->`, `when`, and `each`, is
 /// an ordinary macro: upstream leaves it unread (TS4025) unless the file
 /// imports it.
-const HANDWRITTEN_FORMS: &[(&str, &str)] = &[("when", "when"), ("each", "each")];
+const HANDWRITTEN_FORMS: &[(&str, &str)] = &[];
 
 /// True when the node at `index` is a core form, or a handwritten library
 /// form whose spelling this file imported `for syntax`.
@@ -182,14 +179,7 @@ fn handwritten_spelling(nodes: &[Syntax], index: usize) -> Option<&'static str> 
     if operator_is(nodes.get(index), "->") || operator_is(nodes.get(index), "->>") {
         return thread_spelling(nodes.get(index).map(|node| std::slice::from_ref(node)));
     }
-    if let Some(children) = group_children(nodes.get(index), Delimiter::Brace) {
-        let head = token_raw(children.first())?;
-        if head == "when" || head == "each" {
-            return HANDWRITTEN_FORMS
-                .iter()
-                .find(|(form, _)| *form == head)
-                .map(|(_, spelling)| *spelling);
-        }
+    if group_children(nodes.get(index), Delimiter::Brace).is_some() {
         return None;
     }
     if let Some(children) = group_children(nodes.get(index), Delimiter::Bracket) {
@@ -387,26 +377,6 @@ pub struct ThreadStep<'a> {
     pub args: &'a [&'a str],
 }
 
-/// `jsx-control-flow`: `export syntax when:jsxChild` and `each:jsxChild`.
-///
-/// `{when ($condition)} $then {else} $otherwise {end}` =>
-/// `{($condition) ? $then : $otherwise}`.
-/// `{when ($condition)} $then {end}` => `{($condition) ? $then : null}`.
-/// `{each ($items as $item, $index)} $body {end}` =>
-/// `{($items).map(($item, $index) => $body)}`.
-pub fn expand_jsx_when(condition: &str, then_child: &str, otherwise: Option<&str>) -> String {
-    let otherwise = otherwise.unwrap_or("null");
-    format!("{{({condition}) ? {then_child} : {otherwise}}}")
-}
-
-pub fn expand_jsx_each(items: &str, item: &str, index: Option<&str>, body: &str) -> String {
-    let params = match index {
-        Some(index) => format!("{item}, {index}"),
-        None => item.to_owned(),
-    };
-    format!("{{({items}).map(({params}) => {body})}}")
-}
-
 /// `2 -> table` or `received <- table` at statement position.
 pub fn match_channel_stmt(source: &str, nodes: &[Syntax], index: usize) -> Option<ChannelStmt> {
     let left = nodes.get(index)?;
@@ -491,78 +461,6 @@ fn match_signal_use(
         text,
         binds: Vec::new(),
     })
-}
-
-fn match_jsx_block(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    let children = group_children(nodes.get(index), Delimiter::Brace)?;
-    let head = token_raw(children.first())?;
-    if head != "when" && head != "each" {
-        return None;
-    }
-    let mut cursor = index + 1;
-    let mut else_at = None;
-    let mut end_at = None;
-    let mut parts = Vec::new();
-    while cursor < nodes.len() {
-        if let Some(inner) = group_children(nodes.get(cursor), Delimiter::Brace) {
-            match token_raw(inner.first()).as_deref() {
-                Some("else") => {
-                    else_at = Some(cursor);
-                    cursor += 1;
-                    continue;
-                }
-                Some("end") => {
-                    end_at = Some(cursor);
-                    break;
-                }
-                _ => {}
-            }
-        }
-        parts.push(cursor);
-        cursor += 1;
-    }
-    let end_at = end_at?;
-    let then_parts: Vec<usize> = parts
-        .iter()
-        .copied()
-        .filter(|part| else_at.is_none_or(|at| *part < at))
-        .collect();
-    let else_parts: Vec<usize> = parts
-        .iter()
-        .copied()
-        .filter(|part| else_at.is_some_and(|at| *part > at))
-        .collect();
-    let then_child = nodes_text(source, nodes, &then_parts)?;
-    let text = if head == "each" {
-        let args = group_interior(source, children.get(1)?, Delimiter::Paren)?;
-        let (items, item, index_name) = split_each_args(args)?;
-        expand_jsx_each(items, item, index_name, then_child.trim())
-    } else {
-        let condition = group_interior(source, children.get(1)?, Delimiter::Paren)?.trim();
-        let otherwise = nodes_text(source, nodes, &else_parts);
-        expand_jsx_when(condition, then_child.trim(), otherwise.as_deref())
-    };
-    Some(FixtureRewrite {
-        start: node_start(&nodes[index]),
-        end: node_end(&nodes[end_at]),
-        next: end_at + 1,
-        text,
-        binds: Vec::new(),
-    })
-}
-
-fn nodes_text<'a>(source: &'a str, nodes: &[Syntax], parts: &[usize]) -> Option<&'a str> {
-    let first = *parts.first()?;
-    let last = *parts.last()?;
-    source.get(node_start(&nodes[first])..node_end(&nodes[last]))
-}
-
-fn split_each_args(args: &str) -> Option<(&str, &str, Option<&str>)> {
-    let (items, rest) = args.split_once(" as ")?;
-    let mut parts = rest.split(',').map(str::trim);
-    let item = parts.next()?;
-    let index = parts.next().filter(|part| !part.is_empty());
-    Some((items.trim(), item, index))
 }
 
 fn read_assign(nodes: &[Syntax], index: usize) -> Option<(String, usize)> {
@@ -706,22 +604,6 @@ fn group_children<'a>(node: Option<&'a Syntax>, delimiter: Delimiter) -> Option<
     }
 }
 
-fn group_interior<'a>(source: &'a str, node: &Syntax, delimiter: Delimiter) -> Option<&'a str> {
-    match node {
-        Syntax::Group {
-            delimiter: found,
-            span,
-            close: Some(_),
-            ..
-        } if *found == delimiter => {
-            let start = span.start as usize + 1;
-            let end = span.end as usize - 1;
-            source.get(start..end)
-        }
-        _ => None,
-    }
-}
-
 fn node_start(node: &Syntax) -> usize {
     match node {
         Syntax::Token { span, .. }
@@ -776,14 +658,6 @@ mod tests {
                 ],
             ),
             "filter(map([1, 2, 3], (value) => value + 1), (value) => value > 2)"
-        );
-        assert_eq!(
-            expand_jsx_when("loading", "<li>loading</li>", Some("<li>ready</li>")),
-            "{(loading) ? <li>loading</li> : <li>ready</li>}"
-        );
-        assert_eq!(
-            expand_jsx_each("items", "item", Some("index"), "<li />"),
-            "{(items).map((item, index) => <li />)}"
         );
     }
 

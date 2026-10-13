@@ -1418,3 +1418,28 @@ skip;
     assert!(flat.contains("const p = [0, v, 9];"), "{flat}");
     assert!(flat.ends_with(";"), "{flat}");
 }
+
+/// `when`/`each` are ordinary macros whose rules open with `{when ...}`: the
+/// use starts at that brace group, and `$x:jsxChild` reads one element
+/// through its closing tag.
+#[test]
+fn braced_jsx_child_macros() {
+    let code = r#"syntax when:jsxChild {
+  rule { {when ($c:expr)} $then:jsxChild {else} $other:jsxChild {end} } => { {($c) ? $then : $other} }
+  rule { {when ($c:expr)} $then:jsxChild {end} } => { {($c) ? $then : null} }
+}
+const a = <ul>{when (x)}<li>a <b>c</b></li>{else}<br/>{end}{when (y)} <i/> {end}</ul>;
+"#;
+    let out = expand(ExpandRequest {
+        filename: "j.stsx",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(
+        out.code
+            .contains("<ul>{(x) ? <li>a <b>c</b></li> : <br/>}{(y) ? <i/> : null}</ul>"),
+        "{}",
+        out.code
+    );
+}
