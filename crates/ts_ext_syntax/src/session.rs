@@ -211,15 +211,7 @@ fn apply_typegpu(
     if phase == TransformPhase::Build {
         let mappings = mappings_json(&first.span_map_segments());
         let mut diagnostics = diagnostics_of(first);
-        // Refusal offsets are bytes of this text. The payload has no
-        // positions, so they are not mapped back through Sweetener.
-        diagnostics.extend(gpu.diagnostics.into_iter().map(|item| SessionDiagnostic {
-            message: item.message,
-            start: item.start,
-            end: item.end,
-            severity: crate::Severity::Error,
-            related: Vec::new(),
-        }));
+        diagnostics.extend(author_diagnostics(first, gpu.diagnostics));
         return Transformed {
             changed: already_changed || gpu.changed,
             extension,
@@ -232,12 +224,14 @@ fn apply_typegpu(
     let Some(rewritten) = gpu.rewrite else {
         let changed = already_changed || !first.diagnostics.is_empty() || gpu.code != code;
         let mappings = mappings_json(&first.span_map_segments());
+        let mut diagnostics = diagnostics_of(first);
+        diagnostics.extend(author_diagnostics(first, gpu.diagnostics));
         return Transformed {
             changed,
             extension,
             source_map: source_map_json(path, &mappings),
             mappings,
-            diagnostics: diagnostics_of(first),
+            diagnostics,
             code: rewrite_specifiers(&gpu.code),
         };
     };
@@ -373,6 +367,27 @@ fn split_verbatim(
 struct MappedRange {
     start: u32,
     end: u32,
+}
+
+fn author_diagnostics(
+    first: &crate::Expansion,
+    diagnostics: Vec<ts_ext_typegpu::Diagnostic>,
+) -> Vec<SessionDiagnostic> {
+    diagnostics
+        .into_iter()
+        .map(|item| {
+            let (start, end) = map_through(first, item.start, item.end)
+                .map(|range| (range.start, range.end))
+                .unwrap_or((item.start, item.end));
+            SessionDiagnostic {
+                message: item.message,
+                start,
+                end,
+                severity: crate::Severity::Error,
+                related: Vec::new(),
+            }
+        })
+        .collect()
 }
 
 /// Map a span of the first expansion's virtual text back to the author.

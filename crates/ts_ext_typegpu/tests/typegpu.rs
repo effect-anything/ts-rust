@@ -121,15 +121,45 @@ fn build_ends_an_anonymous_default_export_with_a_semicolon() {
 #[test]
 fn build_reports_a_body_the_transpiler_refuses() {
     let code = "function outer(a, b) {\n  \"use gpu\";\n  const inner = () => a + b;\n  return inner();\n}\n";
+    let arrow = code.find("() =>").unwrap() as u32;
     let out = build_with_reports(code);
+    let diag = out
+        .diagnostics
+        .iter()
+        .find(|item| item.message == "Arrow functions are not supported inside TGSL.")
+        .unwrap_or_else(|| panic!("{:?}", out.diagnostics));
     assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| d.message == "Arrow functions are not supported inside TGSL."),
-        "{:?}",
-        out.diagnostics
+        diag.start <= arrow && arrow < diag.end,
+        "span {}..{} does not cover the arrow at {arrow}",
+        diag.start,
+        diag.end
     );
     assert!(out.code.contains("body: [0, []]"), "{}", out.code);
+    let check = TypegpuSession::check().transform("a.ts", code);
+    let check_diag = check
+        .diagnostics
+        .iter()
+        .find(|item| item.message == "Arrow functions are not supported inside TGSL.")
+        .unwrap_or_else(|| panic!("{:?}", check.diagnostics));
+    assert!(check_diag.start <= arrow && arrow < check_diag.end);
+}
+
+#[test]
+fn a_nested_directive_is_reported_on_the_inner_directive() {
+    let code = "function outer() {\n  \"use gpu\";\n  function inner() {\n    \"use gpu\";\n  }\n}\n";
+    let inner = code.rfind("\"use gpu\"").unwrap() as u32;
+    let out = TypegpuSession::check().transform("a.ts", code);
+    let diag = out
+        .diagnostics
+        .iter()
+        .find(|item| item.message.contains("Nesting"))
+        .unwrap_or_else(|| panic!("{:?}", out.diagnostics));
+    assert!(
+        diag.start <= inner && inner < diag.end,
+        "span {}..{} does not cover the inner directive at {inner}",
+        diag.start,
+        diag.end
+    );
 }
 
 fn build_with_reports(code: &str) -> ts_ext_typegpu::Transformed {

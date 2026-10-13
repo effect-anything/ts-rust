@@ -50,9 +50,15 @@ Check and LSP see the author's `+`. In a `"use gpu"` or `"use tsover"`
 scope, the checker uses `[Symbol.operatorPlus]` on the left operand, then
 the right operand, and the expression type is that signature's return type.
 `Symbol.deferOperation` moves to the other operand. `number + number` has
-no symbol, so it stays `number`. Emit rewrites the operator to
-`__tsover_add` for the runtime. Build output does not include a numeric
-declaration.
+no symbol, so it stays `number`. A pair with no matching signature is a
+normal operator error (`TS2365`), not `any`. Hover on the operator shows
+that expression type. Emit rewrites the operator to `__tsover_add` for the
+runtime. Build output does not include a numeric declaration.
+
+The directive has to be a real prologue: the first statement of the file,
+or the first statement of the function. An import before `"use tsover"`
+means the directive is not in scope, and `Vec2f + Vec2f` is then an error.
+`tests/fixtures/overload` locks the check.
 
 ## Not a content-mapper extension
 

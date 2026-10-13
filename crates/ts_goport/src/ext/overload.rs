@@ -15,6 +15,24 @@ use crate::checker::Checker;
 use crate::core::{Node, TypeId};
 use crate::flags::{SignatureKind, TypeFlags};
 
+/// The binary expression to show when hover is on an overloaded operator.
+///
+/// Stock quickinfo ignores a `+` token. In a `"use tsover"` or `"use gpu"`
+/// scope the expression type is the overload result, so hover should name it.
+pub fn hover_expression(node: Node) -> Option<Node> {
+    let expr = if node.kind() == SyntaxKind::BinaryExpression {
+        node
+    } else {
+        let parent = node.parent();
+        if parent.kind() == SyntaxKind::BinaryExpression && parent.operator_token() == node {
+            parent
+        } else {
+            return None;
+        }
+    };
+    in_overload_scope(expr).then_some(expr)
+}
+
 /// The type of `left operator right`, when an overload symbol applies.
 pub fn binary_type(
     checker: &mut Checker,

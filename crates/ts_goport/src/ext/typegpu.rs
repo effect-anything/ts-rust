@@ -93,12 +93,21 @@ pub struct EmbedFlags<'a> {
     pub force_tgpu_alias: Option<&'a str>,
 }
 
+/// A body the transpiler cannot print. Offsets are UTF-8 bytes of the
+/// text that was walked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    pub message: String,
+    pub start: u32,
+    pub end: u32,
+}
+
 pub fn embed_metadata_reports(
     filename: &str,
     code: &str,
     auto_name: bool,
 ) -> (String, Vec<String>) {
-    embed_metadata_with(
+    let (code, refusals) = embed_metadata_with(
         filename,
         code,
         &EmbedFlags {
@@ -106,19 +115,25 @@ pub fn embed_metadata_reports(
             early_pruning: false,
             force_tgpu_alias: None,
         },
+    );
+    (
+        code,
+        refusals.into_iter().map(|item| item.message).collect(),
     )
 }
 
 /// [`embed_metadata_reports`] with the plugin switches.
+///
+/// A file that already contains `__TYPEGPU_META__` is still walked. An
+/// already wrapped function is left alone. A new marked function in that
+/// file is wrapped, and a body that cannot be printed is reported at the
+/// node, not dropped with the rest of the file.
 pub fn embed_metadata_with(
     filename: &str,
     code: &str,
     flags: &EmbedFlags<'_>,
-) -> (String, Vec<String>) {
+) -> (String, Vec<Refusal>) {
     if flags.early_pruning && pruned(code) {
-        return (code.to_owned(), Vec::new());
-    }
-    if code.contains("__TYPEGPU_META__") {
         return (code.to_owned(), Vec::new());
     }
     let auto_name = flags.auto_naming;
@@ -413,10 +428,88 @@ fn collect_wraps(
     aliases: &std::collections::BTreeSet<String>,
     auto_name: bool,
     edits: &mut Vec<WrapEdit>,
-) -> Vec<String> {
+) -> Vec<Refusal> {
     let mut work = Build::new(code, aliases.clone(), auto_name);
     walk_wraps(root, &mut work, edits);
     work.unsupported
+}
+
+/// Refusals in author text. Check and LSP call this. It does not rewrite.
+pub fn refusals(filename: &str, code: &str) -> Vec<Refusal> {
+    if !super::tsover::enabled(code) {
+        return Vec::new();
+    }
+    let opts = SourceFileParseOptions {
+        file_name: "/input.ts".to_owned(),
+        ..SourceFileParseOptions::default()
+    };
+    let kind = if filename.ends_with(".tsx") || filename.ends_with(".jsx") {
+        ScriptKind::TSX
+    } else {
+        ScriptKind::TS
+    };
+    let text = crate::ast::FileText::Shared(std::sync::Arc::from(code.to_owned()));
+    let owned = parse_for_transform(&opts, text, kind);
+    collect_refusals(owned.file().root, code)
+}
+
+/// Attach a refusal to the author file so check and LSP can show it.
+pub fn report_refusals(file: &ParsedSourceFile) {
+    if !super::tsover::enabled(&file.text) {
+        return;
+    }
+    let found = collect_refusals(file.root, &file.text);
+    if found.is_empty() {
+        return;
+    }
+    let mut diagnostics = file.diagnostics.clone();
+    for item in found {
+        diagnostics.push(new_external_diagnostic(
+            file.root,
+            TextRange::new(item.start as i32, item.end as i32),
+            MAPPER_NAME,
+            Category::Error,
+            0,
+            &item.message,
+        ));
+    }
+    set_source_file_diagnostics(file.root, diagnostics);
+}
+
+fn collect_refusals(root: Node, code: &str) -> Vec<Refusal> {
+    let mut found = Vec::new();
+    walk_refusals(root, code, &mut found);
+    found
+}
+
+fn walk_refusals(node: Node, code: &str, found: &mut Vec<Refusal>) {
+    if node.is_nil() {
+        return;
+    }
+    if is_function_like_declaration(node) && function_marked(node) && !already_wrapped(node) {
+        let ast = transpile_marked(node, code);
+        if let Some(message) = ast.unsupported {
+            let (start, end) = ast.span.unwrap_or((node.pos(), node.end()));
+            found.push(refusal(message, start, end));
+        }
+        return;
+    }
+    node.for_each_child(|child| {
+        if child != node {
+            walk_refusals(child, code, found);
+        }
+        false
+    });
+}
+
+fn refusal(message: String, start: i32, end: i32) -> Refusal {
+    let start = u32::try_from(start.max(0)).unwrap_or(0);
+    let end = u32::try_from(end.max(0)).unwrap_or(start);
+    Refusal {
+        message,
+        start,
+        end: end.max(start),
+    }
 }
 
 fn walk_wraps(node: Node, work: &mut Build, edits: &mut Vec<WrapEdit>) {
@@ -1109,8 +1202,8 @@ fn join_export_default(text: &str) -> String {
 }
 
 struct Build {
-    /// One message per function whose body upstream's transpiler refuses.
-    unsupported: Vec<String>,
+    /// One refusal per function whose body upstream's transpiler refuses.
+    unsupported: Vec<Refusal>,
     factory: crate::ast::NodeFactory,
     emit: std::rc::Rc<crate::printer::EmitContext>,
     code: String,
@@ -1538,7 +1631,8 @@ fn wrap_function(node: Node, work: &mut Build, marked: bool) -> Node {
     let name = function_name(node, work);
     let ast = transpile_marked(node, &work.code);
     if let Some(message) = ast.unsupported.clone() {
-        work.unsupported.push(message);
+        let (start, end) = ast.span.unwrap_or((node.pos(), node.end()));
+        work.unsupported.push(refusal(message, start, end));
     }
     let _ = marked;
     // The runtime reads the author's operators from this function. The AST
@@ -2966,6 +3060,8 @@ struct Tinyest {
     /// Upstream's transpiler throws on a shape it cannot express. The text is
     /// the error a caller should surface; the body is empty then.
     unsupported: Option<String>,
+    /// Span of the refused node, in the text that was walked.
+    span: Option<(i32, i32)>,
 }
 
 impl Tinyest {
@@ -3027,6 +3123,7 @@ fn transpile_marked(node: Node, code: &str) -> Tinyest {
         declared: params.clone(),
         externals: Vec::new(),
         unsupported: None,
+        span: None,
     };
     let statements = if body.kind() == SyntaxKind::Block {
         body.statements()
@@ -3046,6 +3143,7 @@ fn transpile_marked(node: Node, code: &str) -> Tinyest {
             body: "[0, []]".to_owned(),
             externals: Vec::new(),
             unsupported: Some(message),
+            span: ctx.span,
         };
     }
     Tinyest {
@@ -3053,7 +3151,18 @@ fn transpile_marked(node: Node, code: &str) -> Tinyest {
         body: format!("[0, [{}]]", statements.join(", ")),
         externals: ctx.externals,
         unsupported: None,
+        span: None,
     }
+}
+
+fn refuse(ctx: &mut TinyCtx, code: &str, node: Node, message: String) {
+    if ctx.unsupported.is_some() {
+        return;
+    }
+    ctx.unsupported = Some(message);
+    let start = skip_trivia(code, node.pos()).max(0);
+    let end = node.end().max(start);
+    ctx.span = Some((start, end));
 }
 
 struct TinyCtx {
@@ -3062,6 +3171,7 @@ struct TinyCtx {
     /// Set when a nested function or another shape upstream's transpiler
     /// refuses was found. The body cannot be printed then.
     unsupported: Option<String>,
+    span: Option<(i32, i32)>,
 }
 
 fn is_directive(statement: Node) -> bool {
@@ -3088,8 +3198,12 @@ fn transpile_statement(node: Node, code: &str, ctx: &mut TinyCtx) -> Option<Stri
             if !list.flags().intersects(crate::flags::NodeFlags::CONST)
                 && !list.flags().intersects(crate::flags::NodeFlags::LET)
             {
-                ctx.unsupported
-                    .get_or_insert_with(|| "`var` declarations are not supported.".to_owned());
+                refuse(
+                    ctx,
+                    code,
+                    node,
+                    "`var` declarations are not supported.".to_owned(),
+                );
                 return None;
             }
             let decl = list.declarations().nodes().get(0);
@@ -3223,8 +3337,7 @@ fn transpile_statement(node: Node, code: &str, ctx: &mut TinyCtx) -> Option<Stri
         // skipping it silently would print a shader that is missing work.
         _ => {
             // Upstream: `Unsupported JS functionality: ${node.type}`.
-            ctx.unsupported
-                .get_or_insert_with(|| unsupported_message(node.kind()));
+            refuse(ctx, code, node, unsupported_message(node.kind()));
             None
         }
     }
@@ -3347,9 +3460,12 @@ fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
             ) {
                 // Upstream: "Prefix update expressions are not supported in
                 // WGSL." `a++` is catalog kind 102 and stays supported.
-                ctx.unsupported.get_or_insert_with(|| {
-                    "Prefix update expressions are not supported in WGSL.".to_owned()
-                });
+                refuse(
+                    ctx,
+                    code,
+                    node,
+                    "Prefix update expressions are not supported in WGSL.".to_owned(),
+                );
                 return format!("\"{}\"", slice_node(code, node));
             }
             format!(
@@ -3426,8 +3542,7 @@ fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
                             | SyntaxKind::GetAccessor
                             | SyntaxKind::SetAccessor
                     ) {
-                        ctx.unsupported
-                            .get_or_insert_with(|| unsupported_message(prop.kind()));
+                        refuse(ctx, code, prop, unsupported_message(prop.kind()));
                         return None;
                     }
                     if prop.kind() == SyntaxKind::ShorthandPropertyAssignment {
@@ -3462,8 +3577,7 @@ fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
         // body it cannot express must not claim to be printable. A nested
         // function is the common case: a text blob is not an expression.
         _ => {
-            ctx.unsupported
-                .get_or_insert_with(|| unsupported_message(node.kind()));
+            refuse(ctx, code, node, unsupported_message(node.kind()));
             format!("\"{}\"", slice_node(code, node))
         }
     }

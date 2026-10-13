@@ -251,11 +251,10 @@ already wrapped. Locked in `tests/typegpu.rs`.
 
 - A nested function inside a `"use gpu"` body: the plugin throws
   (`Arrow functions are not supported inside TGSL.`, `Unsupported JS
-  functionality: FunctionDeclaration`). This port keeps the wrapper, marks the
-  body unprintable (`ast` body `[0, []]`, no externals), and reports the same
-  text in `Transformed::diagnostics` with the whole file as the span, because
-  the payload carries no positions. The compiler emit hook returns text only,
-  so it marks the body unprintable and reports nothing.
+  functionality: FunctionDeclaration`). This port keeps the wrapper and marks
+  the body unprintable (`ast` body `[0, []]`, no externals). Check, LSP, and
+  the bundler session report that text at the refused node. The emit hook
+  still returns text only; the diagnostic is attached before emit.
   Locked in `tests/typegpu.rs`.
 - `unstable_obfuscate` is not implemented. That is a decision, not a gap in
   the captured transform cases. The pin's default is off, and it refuses to

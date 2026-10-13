@@ -58,6 +58,9 @@ impl LanguageService {
             let (checker, done) = ls_program::get_type_checker_for_file(program, ctx, file);
             let c = &mut *checker.borrow_mut();
             let mut range_node = get_node_for_quick_info(node);
+            if let Some(expr) = crate::ext::overload::hover_expression(range_node) {
+                range_node = expr;
+            }
             let symbol = get_symbol_at_location_for_quick_info(c, range_node);
 
             // Always create VerbosityContext for hover so that canExpandSymbol can signal
@@ -1648,8 +1651,9 @@ pub fn get_quick_info_and_declaration_at_location(
         };
     }
     if symbol.is_nil() {
-        if should_get_type(node) {
-            let t = w.c.get_type_at_location(node);
+        let overloaded = crate::ext::overload::hover_expression(node);
+        if should_get_type(node) || overloaded.is_some() {
+            let t = w.c.get_type_at_location(overloaded.unwrap_or(node));
             w.write_type_classified(t, container, TYPE_FORMAT_FLAGS);
         }
         return SymbolDisplayInfo {

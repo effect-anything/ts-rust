@@ -20,6 +20,7 @@ use crate::frontend::parser::{ParsedSourceFile, SourceFileParseOptions};
 #[must_use]
 pub fn apply(_opts: &SourceFileParseOptions, file: ParsedSourceFile) -> ParsedSourceFile {
     crate::ext::tsover::report_nesting(&file);
+    crate::ext::typegpu::report_refusals(&file);
     file
 }
 
@@ -168,6 +169,16 @@ pub fn rewrite_emitted_javascript(results: &[crate::emitter::program_emit::EmitR
             }
             let _ = fs.write_file(path, &next.code);
             if next.segments.is_empty() {
+                // The wrapper reprinted the calls, so the old columns would
+                // land inside generated text. Drop the mappings rather than
+                // leave them pointing at the wrong place.
+                let map_path = format!("{path}.map");
+                let (map_text, ok) = fs.read_file(&map_path);
+                if ok {
+                    if let Some(cleared) = clear_source_map(&map_text) {
+                        let _ = fs.write_file(&map_path, &cleared);
+                    }
+                }
                 continue;
             }
             let map_path = format!("{path}.map");
@@ -198,12 +209,25 @@ pub fn emit_output_file(file_name: &str, text: &str, javascript: Option<&str>) -
         };
         let output = emit_output(file_name.trim_end_matches(".map"), javascript);
         if output.segments.is_empty() {
-            return text.to_owned();
+            if output.code == javascript {
+                return text.to_owned();
+            }
+            return clear_source_map(text).unwrap_or_else(|| text.to_owned());
         }
         return compose_source_map(text, javascript, &output.code, &output.segments)
             .unwrap_or_else(|| text.to_owned());
     }
     emit_javascript(file_name, text)
+}
+
+fn clear_source_map(text: &str) -> Option<String> {
+    let mut map = crate::sourcemap::generator::RawSourceMap::default();
+    crate::frontend::json::json_unmarshal(text.as_bytes(), &mut map, &[]).ok()?;
+    if map.version != 3 || map.mappings.is_empty() {
+        return None;
+    }
+    map.mappings.clear();
+    Some(map.to_json())
 }
 
 fn is_source_map(path: &str) -> bool {
@@ -572,5 +596,12 @@ mod tests {
         let lines = crate::scanner_util::compute_ecma_line_starts(text);
         let offset = i32::try_from(offset).unwrap_or(0);
         offset_to_line_character(&lines, text, offset)
+    }
+
+    #[test]
+    fn an_unrewritten_file_keeps_its_map() {
+        let map = r#"{"version":3,"file":"a.js","sources":["a.ts"],"names":[],"mappings":"AAAA"}"#;
+        let out = emit_output_file("a.js.map", map, Some("export const n = 1;\n"));
+        assert_eq!(out, map);
     }
 }

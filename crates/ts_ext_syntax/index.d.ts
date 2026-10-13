@@ -9,6 +9,8 @@ export declare class TransformSession {
    * TypeGPU only. `sourceMap` maps `code` back to the author's file.
    */
   transform(path: string, code: string): Transformed
+  /** Upstream plugin switches. `unstable_obfuscate` is not accepted. */
+  configure(autoNaming?: boolean | undefined | null, earlyPruning?: boolean | undefined | null, forceTgpuAlias?: string | undefined | null, filterId?: boolean | undefined | null, exclude?: string | undefined | null): void
 }
 export type NodeSession = TransformSession
 

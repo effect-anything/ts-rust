@@ -193,10 +193,11 @@ fn build(
     // slices the calls; it does not rewrite a second time. The two parses
     // each take this thread's one detached store, so the rewrite finishes
     // and drops its store before the metadata parse starts.
-    let rewritten = {
-        let rewrite = tsover::rewrite_text(path, code);
-        rewrite.map_or_else(|| code.to_owned(), |rewrite| rewrite.code)
-    };
+    let rewrite = tsover::rewrite_text(path, code);
+    let rewritten = rewrite
+        .as_ref()
+        .map(|item| item.code.clone())
+        .unwrap_or_else(|| code.to_owned());
     let (embedded, unsupported) = typegpu::embed_metadata_with(
         path,
         &rewritten,
@@ -206,17 +207,30 @@ fn build(
             force_tgpu_alias,
         },
     );
-    let end = u32::try_from(code.len()).unwrap_or(u32::MAX);
+    let mut diagnostics = rewrite
+        .as_ref()
+        .map(|item| {
+            item.diagnostics
+                .iter()
+                .map(|diag| Diagnostic {
+                    message: diag.message.clone(),
+                    start: diag.start,
+                    end: diag.end,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    diagnostics.extend(unsupported.into_iter().map(|item| {
+        let (start, end) = map_rewritten(rewrite.as_ref(), item.start, item.end);
+        Diagnostic {
+            message: item.message,
+            start,
+            end,
+        }
+    }));
     Transformed {
         changed: embedded != code,
-        diagnostics: unsupported
-            .into_iter()
-            .map(|message| Diagnostic {
-                message,
-                start: 0,
-                end,
-            })
-            .collect(),
+        diagnostics,
         code: embedded,
         rewrite: None,
     }
@@ -224,12 +238,59 @@ fn build(
 
 fn check(path: &str, code: &str) -> Transformed {
     // Check and LSP keep the author's operators. The compiler types `+`
-    // from `Symbol.operatorPlus`. Build emits `__tsover_*`.
-    let _ = (path, code);
+    // from `Symbol.operatorPlus`. A body that cannot be printed, and a
+    // nested directive, are still reported at the author node.
+    let mut diagnostics = nesting_diagnostics(path, code);
+    diagnostics.extend(typegpu::refusals(path, code).into_iter().map(|item| Diagnostic {
+        message: item.message,
+        start: item.start,
+        end: item.end,
+    }));
     Transformed {
         code: code.to_owned(),
-        diagnostics: Vec::new(),
+        diagnostics,
         changed: false,
         rewrite: None,
     }
+}
+
+fn nesting_diagnostics(path: &str, code: &str) -> Vec<Diagnostic> {
+    tsover::rewrite_text(path, code)
+        .map(|rewrite| {
+            rewrite
+                .diagnostics
+                .into_iter()
+                .map(|item| Diagnostic {
+                    message: item.message,
+                    start: item.start,
+                    end: item.end,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn map_rewritten(rewrite: Option<&tsover::Rewrite>, start: u32, end: u32) -> (u32, u32) {
+    let Some(rewrite) = rewrite else {
+        return (start, end);
+    };
+    (
+        map_offset(&rewrite.segments, start).unwrap_or(start),
+        map_offset(&rewrite.segments, end.saturating_sub(1))
+            .map(|at| at.saturating_add(1))
+            .unwrap_or(end),
+    )
+}
+
+fn map_offset(segments: &[ts_goport::spanmap::Segment], at: u32) -> Option<u32> {
+    let at = i32::try_from(at).unwrap_or(i32::MAX);
+    for segment in segments {
+        if at < segment.virtual_start || at >= segment.virtual_end {
+            continue;
+        }
+        let delta = at - segment.virtual_start;
+        let original = segment.original_start.saturating_add(delta);
+        return Some(u32::try_from(original.min(segment.original_end).max(0)).unwrap_or(0));
+    }
+    None
 }
