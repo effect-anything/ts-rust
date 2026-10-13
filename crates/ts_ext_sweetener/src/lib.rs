@@ -51,13 +51,23 @@ impl Severity {
     }
 }
 
-/// A diagnostic in the original file.
+/// A secondary location a diagnostic points at, in the original file.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelatedLocation {
+    pub message: String,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// A diagnostic in the original file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Diagnostic {
     pub message: String,
     pub start: u32,
     pub end: u32,
     pub severity: Severity,
+    /// Upstream's `relatedOrigins`: where the reader stopped, for example.
+    pub related: Vec<RelatedLocation>,
 }
 
 /// Result of a pre-check expansion.

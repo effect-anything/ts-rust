@@ -126,6 +126,7 @@ impl<'a> Reader<'a> {
                     start: u32_at(start),
                     end: u32_at(self.index),
                     severity: Severity::Error,
+                    related: Vec::new(),
                 });
                 children.push(Syntax::Operator {
                     span: span(start, self.index),
@@ -162,6 +163,7 @@ impl<'a> Reader<'a> {
                 start: u32_at(open_at),
                 end: u32_at(open_at + 1),
                 severity: Severity::Error,
+                related: Vec::new(),
             });
             None
         };

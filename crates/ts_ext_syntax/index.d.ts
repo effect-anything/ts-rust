@@ -18,6 +18,14 @@ export interface Diagnostic {
   end: number
   /** `"error"` or `"warning"`. */
   severity: string
+  /** Secondary locations, such as where the reader stopped. */
+  related: Array<RelatedLocation>
+}
+
+export interface RelatedLocation {
+  message: string
+  start: number
+  end: number
 }
 
 export interface Transformed {

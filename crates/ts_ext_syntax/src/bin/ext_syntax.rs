@@ -54,6 +54,10 @@ fn transform_cli(path: Option<String>) -> ExitCode {
             "{path}({line},{col}): {level} {}",
             report_message(diagnostic.code, &diagnostic.message_text)
         );
+        for (message, start, _) in &diagnostic.related {
+            let (line, col) = line_col(&content, *start);
+            eprintln!("  {path}({line},{col}): {message}");
+        }
     }
     let virtual_path = format!("{path}.virtual{}", response.extension);
     let map_path = format!("{path}.mappings.json");
@@ -165,13 +169,24 @@ fn encode_transform(response: &TransformResponse) -> String {
         if index > 0 {
             diagnostics.push(',');
         }
+        let related: Vec<String> = diagnostic
+            .related
+            .iter()
+            .map(|(message, start, length)| {
+                format!(
+                    r#"{{"messageText":{},"start":{start},"length":{length}}}"#,
+                    json_encode(message)
+                )
+            })
+            .collect();
         diagnostics.push_str(&format!(
-            r#"{{"messageText":{},"start":{},"length":{},"code":{},"category":{}}}"#,
+            r#"{{"messageText":{},"start":{},"length":{},"code":{},"category":{},"relatedInformation":[{}]}}"#,
             json_encode(&diagnostic.message_text),
             diagnostic.start,
             diagnostic.length,
             diagnostic.code,
             diagnostic.category,
+            related.join(","),
         ));
     }
     diagnostics.push(']');

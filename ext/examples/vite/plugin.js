@@ -12,14 +12,24 @@ function strip(id) {
 function publish(ctx, file, code) {
   const result = session.transform(file, code);
   for (const item of result.diagnostics) {
+    const related = (item.related ?? []).map(
+      (at) => `\n  ${file}:${where(code, at.start)} ${at.message}`,
+    );
+    const message = `${file}:${where(code, item.start)} ${item.message}${related.join("")}`;
     if (item.severity === "warning") {
-      ctx.warn({ message: `${file}: ${item.message}`, id: file });
+      ctx.warn({ message, id: file, pos: item.start });
       continue;
     }
-    ctx.error({ message: `${file}: ${item.message}`, id: file });
+    ctx.error({ message, id: file, pos: item.start });
   }
   if (result.code === code) return null;
   return { code: result.code, map: sourceMap(file, code, result) };
+}
+
+function where(code, offset) {
+  const before = Buffer.from(code).subarray(0, offset).toString();
+  const lines = before.split("\n");
+  return `${lines.length}:${lines[lines.length - 1].length + 1}`;
 }
 
 const VLQ = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

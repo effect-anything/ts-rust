@@ -3443,11 +3443,17 @@ mod tests {
             code: bare,
             phase: crate::Phase::Build,
         });
+        // Upstream warns that it could not read these (SWR4025) and passes
+        // them through; nothing is an error.
         assert!(
-            expanded.diagnostics.is_empty(),
+            expanded
+                .diagnostics
+                .iter()
+                .all(|item| item.severity == crate::Severity::Warning),
             "{:?}",
             expanded.diagnostics
         );
+        assert_eq!(expanded.diagnostics.len(), 3, "{:?}", expanded.diagnostics);
         assert!(
             expanded.code.contains("match (1)"),
             "match was rewritten:\n{}",

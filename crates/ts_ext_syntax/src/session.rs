@@ -59,6 +59,8 @@ pub struct SessionDiagnostic {
     pub start: u32,
     pub end: u32,
     pub severity: crate::Severity,
+    /// Secondary locations in the original file (where the reader stopped).
+    pub related: Vec<crate::RelatedLocation>,
 }
 
 impl TransformSession {
@@ -155,6 +157,7 @@ fn apply_typegpu(
             start: item.start,
             end: item.end,
             severity: crate::Severity::Error,
+            related: Vec::new(),
         }));
         return Transformed {
             changed: already_changed || gpu.changed,
@@ -205,6 +208,7 @@ fn apply_typegpu(
                     start: mapped.start,
                     end: mapped.end,
                     severity: crate::Severity::Error,
+                    related: Vec::new(),
                 })
             }));
             diagnostics
@@ -229,6 +233,7 @@ fn diagnostics_of(expansion: &crate::Expansion) -> Vec<SessionDiagnostic> {
             start: item.start,
             end: item.end,
             severity: item.severity,
+            related: item.related.clone(),
         })
         .collect()
 }

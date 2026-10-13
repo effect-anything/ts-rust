@@ -22,6 +22,8 @@ pub struct ProtocolDiagnostic {
     pub code: i32,
     /// TypeScript's `DiagnosticCategory`: 0 warning, 1 error.
     pub category: i32,
+    /// `relatedInformation`: message, start, length in the original file.
+    pub related: Vec<(String, i32, i32)>,
 }
 
 /// The number in an `SWR4001` message. A `TS` prefix is still read so a
@@ -70,6 +72,17 @@ pub fn transform_file(file_name: &str, content: &str) -> TransformResponse {
                     crate::Severity::Warning => 0,
                     crate::Severity::Error => 1,
                 },
+                related: item
+                    .related
+                    .iter()
+                    .map(|related| {
+                        (
+                            related.message.clone(),
+                            i32::try_from(related.start).unwrap_or(0),
+                            i32::try_from(related.end.saturating_sub(related.start)).unwrap_or(0),
+                        )
+                    })
+                    .collect(),
             })
             .collect(),
     }
@@ -92,5 +105,23 @@ mod tests {
         let response = transform_file("a.ts", code);
         assert_eq!(response.text, code);
         assert_eq!(response.extension, ".ts");
+    }
+
+    #[test]
+    fn unread_item_is_a_warning_with_a_related_location() {
+        let code = "const x = foo 1;\n";
+        let response = transform_file("a.sts", code);
+        assert_eq!(response.diagnostics.len(), 1);
+        let item = &response.diagnostics[0];
+        assert_eq!(item.category, 0);
+        assert_eq!(item.code, 4025);
+        assert_eq!(
+            item.related,
+            vec![(
+                "The reader expected ';' or automatic terminator here.".to_owned(),
+                14,
+                1
+            )]
+        );
     }
 }

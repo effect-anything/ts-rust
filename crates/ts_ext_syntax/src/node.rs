@@ -15,6 +15,15 @@ pub struct NodeDiagnostic {
     pub end: u32,
     /// `"error"` or `"warning"`.
     pub severity: String,
+    /// Secondary locations, such as where the reader stopped.
+    pub related: Vec<RelatedLocation>,
+}
+
+#[napi(object, js_name = "RelatedLocation")]
+pub struct RelatedLocation {
+    pub message: String,
+    pub start: u32,
+    pub end: u32,
 }
 
 #[napi(object, js_name = "Transformed")]
@@ -75,5 +84,14 @@ fn to_diagnostic(value: SessionDiagnostic) -> NodeDiagnostic {
         start: value.start,
         end: value.end,
         severity: value.severity.as_str().to_owned(),
+        related: value
+            .related
+            .into_iter()
+            .map(|item| RelatedLocation {
+                message: item.message,
+                start: item.start,
+                end: item.end,
+            })
+            .collect(),
     }
 }

@@ -757,3 +757,57 @@ wrap function C({ id }) { }\n\
         "{kept}"
     );
 }
+
+/// Upstream reports `const x = foo 1;` where its reader stopped (`1`), and
+/// names that place as a related location. Checked against the CLI.
+#[test]
+fn unread_item_two_operands_point_at_the_second() {
+    let code = "const x = foo 1;\nconst y = 2;\nlet z = a b c\nvar w = 3;\nconst k = foo \"s\";\nconst m = x as any;\n";
+    let out = expand(ExpandRequest {
+        filename: "t.sts",
+        code,
+        phase: Phase::Check,
+    });
+    let lines: Vec<(usize, usize)> = out
+        .diagnostics
+        .iter()
+        .map(|item| {
+            let at = item.related[0].start as usize;
+            let line = code[..at].matches('\n').count() + 1;
+            let column = at - code[..at].rfind('\n').map_or(0, |nl| nl + 1) + 1;
+            (line, column)
+        })
+        .collect();
+    assert_eq!(lines, vec![(1, 15), (3, 11), (5, 15)]);
+    assert!(
+        out.diagnostics
+            .iter()
+            .all(|d| d.severity == Severity::Warning)
+    );
+    assert_eq!(
+        out.diagnostics[0].related[0].message,
+        "The reader expected ';' or automatic terminator here."
+    );
+}
+
+/// A variable that reads but runs into a non-item token without `;` takes
+/// everything to the next `;` with it, unreported, as upstream's
+/// `incompleteVariable` recovery does. The later `let (-)` is inside it.
+#[test]
+fn incomplete_variable_swallows_later_unread_items() {
+    let code = "var stuff = (f) => (x) => {\n  return f(x);\n}\n\n@stuff\nfunction test(x, y) {\n  return 3 + 3\n}\n\nlet (-) = macro {\n  rule { $x } => { $x }\n}\n";
+    let out = expand(ExpandRequest {
+        filename: "t.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert_eq!(codes(&out), Vec::<String>::new());
+    let alone = "let (-) = macro {\n  rule { $x } => { $x }\n}\n";
+    let out = expand(ExpandRequest {
+        filename: "t.sts",
+        code: alone,
+        phase: Phase::Check,
+    });
+    assert_eq!(codes(&out), vec!["SWR4025"]);
+    assert_eq!(out.diagnostics[0].related[0].start, 4);
+}

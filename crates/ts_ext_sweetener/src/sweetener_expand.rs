@@ -179,6 +179,7 @@ fn expand_pass(
                 start: macro_.head.start,
                 end: macro_.head.end,
                 severity: Severity::Error,
+                related: Vec::new(),
             });
         }
         if local_dispatchable(&macro_) {
@@ -233,9 +234,13 @@ fn expand_pass(
         printer.segments.clear();
     }
     // Warnings come last so they never count as a failed expansion above.
-    printer
-        .diagnostics
-        .extend(unread_items(source, &read.children));
+    let unread = unread_items(
+        source,
+        &read.children,
+        &printer.segments,
+        &printer.diagnostics,
+    );
+    printer.diagnostics.extend(unread);
     let code = super::sweetener_hygiene::assign(
         &printer.out,
         &mut printer.segments,
@@ -304,6 +309,7 @@ fn malformed(message: &str, span: Span) -> Diagnostic {
         start: span.start,
         end: span.end,
         severity: Severity::Error,
+        related: Vec::new(),
     }
 }
 
@@ -421,16 +427,185 @@ const RESERVED_BINDING_WORDS: &[&str] = &[
     "with",
 ];
 
-/// SWR4025: a top-level `let`/`const`/`var` item that upstream's reader cannot
-/// read and passes through as written (legacy sweet.js `let x = macro { ... }`
-/// blocks are the common case). Two failures are recognised, as upstream
-/// reports them:
-/// - the binding is a reserved word or an operator group (`let function = ...`,
-///   `let (+) = ...`): "variable binding";
-/// - the initializer is a word directly followed by a `{` group on the same
-///   line (`let go = macro {`): "';' or automatic terminator".
-fn unread_items(source: &str, nodes: &[Syntax]) -> Vec<Diagnostic> {
-    let mut out = Vec::new();
+/// The words that begin a module item and nothing else (upstream's
+/// `definiteItemStarts`). Recovery stops where one of them begins a line.
+const DEFINITE_ITEM_STARTS: &[&str] = &[
+    "abstract",
+    "class",
+    "const",
+    "declare",
+    "enum",
+    "export",
+    "function",
+    "import",
+    "interface",
+    "let",
+    "module",
+    "namespace",
+    "type",
+    "var",
+];
+
+/// Words that join two operands (`a as T`) or begin one (`new X`), so two
+/// words in a row are not a missing terminator.
+const JOINING_WORDS: &[&str] = &[
+    "as",
+    "satisfies",
+    "in",
+    "instanceof",
+    "of",
+    "is",
+    "extends",
+    "keyof",
+    "typeof",
+    "new",
+    "await",
+    "void",
+    "delete",
+    "yield",
+    "async",
+    "function",
+    "class",
+    "readonly",
+    "unique",
+    "infer",
+];
+
+/// Where upstream's reader gives up on a top-level `let`/`const`/`var`, and
+/// what it expected there.
+fn unread_failure(source: &str, nodes: &[Syntax], head: usize) -> Option<(usize, &'static str)> {
+    let mut binding = head + 1;
+    skip_comments(nodes, &mut binding);
+    let binding_node = nodes.get(binding)?;
+    let reserved = matches!(binding_node, Syntax::Token { raw, .. } if RESERVED_BINDING_WORDS.contains(&raw.as_str()))
+        || matches!(
+            binding_node,
+            Syntax::Group {
+                delimiter: Delimiter::Paren,
+                ..
+            }
+        );
+    if reserved {
+        return Some((binding, "variable binding"));
+    }
+    if !operator_is(nodes.get(binding + 1), "=") {
+        return None;
+    }
+    // `const v = #[..]`: no expression starts with that operator.
+    let mut first = binding + 2;
+    skip_comments(nodes, &mut first);
+    if let Some(Syntax::Operator { raw, .. }) = nodes.get(first) {
+        if !matches!(raw.as_str(), "!" | "-" | "+" | "~" | "<" | "/" | "." | "@") {
+            return Some((first, "variable initializer"));
+        }
+    }
+    // Two operands in a row on one line: `foo 1`, `a b`, `macro { .. }`.
+    let operand = |node: Option<&Syntax>| match node {
+        Some(Syntax::Token { raw, .. }) => {
+            !JOINING_WORDS.contains(&raw.as_str())
+                && matches!(
+                    token_kind(raw),
+                    Some("identifier" | "keyword" | "numeric-literal" | "bigint-literal")
+                )
+                && !raw.is_empty()
+        }
+        Some(Syntax::String { raw, .. }) => !raw.starts_with('`'),
+        _ => false,
+    };
+    let mut at = binding + 2;
+    while at + 1 < nodes.len() {
+        if operator_is(nodes.get(at), ";") || line_break_between(source, nodes, at + 1) {
+            break;
+        }
+        let next = nodes.get(at + 1);
+        let word = matches!(nodes.get(at), Some(Syntax::Token { raw, .. }) if token_kind(raw) == Some("identifier"));
+        let brace = matches!(
+            next,
+            Some(Syntax::Group {
+                delimiter: Delimiter::Brace,
+                ..
+            })
+        );
+        if operand(nodes.get(at)) && (operand(next) || (word && brace)) {
+            return Some((at + 1, "';' or automatic terminator"));
+        }
+        // `match (1) { .. }`: a call does not take a block.
+        let call = matches!(
+            next,
+            Some(Syntax::Group {
+                delimiter: Delimiter::Paren,
+                ..
+            })
+        );
+        let block_after = at + 2 < nodes.len()
+            && !line_break_between(source, nodes, at + 2)
+            && matches!(
+                nodes.get(at + 2),
+                Some(Syntax::Group {
+                    delimiter: Delimiter::Brace,
+                    ..
+                })
+            );
+        if word && call && block_after {
+            return Some((at + 2, "';' or automatic terminator"));
+        }
+        at += 1;
+    }
+    None
+}
+
+/// Where a readable `let`/`const`/`var` item ends: at its `;`, or before the
+/// first node on a new line that cannot continue the initializer.
+fn variable_item_end(source: &str, nodes: &[Syntax], head: usize) -> (usize, bool) {
+    let mut at = head + 1;
+    while at < nodes.len() {
+        if operator_is(nodes.get(at), ";") {
+            return (at + 1, true);
+        }
+        if at > head + 1 && line_break_between(source, nodes, at) {
+            let prev_continues =
+                matches!(&nodes[at - 1], Syntax::Operator { raw, .. } if raw != ")" && raw != "]");
+            let continues = matches!(
+                &nodes[at],
+                Syntax::Operator { raw, .. }
+                    if matches!(raw.as_str(), "." | "?" | "+" | "-" | "*" | "/" | "%" | "=" | "," | "|" | "&" | "<" | ">" | ":" | "!" | "^")
+            ) || matches!(
+                &nodes[at],
+                Syntax::Group {
+                    delimiter: Delimiter::Paren | Delimiter::Bracket,
+                    ..
+                }
+            );
+            if !prev_continues && !continues {
+                return (at, false);
+            }
+        }
+        at += 1;
+    }
+    (at, false)
+}
+
+/// SWR4025, upstream's `reportUnreadItems`. A top-level item the reader
+/// cannot read is recovered as written: the run reaches its `;`, or stops
+/// before a definite item start on a new line. It is reported when the run
+/// begins at a definite item start, every token of it still stands in the
+/// output (nothing in it was rewritten), and no other diagnostic speaks
+/// about it. A variable that reads but runs into a non-item token without
+/// `;` swallows everything to the next `;`, unreported, as upstream does.
+fn unread_items(
+    source: &str,
+    nodes: &[Syntax],
+    segments: &[Segment],
+    reported: &[Diagnostic],
+) -> Vec<Diagnostic> {
+    let survives = |start: usize, end: usize| {
+        segments.iter().any(|segment| {
+            segment.kind == SegmentKind::Verbatim
+                && segment.original_start as usize <= start
+                && end <= segment.original_end as usize
+        })
+    };
+    let mut out: Vec<Diagnostic> = Vec::new();
     let mut index = 0;
     while index < nodes.len() {
         let at_item_start = index == 0
@@ -443,75 +618,85 @@ fn unread_items(source: &str, nodes: &[Syntax]) -> Vec<Diagnostic> {
                 }) | Some(Syntax::Comment { .. })
             )
             || line_break_between(source, nodes, index);
-        if !at_item_start
-            || !["let", "const", "var"]
-                .iter()
-                .any(|word| token_at(nodes, index, word))
-        {
+        let variable = ["let", "const", "var"]
+            .iter()
+            .any(|word| token_at(nodes, index, word));
+        if !at_item_start || !variable {
             index += 1;
             continue;
         }
         let head = index;
-        let mut binding = head + 1;
-        skip_comments(nodes, &mut binding);
-        let binding_node = nodes.get(binding);
-        let reserved = matches!(binding_node, Some(Syntax::Token { raw, .. }) if RESERVED_BINDING_WORDS.contains(&raw.as_str()))
-            || matches!(
-                binding_node,
-                Some(Syntax::Group {
-                    delimiter: Delimiter::Paren,
-                    ..
-                })
-            );
-        let failure = if reserved {
-            binding_node.map(|node| (node_start(node), "variable binding"))
-        } else if matches!(binding_node, Some(Syntax::Token { .. }))
-            && operator_is(nodes.get(binding + 1), "=")
-            && matches!(nodes.get(binding + 2), Some(Syntax::Token { raw, .. }) if token_kind(raw) == Some("identifier"))
-            && matches!(
-                nodes.get(binding + 3),
-                Some(Syntax::Group {
-                    delimiter: Delimiter::Brace,
-                    ..
-                })
-            )
-            && !line_break_between(source, nodes, binding + 3)
-        {
-            nodes
-                .get(binding + 3)
-                .map(|node| (node_start(node), "';' or automatic terminator"))
-        } else {
-            None
-        };
-        let Some((stopped, expected)) = failure else {
-            index += 1;
+        let Some((stopped, expected)) = unread_failure(source, nodes, head) else {
+            let (end, terminated) = variable_item_end(source, nodes, head);
+            let next = nodes.get(end);
+            let swallows = !terminated
+                && matches!(next, Some(Syntax::Token { raw, .. } | Syntax::Operator { raw, .. }) if !DEFINITE_ITEM_STARTS.contains(&raw.as_str()));
+            index = if swallows {
+                (end..nodes.len())
+                    .find(|at| operator_is(nodes.get(*at), ";"))
+                    .map_or(nodes.len(), |at| at + 1)
+            } else {
+                end.max(head + 1)
+            };
             continue;
         };
-        // The item runs through its first `{` group (the macro body), or to `;`.
-        let mut end = head + 1;
+        // The recovered run.
+        let mut end = head;
         while end < nodes.len() {
-            match &nodes[end] {
-                Syntax::Group {
-                    delimiter: Delimiter::Brace,
-                    ..
-                } => break,
-                Syntax::Operator { raw, .. } if raw == ";" => break,
-                _ => end += 1,
+            if operator_is(nodes.get(end), ";") {
+                break;
             }
+            let following = end + 1;
+            if following < nodes.len()
+                && line_break_between(source, nodes, following)
+                && matches!(nodes.get(following), Some(Syntax::Token { raw, .. }) if DEFINITE_ITEM_STARTS.contains(&raw.as_str()))
+            {
+                break;
+            }
+            end += 1;
         }
         let end = end.min(nodes.len() - 1);
+        index = end + 1;
+        let start = node_start(&nodes[head]);
+        let finish = node_end(&nodes[end]);
+        let mut tokens = Vec::new();
+        collect_token_spans(&nodes[head..=end], &mut tokens);
+        if !tokens.iter().all(|(from, to)| survives(*from, *to)) {
+            continue;
+        }
+        let mentioned = reported.iter().chain(out.iter()).any(|diagnostic| {
+            (diagnostic.start as usize) < finish && start < diagnostic.end as usize
+        });
+        if mentioned {
+            continue;
+        }
+        let stopped = &nodes[stopped.min(end)];
         out.push(Diagnostic {
             message: format!(
                 "SWR4025: Sweetener could not read this item, so it was passed through as written and no macro in it was expanded. Its reader expected {expected}. TypeScript may well accept the item as written -- a reader that cannot read it is a gap in Sweetener rather than a mistake here."
             ),
-            start: u32::try_from(node_start(&nodes[head])).unwrap_or(0),
-            end: u32::try_from(node_end(&nodes[end])).unwrap_or(0),
+            start: u32_at(start),
+            end: u32_at(finish),
             severity: Severity::Warning,
+            related: vec![crate::RelatedLocation {
+                message: format!("The reader expected {expected} here."),
+                start: u32_at(node_start(stopped)),
+                end: u32_at(node_end(stopped)),
+            }],
         });
-        let _ = stopped;
-        index = end + 1;
     }
     out
+}
+
+/// Source spans of every token under `nodes`, comments excluded.
+fn collect_token_spans(nodes: &[Syntax], out: &mut Vec<(usize, usize)>) {
+    for node in nodes {
+        match node {
+            Syntax::Group { children, .. } => collect_token_spans(children, out),
+            Syntax::Comment { .. } => {}
+            other => out.push((node_start(other), node_end(other))),
+        }
+    }
 }
 
 /// Whether a line break separates `nodes[index]` from the node before it.
@@ -1179,6 +1364,7 @@ impl<'a> Printer<'a> {
                 start: at.start,
                 end: at.end,
                 severity: Severity::Error,
+                related: Vec::new(),
             });
             return self.skip_failed(nodes, index);
         }
@@ -1968,6 +2154,7 @@ impl<'a> Printer<'a> {
                         start,
                         end,
                         severity: Severity::Error,
+                        related: Vec::new(),
                     });
                 } else {
                     let rules: Vec<Rule> = self
@@ -2108,6 +2295,7 @@ impl<'a> Printer<'a> {
                 start,
                 end,
                 severity: Severity::Error,
+                related: Vec::new(),
             });
         }
     }
@@ -2156,6 +2344,7 @@ impl<'a> Printer<'a> {
             start: span.start,
             end: span.end,
             severity: Severity::Error,
+            related: Vec::new(),
         });
     }
 
@@ -2247,6 +2436,7 @@ impl<'a> Printer<'a> {
             start: span.start,
             end: span.end,
             severity: Severity::Error,
+            related: Vec::new(),
         });
     }
 
@@ -2615,6 +2805,7 @@ fn load_syntax_module(
             start,
             end,
             severity: Severity::Error,
+            related: Vec::new(),
         });
         return;
     };
@@ -2658,6 +2849,7 @@ fn load_syntax_module(
                     start: import.span.start,
                     end: import.span.end,
                     severity: Severity::Error,
+                    related: Vec::new(),
                 });
             }
             if report && macro_.shadows_core && !core_shadow_valid(&macro_) {
@@ -2669,6 +2861,7 @@ fn load_syntax_module(
                     start: import.span.start,
                     end: import.span.end,
                     severity: Severity::Error,
+                    related: Vec::new(),
                 });
             }
             // A core form is dispatched as core unless both the definition
@@ -2690,6 +2883,7 @@ fn load_syntax_module(
                 start: import.span.start,
                 end: import.span.end,
                 severity: Severity::Error,
+                related: Vec::new(),
             });
         }
     }
