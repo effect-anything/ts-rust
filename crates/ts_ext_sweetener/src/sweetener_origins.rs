@@ -135,102 +135,80 @@ fn lcs_pairs(
     if n == 0 || m == 0 {
         return Vec::new();
     }
-    // Furthest `i` on each diagonal k = i - j. `trace[d][k]` is the snake
-    // start `(i, j, inserted)` reached at edit distance d. Both are `Vec`s
-    // indexed by `k + d_offset`, so a negative diagonal never underflows,
-    // and the trace is one row per distance rather than one entry per point.
+    // Myers: `v[k]` is the furthest `i` reached on diagonal k = i - j.
+    // The index of diagonal k is `k + offset`. `trace[d]` is `v` before
+    // edit distance d. `v[1]` starts at 0, which is the sentinel the d = 0
+    // step reads; every other value it reads was written by an earlier
+    // distance. On a tie (`v[k - 1] == v[k + 1]`) the step deletes an old
+    // token, the same choice as the quadratic walk's `>=` test.
     let max_d = n + m;
-    let span = max_d * 2 + 3;
-    let shift = max_d + 1;
-    let slot = |k: isize| (k + shift as isize) as usize;
-    let mut v = vec![None; span];
-    let mut trace: Vec<Vec<Option<(usize, usize, bool)>>> = Vec::with_capacity(max_d + 1);
+    let offset = max_d as isize;
+    let idx = |k: isize| (k + offset) as usize;
+    let mut v = vec![0isize; max_d * 2 + 1];
+    let mut trace: Vec<Vec<isize>> = Vec::with_capacity(max_d + 1);
     let mut found = None;
     for d in 0..=max_d {
-        let snapshot = v.clone();
+        trace.push(v.clone());
         let d_i = d as isize;
-        let mut row = vec![None; span];
         let mut k = -d_i;
         while k <= d_i {
-            let left = snapshot.get(slot(k - 1)).and_then(|p| *p);
-            let above = snapshot.get(slot(k + 1)).and_then(|p| *p);
-            // An unreached side is not a candidate. A tie between two
-            // reached sides deletes the old token, as the DP's `>=` does.
-            let down = above.is_some()
-                && (left.is_none()
-                    || d == 0
-                    || k == -d_i
-                    || (k != d_i && left.unwrap() > above.unwrap()));
-            let mut i: usize = if down {
-                above.unwrap()
+            let mut i = if k == -d_i || (k != d_i && v[idx(k - 1)] < v[idx(k + 1)]) {
+                v[idx(k + 1)]
             } else {
-                left.map_or(0, |x| x + 1)
+                v[idx(k - 1)] + 1
             };
-            // j = i - k by the diagonal. A step that would pass the end of
-            // a sequence is clamped back, so the snake starts inside both.
-            if i as isize - k < 0 {
-                i = (k.max(0)) as usize;
-            } else if i as isize - k > m as isize {
-                i = (m as isize + k) as usize;
-            }
-            let j = (i as isize - k) as usize;
-            let (start_i, start_j) = (i, j);
-            let mut j = j;
-            while i < n && j < m && same(i, j) {
+            let mut j = i - k;
+            while i < n as isize && j < m as isize && same(i as usize, j as usize) {
                 i += 1;
                 j += 1;
             }
-            v[slot(k)] = Some(i);
-            row[slot(k)] = Some((start_i, start_j, down));
-            if i >= n && j >= m {
+            v[idx(k)] = i;
+            if i >= n as isize && j >= m as isize {
                 found = Some(d);
                 break;
             }
             k += 2;
         }
-        trace.push(row);
         if found.is_some() {
             break;
         }
     }
     let found = found.unwrap_or(max_d);
 
-    // Walk back one distance at a time. The row for that distance has the
-    // snake start of the diagonal we are on; the step before it moves to
-    // the previous distance.
+    // Reverse the script. `trace[d]` is the frontier before distance d, so
+    // the snake at d runs from one step off that frontier to where `v`
+    // ended. What remains after distance 1 is the d = 0 snake.
     let mut edits_rev: Vec<u8> = Vec::new();
-    let (mut i, mut j) = (n, m);
-    for d in (0..=found).rev() {
-        let k = i as isize - j as isize;
-        let Some((start_i, start_j, down)) = trace[d][slot(k)] else {
-            break;
+    let (mut i, mut j) = (n as isize, m as isize);
+    for d in (1..=found).rev() {
+        let prev = &trace[d];
+        let d_i = d as isize;
+        let k = i - j;
+        let down = k == -d_i || (k != d_i && prev[idx(k - 1)] < prev[idx(k + 1)]);
+        let (prev_i, prev_j) = if down {
+            let prev_i = prev[idx(k + 1)];
+            (prev_i, prev_i - (k + 1))
+        } else {
+            let prev_i = prev[idx(k - 1)];
+            (prev_i, prev_i - (k - 1))
         };
-        while i > start_i && j > start_j {
+        while i > prev_i && j > prev_j {
             i -= 1;
             j -= 1;
-            if same(i, j) {
-                edits_rev.push(0);
-            }
+            edits_rev.push(0);
         }
-        if d == 0 {
-            break;
-        }
-        if down && j > 0 {
+        if down {
             edits_rev.push(2);
             j -= 1;
-        } else if i > 0 {
+        } else {
             edits_rev.push(1);
             i -= 1;
-        } else {
-            break;
         }
     }
     while i > 0 && j > 0 {
         i -= 1;
         j -= 1;
-        if same(i, j) {
-            edits_rev.push(0);
-        }
+        edits_rev.push(0);
     }
     edits_rev.reverse();
 
