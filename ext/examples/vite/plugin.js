@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { TransformSession } from "ext-syntax";
+import { TransformSession } from "@effect-x/tsc";
 import { transformWithEsbuild } from "vite";
 
 const session = TransformSession.build();
@@ -53,9 +53,9 @@ function sourceMap(file, original, result) {
   };
 }
 
-export function extSyntax() {
+export function tscExt() {
   return {
-    name: "ext-syntax",
+    name: "tsc-ext",
     enforce: "pre",
     async resolveId(source, importer) {
       if (!importer || !source.startsWith(".")) return null;

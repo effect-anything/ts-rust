@@ -100,7 +100,7 @@ pub fn default_threads() -> usize {
 /// Start [`prewarm`] of the project whose config is `config_file` (or the
 /// directory itself) on a background thread.
 pub fn prewarm_in_background(config_file: &str) -> Option<std::thread::JoinHandle<usize>> {
-    if std::env::var_os("EXT_SYNTAX_NO_PREWARM").is_some() || config_file.is_empty() {
+    if std::env::var_os("TSC_EXT_NO_PREWARM").is_some() || config_file.is_empty() {
         return None;
     }
     let path = Path::new(config_file);
@@ -110,7 +110,7 @@ pub fn prewarm_in_background(config_file: &str) -> Option<std::thread::JoinHandl
         path.parent()?.to_path_buf()
     };
     std::thread::Builder::new()
-        .name("ext-syntax-prewarm".to_owned())
+        .name("tsc-ext-prewarm".to_owned())
         .spawn(move || prewarm(project_files(&root), default_threads()))
         .ok()
 }

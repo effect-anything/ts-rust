@@ -1,4 +1,4 @@
-//! Where an ext-syntax transform spends its time, per stage.
+//! Where an tsc-ext transform spends its time, per stage.
 //!
 //! `cargo run --release -p ts_ext_syntax --example transform_stages -- [--runs N] <file>...`
 //!

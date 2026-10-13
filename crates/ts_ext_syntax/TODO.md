@@ -7,7 +7,7 @@ Sweetener cases are flat directories under `crates/ts_ext_sweetener/cases`, one 
 - [x] A failed expansion returns no virtual TypeScript, so the parser does not see the Sweetener source
 - [x] Other files stay separate transforms
 - [x] The 16 `malformed` cases match the phrase in `expected.malformed.diagnostics.json`. A hole in `->` or `#` is not repaired into a call
-- [x] `ext-syntax transform` prints `file.sts(line,col): error <code>: message`
+- [x] `tsc-ext transform` prints `file.sts(line,col): error <code>: message`
 - [x] Diagnostic codes use one prefix. Reader errors are `SWR1002` and `SWR1003`. A missing template directive, a syntax import that cannot be loaded, and "No rule for macro" are `SWR4001`. `expected.malformed.diagnostics.json` uses `SWR` only. `report_message` keeps a message that already starts with `SWR` or `TS`, and prints a bare code as `SWR<code>`.
 
 ## Source map

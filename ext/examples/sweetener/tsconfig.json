@@ -13,5 +13,5 @@
     "types": ["react"]
   },
   "include": ["src"],
-  "contentMappers": [{ "package": "ext-syntax", "extensions": [".sts", ".stsx"] }]
+  "contentMappers": [{ "package": "@effect-x/tsc", "extensions": [".sts", ".stsx"] }]
 }

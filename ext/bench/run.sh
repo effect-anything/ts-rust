@@ -6,7 +6,7 @@
 # 1. expand_bench (in-process): cold / modules-warm / memo-hit / build
 #    on bench.stsx, a synthetic file of `copies` bodies, and the largest
 #    Sweetener cases.
-# 2. ext-syntax transform (process, protocol and v3 map included).
+# 2. tsc-ext transform (process, protocol and v3 map included).
 # 3. vite build of ext/examples/vite.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -16,7 +16,7 @@ trap 'rm -rf "$work"' EXIT
 
 cd "$root"
 cargo build --release -q -p ts_ext_sweetener --example expand_bench
-cargo build --release -q -p ts_ext_syntax --bin ext-syntax
+cargo build --release -q -p ts_ext_syntax --bin tsc-ext
 
 cp ext/bench/fixture/*.sts ext/bench/fixture/bench.stsx "$work/"
 python3 - "$work" "$copies" <<'PY'
@@ -39,12 +39,12 @@ echo
 target/release/examples/expand_bench "$work/bench.stsx" "$work/big.stsx" $largest
 
 echo
-echo "## ext-syntax transform (release process, median of 5)"
+echo "## tsc-ext transform (release process, median of 5)"
 echo
 echo "| file | median s |"
 echo "| --- | ---: |"
 for f in "$work/bench.stsx" "$work/big.stsx"; do
-  python3 - "$root/target/release/ext-syntax" "$f" <<'PY'
+  python3 - "$root/target/release/tsc-ext" "$f" <<'PY'
 import subprocess, sys, time, statistics, os
 tool, f = sys.argv[1], sys.argv[2]
 times = []

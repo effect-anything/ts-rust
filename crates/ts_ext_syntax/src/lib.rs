@@ -2,7 +2,7 @@
 //!
 //! A `.sts` file is expanded by [`ts_ext_sweetener`], then
 //! [`ts_ext_typegpu::TypegpuSession`] rewrites operators and, on build,
-//! wraps marked functions. `ext-syntax` and the Node API stay here.
+//! wraps marked functions. `tsc-ext` and the Node API stay here.
 //! `tsgo` does not link this crate. It calls `ts_goport::ext` from its
 //! own parse hook.
 //!

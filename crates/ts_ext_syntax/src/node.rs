@@ -2,7 +2,7 @@
 //!
 //! `napi build` writes `index.js` and `index.d.ts` beside this crate.
 //! The content-mapper process is
-//! `ext-syntax` and does not go through this module.
+//! `tsc-ext` and does not go through this module.
 
 use napi_derive::napi;
 

@@ -12,10 +12,10 @@ linkBinary(
   "cargo build -p ts_goport --bin tsgo",
 );
 linkBinary(
-  join(repoRoot, "target", "debug", "ext-syntax"),
-  join(repoRoot, "crates", "ts_ext_syntax", "bin", "ext-syntax"),
-  join("..", "..", "..", "target", "debug", "ext-syntax"),
-  "cargo build -p ts_ext_syntax --bin ext-syntax",
+  join(repoRoot, "target", "debug", "tsc-ext"),
+  join(repoRoot, "crates", "ts_ext_syntax", "bin", "tsc-ext"),
+  join("..", "..", "..", "target", "debug", "tsc-ext"),
+  "cargo build -p ts_ext_syntax --bin tsc-ext",
 );
 
 function linkBinary(debug, dest, relative, build) {

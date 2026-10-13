@@ -1,7 +1,7 @@
 //! Content mapper and standalone transform.
 //!
 //! With no arguments this process speaks the content-mapper protocol on
-//! stdin/stdout. `ext-syntax transform <file>` writes the virtual
+//! stdin/stdout. `tsc-ext transform <file>` writes the virtual
 //! TypeScript and the span-map JSON beside it. `tsgo` does not link this
 //! binary; a tsconfig `contentMappers` entry starts it.
 
@@ -19,7 +19,7 @@ fn main() -> ExitCode {
         Some("transform") => transform_cli(args.next()),
         Some("help") | Some("-h") | Some("--help") => {
             eprintln!(
-                "ext-syntax\n  (no args)          content mapper on stdin/stdout\n  transform <file>   write <file>.virtual.ts and <file>.mappings.json"
+                "tsc-ext\n  (no args)          content mapper on stdin/stdout\n  transform <file>   write <file>.virtual.ts and <file>.mappings.json"
             );
             ExitCode::SUCCESS
         }
@@ -32,7 +32,7 @@ fn main() -> ExitCode {
 
 fn transform_cli(path: Option<String>) -> ExitCode {
     let Some(path) = path else {
-        eprintln!("usage: ext-syntax transform <file>");
+        eprintln!("usage: tsc-ext transform <file>");
         return ExitCode::from(2);
     };
     let content = match fs::read_to_string(&path) {
@@ -108,13 +108,13 @@ fn serve() -> ExitCode {
             Ok(Some(message)) => message,
             Ok(None) => return ExitCode::SUCCESS,
             Err(err) => {
-                eprintln!("ext-syntax: {err}");
+                eprintln!("tsc-ext: {err}");
                 return ExitCode::from(1);
             }
         };
         let response = handle(&message);
         if let Err(err) = write_message(&mut stdout, &response) {
-            eprintln!("ext-syntax: {err}");
+            eprintln!("tsc-ext: {err}");
             return ExitCode::from(1);
         }
     }
@@ -126,7 +126,7 @@ fn handle(message: &str) -> String {
     let params = json_object(message, "params");
     let result = match method.as_str() {
         "initialize" => {
-            r#"{"positionEncoding":"utf-8","diagnosticSource":"ext-syntax"}"#.to_owned()
+            r#"{"positionEncoding":"utf-8","diagnosticSource":"tsc-ext"}"#.to_owned()
         }
         "openProject" => {
             // Expand the project's files in the background so the first

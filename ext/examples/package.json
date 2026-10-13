@@ -9,7 +9,7 @@
   },
   "devDependencies": {
     "@types/react": "^18.3.18",
-    "ext-syntax": "file:../../crates/ts_ext_syntax",
+    "@effect-x/tsc": "file:../../crates/ts_ext_syntax",
     "react": "^18.3.1",
     "tsover-runtime": "0.0.7",
     "typegpu": "0.12.7",

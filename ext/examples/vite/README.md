@@ -20,7 +20,7 @@ Macros live under `macros/`, one category per file, the same split as the Sweete
 
 `vertex` and `fragment` in `flower.sts` are `"use gpu"` functions.
 
-The plugin loads `ext-syntax` (`TransformSession`). That package's native addon is a build output, not a committed file. From the repo root, build it before `npm install` in `ext/examples` (the workspace depends on `file:../../crates/ts_ext_syntax`, and `index.js` loads `./ext-syntax.<platform>.node`):
+The plugin loads `tsc-ext` (`TransformSession`). That package's native addon is a build output, not a committed file. From the repo root, build it before `npm install` in `ext/examples` (the workspace depends on `file:../../crates/ts_ext_syntax`, and `index.js` loads `./tsc-ext.<platform>.node`):
 
 ```sh
 cd crates/ts_ext_syntax && npm install && npx napi build --platform --output-dir .

@@ -1,7 +1,7 @@
 fn main() {
     napi_build::setup();
     // `napi_build::setup` lets the cdylib leave the `napi_*` symbols to the
-    // Node process that loads it. The `ext-syntax` binary, the examples and the test
+    // Node process that loads it. The `tsc-ext` binary, the examples and the test
     // executables link the same rlib, which references those symbols from
     // the Node API module even though they never call it; on macOS the
     // linker refuses them. Resolve them lazily there too: nothing outside a

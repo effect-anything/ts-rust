@@ -4,7 +4,7 @@ Times for `fixture/`. Not a case comparison.
 
 ## Tool
 
-`target/debug/ext-syntax transform`, three runs, debug build. RSS is the maximum resident set from `/usr/bin/time -l`.
+`target/debug/tsc-ext transform`, three runs, debug build. RSS is the maximum resident set from `/usr/bin/time -l`.
 
 | input | bytes | median | max RSS | unchanged |
 | --- | ---: | ---: | ---: | --- |
@@ -23,7 +23,7 @@ Times for `fixture/`. Not a case comparison.
 | plain `tsgo` | 1.32 s | 109 MB | 0 |
 | plain plus one `"use gpu"` file | 1.38 s | 109 MB | 0 |
 
-The added file is inside the noise of this debug build. `tsgo` does not expand `bench.stsx` unless a content mapper is registered, so that file is timed with `ext-syntax`, not with `tsc`.
+The added file is inside the noise of this debug build. `tsgo` does not expand `bench.stsx` unless a content mapper is registered, so that file is timed with `tsc-ext`, not with `tsc`.
 
 ## Release bench (`ext/bench/run.sh`), 2026-10-13
 
@@ -55,7 +55,7 @@ backtracks.
 The largest Sweetener cases are 48–155 lines and expand in 0.2–4 ms cold;
 a memo hit is under 0.1 ms.
 
-`ext-syntax transform` (process, release, protocol and v3 map included,
+`tsc-ext transform` (process, release, protocol and v3 map included,
 under load): bench.stsx 0.53 s, big.stsx 2.38 s.
 
 `npx vite build` of `ext/examples/vite`: 1.59 s median of 3 (idle), 4.25 s

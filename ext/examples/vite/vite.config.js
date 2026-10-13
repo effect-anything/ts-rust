@@ -1,9 +1,9 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
-import { extSyntax } from "./plugin.js";
+import { tscExt } from "./plugin.js";
 
 export default defineConfig({
-  plugins: [extSyntax(), react()],
+  plugins: [tscExt(), react()],
   build: { minify: false, sourcemap: true },
   optimizeDeps: {
     include: ["react-dom/client", "tsover-runtime", "@typegpu/react", "typegpu"],
