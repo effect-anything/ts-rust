@@ -1126,3 +1126,19 @@ fn operator_right_operand_literal_run_and_arrow() {
         assert!(code.contains(piece), "missing {piece}: {code}");
     }
 }
+
+#[test]
+fn item_macros_expand_only_at_module_and_namespace_level() {
+    let code = expand_ok(
+        "item.sts",
+        "export syntax record:item {\n  rule { record $n:ident { $($f:ident),* } } => { class $n { $($f = 0;)* } }\n}\nexport syntax say:stmt {\n  rule { say $x:expr; } => { console.log($x); }\n}\nrecord A { x }\nfunction f() {\n  record B { z }\n  say 1;\n}\nnamespace N { record C { w } }\n{ record D { q } }\n",
+    );
+    for piece in [
+        "class A {",
+        "record B { z } console.log(1);",
+        "namespace N { class C {",
+        "{ record D { q } }",
+    ] {
+        assert!(code.contains(piece), "missing {piece}: {code}");
+    }
+}

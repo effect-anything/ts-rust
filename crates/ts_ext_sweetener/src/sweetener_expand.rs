@@ -240,6 +240,7 @@ fn expand_pass(
         hygiene: HashMap::new(),
         channel_renames: HashMap::new(),
         context_rejected: Vec::new(),
+        in_block: false,
         context_base: super::sweetener_context::MODULE,
         context_regions: None,
         last_contexts: super::sweetener_context::MODULE,
@@ -793,6 +794,8 @@ struct Printer<'a> {
     /// Channel binders this generator must print with a suffix.
     channel_renames: HashMap<String, String>,
     context_rejected: Vec<(Rule, String)>,
+    /// Printing inside a block or function body of the file.
+    in_block: bool,
     /// The contexts this printer's top level stands in.
     context_base: super::sweetener_context::Contexts,
     context_regions: Option<Vec<super::sweetener_context::Region>>,
@@ -910,6 +913,17 @@ impl<'a> Printer<'a> {
             // or a parameter list owns (`(service) =>`) is ordinary code. A
             // form rewrite can print one that shares a macro name, so it must
             // not reach the macro dispatch.
+            // Upstream reads item macros at module level and in namespace
+            // bodies only. Inside a block or function body the words are
+            // left as written.
+            if self.in_block
+                && let Some(name) = nodes.get(index).and_then(macro_head)
+                && self.is_item_only(name)
+            {
+                self.print_node(&nodes[index]);
+                index += 1;
+                continue;
+            }
             if macro_call_position(nodes, index) {
                 if let Some(name) = macro_head(&nodes[index]) {
                     if self.compiled_rule_matches(nodes, index, name) {
@@ -1008,6 +1022,32 @@ impl<'a> Printer<'a> {
         changed.then_some(out)
     }
 
+    /// Every definition of `name` is an `:item` macro.
+    /// Whether the `{` at `open` opens a `namespace` / `module` body.
+    fn namespace_body_at(&self, open: usize) -> bool {
+        let before = self.source[..open].trim_end();
+        let mut words = before.rsplit(|ch: char| ch.is_whitespace());
+        let Some(name) = words.next() else {
+            return false;
+        };
+        let keyword = words.next().unwrap_or("");
+        let named = name.chars().all(|ch| {
+            ch.is_alphanumeric() || matches!(ch, '_' | '$' | '.' | '"' | '\'' | '-' | '/')
+        });
+        named && matches!(keyword, "namespace" | "module")
+    }
+
+    fn is_item_only(&self, name: &str) -> bool {
+        let mut found = false;
+        for macro_ in self.macros.iter().filter(|macro_| macro_.name == name) {
+            if macro_.category != "item" || macro_.operator {
+                return false;
+            }
+            found = true;
+        }
+        found
+    }
+
     fn print_node(&mut self, node: &Syntax) {
         match node {
             Syntax::Group {
@@ -1029,7 +1069,14 @@ impl<'a> Printer<'a> {
                 if entered {
                     self.channel_renames = saved.clone();
                 }
+                // Item positions: the file and namespace bodies, at file
+                // level. A replacement's own braces are the template's.
+                let was_block = self.in_block;
+                if entered && self.depth == 0 {
+                    self.in_block = !self.namespace_body_at(open.start as usize);
+                }
                 self.print_nodes(children);
+                self.in_block = was_block;
                 if entered {
                     self.channel_renames = saved;
                 }
@@ -1769,6 +1816,7 @@ impl<'a> Printer<'a> {
             last_form_next: 0,
             channel_renames: HashMap::new(),
             context_rejected: Vec::new(),
+            in_block: false,
             context_base: self.last_contexts,
             context_regions: None,
             last_contexts: self.last_contexts,
@@ -2045,6 +2093,7 @@ impl<'a> Printer<'a> {
             last_form_next: 0,
             channel_renames: self.channel_renames.clone(),
             context_rejected: Vec::new(),
+            in_block: false,
             context_base: self.last_contexts,
             context_regions: None,
             last_contexts: self.last_contexts,
