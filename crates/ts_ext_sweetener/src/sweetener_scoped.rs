@@ -116,10 +116,30 @@ fn matching_paren(text: &str, open: usize) -> Option<usize> {
     close
 }
 
+/// The offset just past the string or character literal that opens at
+/// `at`. An escape skips one character, not one byte, so a multi-byte
+/// scalar after `\` is never sliced in half.
+fn skip_quoted(text: &str, at: usize, quote: char) -> usize {
+    let mut chars = text[at + quote.len_utf8()..].chars();
+    let mut end = at + quote.len_utf8();
+    while let Some(ch) = chars.next() {
+        end += ch.len_utf8();
+        if ch == '\\' {
+            if let Some(escaped) = chars.next() {
+                end += escaped.len_utf8();
+            }
+            continue;
+        }
+        if ch == quote || ch == '\n' {
+            break;
+        }
+    }
+    end.min(text.len())
+}
+
 /// Call `f` with each code character (not in a string, template text, or
 /// comment) and its offset; stop when it returns true.
 fn scan_code(text: &str, mut f: impl FnMut(usize, char) -> bool) {
-    let bytes = text.as_bytes();
     let mut stack: Vec<(State, usize)> = vec![(State::Code, 0)];
     let mut at = 0;
     while at < text.len() {
@@ -149,14 +169,7 @@ fn scan_code(text: &str, mut f: impl FnMut(usize, char) -> bool) {
             continue;
         }
         if ch == '"' || ch == '\'' {
-            let mut end = at + 1;
-            while end < text.len() && bytes[end] as char != ch {
-                if bytes[end] == b'\\' {
-                    end += 1;
-                }
-                end += 1;
-            }
-            at = (end + 1).min(text.len());
+            at = skip_quoted(text, at, ch);
             continue;
         }
         if ch == '`' {
@@ -266,7 +279,6 @@ pub(crate) fn parameter_uses(text: &str, param: &str) -> Vec<usize> {
 
 fn substitute_at(text: &str, param: &str, value: &str) -> (String, Vec<usize>) {
     let word = param.chars().all(ident_char);
-    let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut count = Vec::new();
     let mut stack: Vec<(State, usize)> = vec![(State::Code, 0)];
@@ -317,14 +329,7 @@ fn substitute_at(text: &str, param: &str, value: &str) -> (String, Vec<usize>) {
             continue;
         }
         if ch == '"' || ch == '\'' {
-            let mut end = at + 1;
-            while end < text.len() && bytes[end] as char != ch {
-                if bytes[end] == b'\\' {
-                    end += 1;
-                }
-                end += 1;
-            }
-            let end = (end + 1).min(text.len());
+            let end = skip_quoted(text, at, ch);
             out.push_str(&text[at..end]);
             at = end;
             operand_next = false;

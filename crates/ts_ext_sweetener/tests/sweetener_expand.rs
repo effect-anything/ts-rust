@@ -1877,80 +1877,261 @@ fn unicode_identifiers_expand() {
     check_map(code, &out).unwrap();
 }
 
-/// The output token at the `nth` occurrence of `needle` maps exactly to
-/// source text `want` at the source occurrence `source_nth`.
-fn assert_exact(
-    code: &str,
-    out: &ts_ext_sweetener::Expansion,
-    needle: &str,
-    nth: usize,
-    source_nth: usize,
-) {
-    let at = out.code.match_indices(needle).nth(nth).unwrap().0;
-    let origin = out
-        .origins
-        .iter()
-        .find(|origin| origin.virtual_start as usize == at)
-        .unwrap_or_else(|| panic!("no origin at {needle}#{nth}: {}", out.code));
-    assert!(
-        !origin.introduced,
-        "{needle}#{nth} introduced: {}",
-        out.code
-    );
-    let want = code.match_indices(needle).nth(source_nth).unwrap().0;
-    assert_eq!(origin.original_start as usize, want, "{needle}#{nth}");
+/// Seeded xorshift64. Deterministic so this runs as an ordinary unit test.
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        if n == 0 {
+            0
+        } else {
+            (self.next_u64() as usize) % n
+        }
+    }
+}
+
+/// Code points that sit on multi-byte UTF-8 boundaries: letters, combining
+/// marks, emoji (including ZWJ), and scalars next to the surrogate range.
+const UNICODE_ATOMS: &[&str] = &[
+    "a",
+    "_",
+    "$",
+    "0",
+    " ",
+    "\n",
+    "\u{e9}",                                      // é, 2 bytes
+    "\u{6c49}",                                    // 汉, 3 bytes
+    "\u{1f600}",                                   // 😀, 4 bytes
+    "\u{0301}",                                    // combining acute
+    "\u{200d}",                                    // ZWJ
+    "\u{fe0f}",                                    // variation selector
+    "\u{d7ff}",                                    // last scalar before the surrogate range
+    "\u{e000}",                                    // first scalar after the surrogate range
+    "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}", // family emoji
+    "\u{20}",
+    ",",
+    ".",
+    "(",
+    ")",
+    "{",
+    "}",
+    "[",
+    "]",
+    "\"",
+    "'",
+    "`",
+    "\\",
+    "/",
+    "*",
+    "+",
+    "-",
+    "=",
+    ":",
+    ";",
+    "|",
+    "&",
+    "#",
+    "@",
+    "?",
+    "!",
+    "<",
+    ">",
+];
+
+fn random_atom(rng: &mut Rng) -> &'static str {
+    UNICODE_ATOMS[rng.below(UNICODE_ATOMS.len())]
+}
+
+/// A small macro file plus a body of random Unicode around invocations.
+fn random_program(rng: &mut Rng) -> String {
+    // Templates quote, interpolate and rename, so Unicode inside the rule
+    // bodies exercises the byte scanners as well as the invocation sites.
+    let defs = "export syntax pair:expr {\n  rule { pair($a:expr, $b:expr) } => { [$b, $a, $b] }\n}\nexport syntax wrap:expr {\n  rule { wrap($x:expr) } => { ($x) }\n}\nexport syntax id:expr {\n  rule { id($x:expr) } => { $x }\n}\nexport syntax tag:expr {\n  rule { tag($x:expr) } => { `pre ${$x} \u{6c49}` }\n}\nexport syntax note:expr {\n  rule { note($x:expr) } => { const t = $x; t }\n}\n";
+    let mut body = String::from("const a = ");
+    let calls = rng.below(4);
+    for n in 0..calls {
+        if n > 0 {
+            body.push_str(" + ");
+        }
+        let name = ["pair", "wrap", "id", "tag", "note"][rng.below(5)];
+        body.push_str(name);
+        body.push('(');
+        let args = if name == "pair" { 2 } else { 1 };
+        for arg in 0..args {
+            if arg > 0 {
+                body.push_str(", ");
+            }
+            body.push_str(&random_expr(rng, 2));
+        }
+        body.push(')');
+    }
+    if calls == 0 {
+        body.push_str(&random_expr(rng, 2));
+    }
+    body.push_str(";\n");
+    // Noise that is not a macro: strings, comments, and bare Unicode.
+    body.push_str("const b = ");
+    body.push(match rng.below(3) {
+        0 => '\"',
+        1 => '\'',
+        _ => '`',
+    });
+    for _ in 0..rng.below(6) {
+        body.push_str(random_atom(rng));
+    }
+    body.push_str("\";\n// ");
+    for _ in 0..rng.below(4) {
+        let atom = random_atom(rng);
+        if atom != "\n" {
+            body.push_str(atom);
+        }
+    }
+    body.push('\n');
+    format!("{defs}{body}")
+}
+
+fn random_expr(rng: &mut Rng, depth: usize) -> String {
+    match rng.below(if depth == 0 { 3 } else { 5 }) {
+        0 => {
+            let mut name = String::from("x");
+            for _ in 0..rng.below(3) {
+                name.push_str(["\u{e9}", "\u{6c49}", "\u{0301}", "_", "1"][rng.below(5)]);
+            }
+            name
+        }
+        1 => rng.below(20).to_string(),
+        2 => {
+            let q = if rng.below(2) == 0 { '"' } else { '\'' };
+            let mut s = String::new();
+            s.push(q);
+            for _ in 0..rng.below(4) {
+                let atom = random_atom(rng);
+                if atom != "\n" && atom != "\\" && !atom.starts_with(q) {
+                    s.push_str(atom);
+                }
+            }
+            s.push(q);
+            s
+        }
+        3 => format!("({} )", random_expr(rng, depth - 1)),
+        _ => format!(
+            "{} + {}",
+            random_expr(rng, depth - 1),
+            random_expr(rng, depth - 1)
+        ),
+    }
+}
+
+/// Source that forces the byte scanners: a multi-byte scalar sits where
+/// a one-byte step would land inside a character (after `\\`, inside a
+/// string, comment or template, and beside `${`).
+fn boundary_programs() -> Vec<String> {
+    let marks = [
+        "\u{e9}",
+        "\u{6c49}",
+        "\u{1f600}",
+        "\u{0301}",
+        "\u{200d}",
+        "\u{fe0f}",
+        "\u{d7ff}",
+        "\u{e000}",
+        "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+    ];
+    let mut out = Vec::new();
+    for mark in marks {
+        out.push(format!(
+            "export syntax id:expr {{\n  rule {{ id($x:expr) }} => {{ $x }}\n}}\nconst a = id(\\{mark}\");\nconst b = id('{mark}');\nconst c = id(`{mark}`);\nconst d = id(`pre ${{mark}}`);\n/* {mark} */ // {mark}\nconst e = id(1);\n"
+        ));
+        out.push(format!(
+            "export syntax tag:expr {{\n  rule {{ tag($x:expr) }} => {{ `\\{mark}${{$x}}` }}\n}}\nconst a = tag({mark});\nconst b = tag(`\\{mark}`);\n"
+        ));
+        out.push(format!(
+            "export syntax note:expr {{\n  rule {{ note($x:expr) }} => {{ const t = $x; t + t }}\n}}\nconst {mark}a = 1;\nconst b = note({mark}a);\n"
+        ));
+    }
+    out
+}
+
+/// Insert, delete, or replace at a character boundary, never mid-scalar.
+fn edit_at_char_boundary(rng: &mut Rng, code: &mut String) {
+    let bounds: Vec<usize> = code.char_indices().map(|(i, _)| i).collect();
+    let at = bounds
+        .get(rng.below(bounds.len().max(1)))
+        .copied()
+        .unwrap_or(0);
+    match rng.below(3) {
+        0 => {
+            let insert = random_atom(rng).to_owned();
+            code.insert_str(at, &insert);
+        }
+        1 => {
+            if let Some(next) = code[at..].chars().next() {
+                code.replace_range(at..at + next.len_utf8(), "");
+            }
+        }
+        _ => {
+            if let Some(next) = code[at..].chars().next() {
+                code.replace_range(at..at + next.len_utf8(), random_atom(rng));
+            }
+        }
+    }
+}
+
+fn assert_exact(code: &str) {
+    // `expand` catches a panic and reports it. This runs on the calling
+    // thread, so a byte-slicing bug fails the test instead.
+    let out = std::panic::catch_unwind(|| ts_ext_sweetener::expand_unchecked(code));
+    let out = out.unwrap_or_else(|_| panic!("expander panicked on {code:?}"));
+    if let Err(why) = check_map(code, &out) {
+        panic!("map {why}\nsource: {code:?}\nout: {:?}", out.code);
+    }
 }
 
 #[test]
-fn template_holes_chains_and_procedural_forms_keep_exact_origins() {
-    // `${... |> f}` inside a template literal.
-    let code = "export operator (|>):expr {\n  fixity infix;\n  associativity left;\n  precedence 40;\n  rule { $value:expr |> $callee:ident } => { $callee($value) }\n}\nconst s = `${user.id}:${user.total |> cents}`;\n";
-    let out = expand(ExpandRequest {
-        filename: "t.sts",
-        code,
-        phase: Phase::Check,
-    });
-    assert!(
-        out.code.contains("`${user.id}:${cents(user.total)}`"),
-        "{}",
-        out.code
-    );
-    check_map(code, &out).unwrap();
-    assert_exact(code, &out, "cents", 0, 0);
-    assert_exact(code, &out, "total", 0, 0);
-    assert_exact(code, &out, "user", 0, 0);
-    // A left-associative chain re-expanded as one operand.
-    let code = "export syntax class Callee {\n  fields { name: ident; }\n  rule { $name:ident }\n}\nexport operator (|>>):expr {\n  fixity infix;\n  associativity left;\n  precedence 40;\n  rule { $value:expr |>> $f:Callee } => { $f.name($value) }\n}\nconst r = alpha |>> first |>> second;\n";
-    let out = expand(ExpandRequest {
-        filename: "c.sts",
-        code,
-        phase: Phase::Check,
-    });
-    assert!(out.code.contains("second(first(alpha))"), "{}", out.code);
-    check_map(code, &out).unwrap();
-    for word in ["alpha", "first", "second"] {
-        assert_exact(code, &out, word, 0, 0);
+fn multibyte_boundaries_keep_an_exact_map() {
+    for code in boundary_programs() {
+        assert_exact(&code);
     }
-    // A procedural form (printed as source by the form pass).
-    let code = "export syntax class Step {\n  fields { name: binding?; value: expr?; rest: stmt?; }\n  rule { $name:binding <- $value:expr; }\n  rule { $rest:stmt }\n}\nexport syntax gen:expr {\n  rule { gen { $($step:Step)+ } } => {\n    Effect.gen(function* () {\n        $(#if(present $step.name) { const $step.name = yield* $step.value; }\n            #else { $step.rest })*\n      })\n  }\n}\nexport syntax class Field {\n  fields { name: ident; kind: type; }\n  rule { $name:ident : $kind:type }\n}\nexport syntax effect:item {\n  rule { effect $name:binding($($parameter:Field),*) $body:tt }\n  => {\n    #core(export const $name = ($($parameter.name: $parameter.kind),*) =>\n      gen $body;)\n  }\n}\neffect report(id: string) {\n  user <- lookup(id);\n  const count = user.length;\n}\n";
-    let out = expand(ExpandRequest {
-        filename: "e.sts",
-        code,
-        phase: Phase::Check,
-    });
-    check_map(code, &out).unwrap();
-    assert_exact(code, &out, "report", 0, 0);
-    assert_exact(code, &out, "lookup", 0, 0);
-    assert_exact(code, &out, "count", 0, 0);
-    let user = code.find("user <-").unwrap();
-    let at = out.code.find("user =").unwrap();
-    let origin = out
-        .origins
-        .iter()
-        .find(|o| o.virtual_start as usize == at)
-        .unwrap();
-    assert_eq!(
-        (origin.original_start as usize, origin.introduced),
-        (user, false)
-    );
+}
+
+#[test]
+fn random_unicode_edits_keep_an_exact_map() {
+    // Several seeds, each a short program plus a handful of edits. The
+    // expander must not panic (an internal-error diagnostic is that panic,
+    // caught on the expansion thread) and the exact-map invariant holds.
+    for seed in 1u64..=64 {
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9) | 1);
+        let mut code = random_program(&mut rng);
+        // Edits land in the definitions as well as the body.
+        for _ in 0..12 {
+            edit_at_char_boundary(&mut rng, &mut code);
+            let out = expand(ExpandRequest {
+                filename: "fuzz.sts",
+                code: &code,
+                phase: Phase::Check,
+            });
+            assert!(
+                out.diagnostics
+                    .iter()
+                    .all(|d| !d.message.contains("internal error")),
+                "seed {seed} panicked on {code:?}: {:?}",
+                out.diagnostics
+            );
+            if let Err(why) = check_map(&code, &out) {
+                panic!(
+                    "seed {seed} map {why}\nsource: {code:?}\nout: {:?}",
+                    out.code
+                );
+            }
+        }
+    }
 }

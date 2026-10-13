@@ -150,7 +150,7 @@ impl<'a> Reader<'a> {
             if self.index >= self.bytes.len() {
                 break;
             }
-            let ch = self.bytes[self.index] as char;
+            let ch = self.source[self.index..].chars().next().unwrap_or('\0');
             if let Some(delimiter) = Delimiter::from_close(ch) {
                 // A closer that belongs to an enclosing group ends this one
                 // too: upstream reports the inner frame's missing closer and
@@ -159,7 +159,7 @@ impl<'a> Reader<'a> {
                     break;
                 }
                 let start = self.index;
-                self.index += 1;
+                self.index += ch.len_utf8();
                 self.diagnostics.push(Diagnostic {
                     message: format!(
                         "SWR1002: Sweetener reader error, not a TypeScript parse error: unexpected closing delimiter '{}'",
@@ -193,11 +193,9 @@ impl<'a> Reader<'a> {
         let mut children = self.read_until(Some(delimiter));
         self.open.pop();
         let outer_closer = self.index < self.bytes.len();
-        let close = if self.index < self.bytes.len()
-            && self.bytes[self.index] as char == delimiter.close()
-        {
+        let close = if self.source[self.index..].starts_with(delimiter.close()) {
             let start = self.index;
-            self.index += 1;
+            self.index += delimiter.close().len_utf8();
             Some(span(start, self.index))
         } else {
             self.diagnostics.push(Diagnostic {
@@ -261,7 +259,7 @@ impl<'a> Reader<'a> {
 
     fn read_atom(&mut self) -> Syntax {
         let start = self.index;
-        let ch = self.bytes[self.index] as char;
+        let ch = self.source[start..].chars().next().unwrap_or('\0');
         if ch == '/' && self.peek(1) == Some('/') {
             return self.read_line_comment(start);
         }
@@ -297,11 +295,10 @@ impl<'a> Reader<'a> {
             };
         }
         if ch.is_ascii_digit() {
-            self.index += 1;
-            while self.index < self.bytes.len() {
-                let next = self.bytes[self.index] as char;
+            self.index += ch.len_utf8();
+            while let Some(next) = self.source[self.index..].chars().next() {
                 if next.is_ascii_digit() || next == '.' || next == '_' {
-                    self.index += 1;
+                    self.index += next.len_utf8();
                 } else {
                     break;
                 }
@@ -328,14 +325,14 @@ impl<'a> Reader<'a> {
         self.index += wide.len_utf8();
         // Multi-character operator spellings Sweetener macros import.
         // Comparisons stay single characters so `$left:expr` can include them.
-        let spelling = match ch {
-            '|' if self.peek_at(start, 1) == Some('>') => Some(2),
-            '=' if self.peek_at(start, 1) == Some('=') => Some(2),
-            '=' if self.peek_at(start, 1) == Some('>') => Some(2),
-            '*' if self.peek_at(start, 1) == Some('*') => Some(2),
-            '-' if self.peek_at(start, 1) == Some('>') => Some(2),
-            '<' if self.peek_at(start, 1) == Some('-') => Some(2),
-            ':' if self.peek_at(start, 1) == Some(':') => Some(2),
+        let second = self.peek_at(start, 1);
+        let spelling = match (ch, second) {
+            ('|', Some('>'))
+            | ('=', Some('=' | '>'))
+            | ('*', Some('*'))
+            | ('-', Some('>'))
+            | ('<', Some('-'))
+            | (':', Some(':')) => second.map(|next| ch.len_utf8() + next.len_utf8()),
             _ => None,
         };
         if let Some(width) = spelling {
@@ -349,8 +346,11 @@ impl<'a> Reader<'a> {
 
     fn read_line_comment(&mut self, start: usize) -> Syntax {
         self.index += 2;
-        while self.index < self.bytes.len() && self.bytes[self.index] != b'\n' {
-            self.index += 1;
+        while let Some(ch) = self.source[self.index..].chars().next() {
+            if ch == '\n' {
+                break;
+            }
+            self.index += ch.len_utf8();
         }
         Syntax::Comment {
             span: span(start, self.index),
@@ -360,12 +360,12 @@ impl<'a> Reader<'a> {
 
     fn read_block_comment(&mut self, start: usize) -> Syntax {
         self.index += 2;
-        while self.index + 1 < self.bytes.len() {
-            if self.bytes[self.index] == b'*' && self.bytes[self.index + 1] == b'/' {
-                self.index += 2;
+        while let Some(ch) = self.source[self.index..].chars().next() {
+            if ch == '*' && self.source[self.index + ch.len_utf8()..].starts_with('/') {
+                self.index += ch.len_utf8() + '/'.len_utf8();
                 break;
             }
-            self.index += 1;
+            self.index += ch.len_utf8();
         }
         Syntax::Comment {
             span: span(start, self.index),
@@ -395,18 +395,18 @@ impl<'a> Reader<'a> {
     }
 
     fn read_string(&mut self, start: usize, quote: char) -> Syntax {
-        self.index += 1;
+        self.index += quote.len_utf8();
         // A template literal is one string. `${...}` may hold quotes, and a
         // macro template writes `` `${#text($name)}` ``, whose `#` is not an
         // interpolation the scanner would otherwise enter. Stopping at the
         // first inner backtick splits that into a fragment later re-quoted.
         let mut brace_depth = 0i32;
         while self.index < self.bytes.len() {
-            let ch = self.bytes[self.index] as char;
+            let ch = self.source[self.index..].chars().next().unwrap_or('\0');
             if ch == '\\' {
-                self.index += 1;
-                if self.index < self.bytes.len() {
-                    self.index += 1;
+                self.index += ch.len_utf8();
+                if let Some(escaped) = self.source[self.index..].chars().next() {
+                    self.index += escaped.len_utf8();
                 }
                 continue;
             }
@@ -435,15 +435,15 @@ impl<'a> Reader<'a> {
                     let _ = self.read_string(self.index, ch);
                     continue;
                 }
-                self.index += 1;
+                self.index += ch.len_utf8();
                 continue;
             }
             if ch == '\n' && quote != '`' {
                 self.unterminated(start, self.index, "string");
-                self.index += 1;
+                self.index += ch.len_utf8();
                 break;
             }
-            self.index += 1;
+            self.index += ch.len_utf8();
             if ch == quote {
                 break;
             }
@@ -459,8 +459,11 @@ impl<'a> Reader<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while self.index < self.bytes.len() && (self.bytes[self.index] as char).is_whitespace() {
-            self.index += 1;
+        while let Some(ch) = self.source[self.index..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            self.index += ch.len_utf8();
         }
     }
 
@@ -468,8 +471,9 @@ impl<'a> Reader<'a> {
         self.peek_at(self.index, offset)
     }
 
+    /// The character `offset` characters after `at`, not `offset` bytes.
     fn peek_at(&self, at: usize, offset: usize) -> Option<char> {
-        self.bytes.get(at + offset).map(|byte| *byte as char)
+        self.source[at..].chars().nth(offset)
     }
 }
 
@@ -548,5 +552,54 @@ mod outer_closer_tests {
         let read = read_syntax("f { g(a, b }\nh()");
         let codes: Vec<&str> = read.diagnostics.iter().map(|d| &d.message[..7]).collect();
         assert_eq!(codes, vec!["SWR1003"]);
+    }
+
+    /// Multi-byte scalars, combining marks, emoji and the scalars on either
+    /// side of the surrogate range, dropped into every byte-scanned form.
+    #[test]
+    fn reader_survives_multibyte_boundaries() {
+        let marks = [
+            "\u{e9}",
+            "\u{6c49}",
+            "\u{1f600}",
+            "\u{0301}",
+            "\u{200d}",
+            "\u{fe0f}",
+            "\u{d7ff}",
+            "\u{e000}",
+            "\u{1f468}\u{200d}\u{1f469}",
+        ];
+        let frames = [
+            "const a = {m};",
+            "/* {m} */ const a = 1;",
+            "// {m}\nconst a = 1;",
+            "const a = \"{m}\";",
+            "const a = '{m}';",
+            "const a = `{m}`;",
+            "const a = `${{m}}`;",
+            "const a = `{m} ${x}`;",
+            "f({m})",
+            "f {{ {m} }",
+            "{m}(a, b",
+            "\"{m}",
+            "`{m}",
+            "/{m}/g",
+            "a {m} b",
+            "{m}{m}",
+        ];
+        for mark in marks {
+            for frame in frames {
+                let code = frame.replace("{m}", mark);
+                let read = std::panic::catch_unwind(|| read_syntax(&code));
+                let read = read.unwrap_or_else(|_| panic!("reader panicked on {code:?}"));
+                for node in &read.children {
+                    let text = super::slice(&code, node);
+                    assert!(
+                        code.contains(text) || text.is_empty(),
+                        "slice left the source: {text:?} of {code:?}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -34,11 +34,22 @@ pub(crate) fn tokens(text: &str) -> Vec<(usize, usize)> {
                 }
             }
         } else if ch == '"' || ch == '\'' {
-            at += 1;
-            while at < bytes.len() && bytes[at] != ch as u8 && bytes[at] != b'\n' {
-                at += if bytes[at] == b'\\' { 2 } else { 1 };
+            at += ch.len_utf8();
+            while at < text.len() {
+                let next = text[at..].chars().next().unwrap_or('\n');
+                if next == ch || next == '\n' {
+                    break;
+                }
+                at += next.len_utf8();
+                if next == '\\'
+                    && let Some(escaped) = text[at..].chars().next()
+                {
+                    at += escaped.len_utf8();
+                }
             }
-            at = (at + 1).min(bytes.len());
+            if at < text.len() {
+                at += text[at..].chars().next().map_or(0, char::len_utf8);
+            }
         } else {
             at += len;
         }

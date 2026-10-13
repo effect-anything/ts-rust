@@ -209,6 +209,19 @@ pub fn expand_with_budget(request: ExpandRequest<'_>, budget: ResourceBudget) ->
     sweetener_budget::with_budget(budget, || expand(request))
 }
 
+/// Expand `code` as a `.sts` file on the calling thread, without the
+/// panic catch [`expand`] uses. Tests use this so a byte-slicing bug
+/// fails the test instead of becoming an internal-error diagnostic.
+#[doc(hidden)]
+#[must_use]
+pub fn expand_unchecked(code: &str) -> Expansion {
+    sweetener_expand::expand_here(ExpandRequest {
+        filename: "fuzz.sts",
+        code,
+        phase: Phase::Check,
+    })
+}
+
 pub use sweetener_budget::ResourceBudget;
 pub use sweetener_origins::retarget_segments;
 
