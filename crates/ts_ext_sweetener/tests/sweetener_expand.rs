@@ -499,3 +499,42 @@ const x = hello;\n";
         out.diagnostics
     );
 }
+
+/// `spelling in`, `starts-with-uppercase`, `token-kind`, the length
+/// comparisons and `form [not] in`, as the upstream CLI picks the rules.
+#[test]
+fn refinements_select_rules_like_upstream() {
+    let code = "export syntax kind:expr {\n\
+  rule { kind $x:token } refine $x spelling in (\"a\", \"b\"); => { \"ab\" }\n\
+  rule { kind $x:token } refine $x spelling starts-with-uppercase; => { \"upper\" }\n\
+  rule { kind $x:token } refine $x token-kind (numeric-literal); => { \"num\" }\n\
+  rule { kind $x:token } => { \"other\" }\n\
+}\n\
+export syntax count:expr {\n\
+  rule { count [$($xs:expr),*] } refine $xs length at-least 3; => { \"many\" }\n\
+  rule { count [$($xs:expr),*] } refine $xs length less-than 1; => { \"none\" }\n\
+  rule { count [$($xs:expr),*] } => { \"few\" }\n\
+}\n\
+export syntax shape:expr {\n\
+  rule { shape($e:expr) } refine $e form in (arrow); => { \"arrow\" }\n\
+  rule { shape($e:expr) } refine $e form not in (conditional, assignment); => { \"plain\" }\n\
+  rule { shape($e:expr) } => { \"cond\" }\n\
+}\n\
+const k = [kind a, kind b, kind Zed, kind 42, kind q];\n\
+const c = [count [1, 2, 3], count [], count [1]];\n\
+const s = [shape(x => x), shape(a + b), shape(a ? b : c), shape(y = 2)];\n\
+";
+    let out = expand(ExpandRequest {
+        filename: "refine.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    for line in [
+        r#"const k = ["ab", "ab", "upper", "num", "other"];"#,
+        r#"const c = ["many", "none", "few"];"#,
+        r#"const s = ["arrow", "plain", "cond", "cond"];"#,
+    ] {
+        assert!(out.code.contains(line), "missing {line}:\n{}", out.code);
+    }
+}

@@ -2456,13 +2456,82 @@ struct ClassRule {
 enum Refine {
     /// `refine $name spelling equals "left"`.
     SpellingEquals { field: String, spelling: String },
+    /// `refine $op spelling in ("+", "-")`.
+    SpellingIn {
+        field: String,
+        spellings: Vec<String>,
+    },
     /// `refine $binders spelling starts-with-lowercase`.
     StartsLower { field: String },
+    /// `refine $type spelling starts-with-uppercase`.
+    StartsUpper { field: String },
     /// `refine $arguments delimiter parenthesis`.
     Delimiter { field: String, delimiter: Delimiter },
-    /// `refine $terms length equal 1`.
-    LengthEqual { field: String, length: usize },
+    /// `refine $terms length at-least 1` and the other comparisons.
+    Length {
+        field: String,
+        comparison: LengthComparison,
+        length: usize,
+    },
+    /// `refine $name token-kind (identifier, keyword)`.
+    TokenKind { field: String, kinds: Vec<String> },
+    /// `refine $value form not in (conditional, arrow)`.
+    Form {
+        field: String,
+        forms: Vec<String>,
+        excluded: bool,
+    },
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LengthComparison {
+    Equal,
+    LessThan,
+    AtMost,
+    GreaterThan,
+    AtLeast,
+}
+
+impl LengthComparison {
+    fn from_word(word: &str) -> Option<Self> {
+        Some(match word {
+            "equal" => Self::Equal,
+            "less-than" => Self::LessThan,
+            "at-most" => Self::AtMost,
+            "greater-than" => Self::GreaterThan,
+            "at-least" => Self::AtLeast,
+            _ => return None,
+        })
+    }
+
+    fn holds(self, actual: usize, expected: usize) -> bool {
+        match self {
+            Self::Equal => actual == expected,
+            Self::LessThan => actual < expected,
+            Self::AtMost => actual <= expected,
+            Self::GreaterThan => actual > expected,
+            Self::AtLeast => actual >= expected,
+        }
+    }
+}
+
+/// The token kinds a `token-kind` refinement may name (upstream
+/// compile-syntax-classes.ts `refinableTokenKinds`).
+const REFINABLE_TOKEN_KINDS: &[&str] = &[
+    "identifier",
+    "private-identifier",
+    "keyword",
+    "numeric-literal",
+    "bigint-literal",
+    "string-literal",
+    "regular-expression-literal",
+    "no-substitution-template",
+    "punctuation",
+    "jsx-text",
+    "jsx-identifier",
+];
+
+const EXPRESSION_FORMS: &[&str] = &["conditional", "arrow", "assignment", "yield", "await"];
 
 fn collect_classes(source: &str, nodes: &[Syntax]) -> Vec<SyntaxClass> {
     let mut classes = Vec::new();
@@ -2882,38 +2951,125 @@ fn refines_after(source: &str, nodes: &[Syntax], group_at: usize) -> Vec<Refine>
     out
 }
 
-/// One `refine $field <check>;` starting at the `refine` token.
+/// One `refine $field <predicate>;` starting at the `refine` token.
+///
+/// Mirrors upstream `parseRefinementPredicate`: the leading run of words is
+/// joined into the predicate name (`token-kind`, `at-least` may be split on
+/// their hyphens), and the first group, string or number is its argument.
 fn refine_at(source: &str, nodes: &[Syntax], index: usize) -> Option<Refine> {
     // `refine $field ...`. The `$` is its own token and has no `:kind`.
     let field = hole_name_at(nodes, index + 1)?;
-    let cursor = index + 3;
-    if token_at(nodes, cursor, "spelling") && token_at(nodes, cursor + 1, "equals") {
-        let spelling = quoted_after(source, nodes, cursor + 2)?;
-        return Some(Refine::SpellingEquals { field, spelling });
+    let mut words = String::new();
+    let mut argument = None;
+    let mut cursor = index + 3;
+    while let Some(node) = nodes.get(cursor) {
+        match node {
+            Syntax::Group { .. } | Syntax::String { .. } => {
+                argument = Some(node);
+                break;
+            }
+            Syntax::Token { raw, .. } if raw.chars().all(|ch| ch.is_ascii_digit()) => {
+                argument = Some(node);
+                break;
+            }
+            Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => {
+                if raw == ";" || raw == "rule" || raw == "refine" || raw == "expect" {
+                    break;
+                }
+                words.push_str(raw);
+            }
+            Syntax::Comment { .. } => {}
+        }
+        cursor += 1;
     }
-    if token_at(nodes, cursor, "spelling") && token_at(nodes, cursor + 1, "starts-with-lowercase") {
-        return Some(Refine::StartsLower { field });
-    }
-    if token_at(nodes, cursor, "delimiter") && token_at(nodes, cursor + 1, "parenthesis") {
-        return Some(Refine::Delimiter {
-            field,
+    let list = match argument {
+        Some(Syntax::Group {
             delimiter: Delimiter::Paren,
+            children,
+            ..
+        }) => Some(list_entries(children)),
+        _ => None,
+    };
+    let number = match argument {
+        Some(Syntax::Token { raw, .. }) => raw.parse::<usize>().ok(),
+        _ => None,
+    };
+    match words.as_str() {
+        "spellingstarts-with-lowercase" if argument.is_none() => {
+            return Some(Refine::StartsLower { field });
+        }
+        "spellingstarts-with-uppercase" if argument.is_none() => {
+            return Some(Refine::StartsUpper { field });
+        }
+        "spellingequals" => {
+            let spelling = quoted_after(source, nodes, cursor)?;
+            return Some(Refine::SpellingEquals { field, spelling });
+        }
+        "spellingin" => {
+            let spellings = list?;
+            return (!spellings.is_empty()).then_some(Refine::SpellingIn { field, spellings });
+        }
+        "token-kind" => {
+            let kinds = list?;
+            let known = kinds
+                .iter()
+                .all(|kind| REFINABLE_TOKEN_KINDS.contains(&kind.as_str()));
+            return (!kinds.is_empty() && known).then_some(Refine::TokenKind { field, kinds });
+        }
+        "formin" | "formnotin" => {
+            let forms = list?;
+            let known = forms
+                .iter()
+                .all(|form| EXPRESSION_FORMS.contains(&form.as_str()));
+            return (!forms.is_empty() && known).then_some(Refine::Form {
+                field,
+                forms,
+                excluded: words == "formnotin",
+            });
+        }
+        _ => {}
+    }
+    if let Some(delimiter) = words.strip_prefix("delimiter") {
+        if argument.is_some() {
+            return None;
+        }
+        let delimiter = match delimiter {
+            "parenthesis" => Delimiter::Paren,
+            "bracket" => Delimiter::Bracket,
+            "brace" => Delimiter::Brace,
+            _ => return None,
+        };
+        return Some(Refine::Delimiter { field, delimiter });
+    }
+    if let Some(word) = words.strip_prefix("length") {
+        let comparison = LengthComparison::from_word(word)?;
+        return Some(Refine::Length {
+            field,
+            comparison,
+            length: number?,
         });
     }
-    if token_at(nodes, cursor, "length")
-        && token_at(nodes, cursor + 1, "equal")
-        && nodes.get(cursor + 2).is_some_and(|node| match node {
-            Syntax::Token { raw, .. } => raw.chars().all(|ch| ch.is_ascii_digit()),
-            _ => false,
-        })
-    {
-        let length = match nodes.get(cursor + 2) {
-            Some(Syntax::Token { raw, .. }) => raw.parse().unwrap_or(0),
-            _ => 0,
-        };
-        return Some(Refine::LengthEqual { field, length });
-    }
     None
+}
+
+/// A parenthesised, comma-separated list of spellings; strings are unquoted.
+fn list_entries(children: &[Syntax]) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut current = String::new();
+    for child in children {
+        match child {
+            Syntax::Operator { raw, .. } | Syntax::Token { raw, .. } if raw == "," => {
+                entries.push(std::mem::take(&mut current));
+            }
+            Syntax::String { raw, .. } => current.push_str(&unquote(raw)),
+            Syntax::Token { raw, .. } | Syntax::Operator { raw, .. } => current.push_str(raw),
+            Syntax::Comment { .. } => {}
+            Syntax::Group { .. } => return Vec::new(),
+        }
+    }
+    entries.push(current);
+    entries.retain(|entry| !entry.is_empty());
+    entries
 }
 
 /// `$field` naming a capture. A refine has no `:kind`, so this is not `is_hole`.
@@ -2953,15 +3109,235 @@ fn refine_one(refine: &Refine, captures: &HashMap<String, Capture>) -> bool {
         Refine::SpellingEquals { field, spelling } => refine_spellings(captures, field)
             .iter()
             .any(|have| have == spelling),
+        Refine::SpellingIn { field, spellings } => every_token(captures, field, |token| {
+            spellings.iter().any(|s| s == token)
+        }),
         Refine::StartsLower { field } => {
             let names = refine_spellings(captures, field);
             !names.is_empty() && names.iter().all(|name| starts_lower(name))
         }
+        Refine::StartsUpper { field } => every_token(captures, field, |token| {
+            token.chars().next().is_some_and(|ch| ch.is_uppercase())
+        }),
         Refine::Delimiter { field, delimiter } => capture_opens(captures, field)
             .iter()
             .any(|have| have == delimiter),
-        Refine::LengthEqual { field, length } => capture_len(captures, field) == *length,
+        Refine::Length {
+            field,
+            comparison,
+            length,
+        } => comparison.holds(capture_len(captures, field), *length),
+        Refine::TokenKind { field, kinds } => every_token(captures, field, |token| {
+            token_kind(token).is_some_and(|kind| kinds.iter().any(|k| k == kind))
+        }),
+        Refine::Form {
+            field,
+            forms,
+            excluded,
+        } => {
+            if !captures.contains_key(field) {
+                return false;
+            }
+            refine_values(captures, field).iter().all(|text| {
+                let listed =
+                    expression_form(text).is_some_and(|form| forms.iter().any(|f| f == form));
+                listed != *excluded
+            })
+        }
     }
+}
+
+/// Upstream `everyToken`: every leaf of the capture is one token the
+/// predicate accepts. A missing capture fails; an empty repetition passes.
+fn every_token(
+    captures: &HashMap<String, Capture>,
+    field: &str,
+    accepts: impl Fn(&str) -> bool,
+) -> bool {
+    if !captures.contains_key(field) {
+        return false;
+    }
+    refine_values(captures, field)
+        .iter()
+        .all(|text| token_kind(text).is_some() && accepts(text))
+}
+
+/// The text of each leaf of a capture (one per repetition row).
+fn refine_values(captures: &HashMap<String, Capture>, field: &str) -> Vec<String> {
+    match captures.get(field) {
+        Some(Capture::Text(text)) | Some(Capture::Record { text, .. }) => {
+            vec![text.trim().to_owned()]
+        }
+        Some(Capture::Many(_)) => refine_spellings(captures, field),
+        None => Vec::new(),
+    }
+}
+
+const TS_KEYWORDS: &[&str] = &[
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "new",
+    "null",
+    "return",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+];
+
+/// The kind of the one token `text` spells, or `None` where it is not one
+/// token. Contextual words (`async`, `type`, ...) are identifiers, as in the
+/// TypeScript scanner.
+fn token_kind(text: &str) -> Option<&'static str> {
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    let ident_char = |ch: char| ch == '_' || ch == '$' || ch.is_alphanumeric();
+    if first == '#' {
+        return (text.len() > 1 && text[1..].chars().all(ident_char))
+            .then_some("private-identifier");
+    }
+    if first == '_' || first == '$' || first.is_alphabetic() {
+        if !text.chars().all(ident_char) {
+            return None;
+        }
+        return Some(if TS_KEYWORDS.contains(&text) {
+            "keyword"
+        } else {
+            "identifier"
+        });
+    }
+    if first.is_ascii_digit() || (first == '.' && text.len() > 1) {
+        let body = text.replace('_', "");
+        if let Some(digits) = body.strip_suffix('n') {
+            return digits
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric())
+                .then_some("bigint-literal");
+        }
+        let ok = body
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '+' || ch == '-');
+        return ok.then_some("numeric-literal");
+    }
+    if (first == '"' || first == '\'') && text.len() >= 2 && text.ends_with(first) {
+        return Some("string-literal");
+    }
+    if first == '`' && text.len() >= 2 && text.ends_with('`') && !text.contains("${") {
+        return Some("no-substitution-template");
+    }
+    if first == '/' && text.len() > 2 && text[1..].contains('/') && !text.starts_with("//") {
+        return Some("regular-expression-literal");
+    }
+    let punctuation = text
+        .chars()
+        .all(|ch| "{}()[];,<>=!+-*/%&|^~?:.@".contains(ch));
+    (punctuation && text.len() <= 4).then_some("punctuation")
+}
+
+/// The top-level form of an expression, as upstream `expressionForm`: an
+/// unparenthesised conditional, arrow, assignment, `yield` or `await`.
+fn expression_form(text: &str) -> Option<&'static str> {
+    let text = text.trim();
+    let word = text
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
+        .next()
+        .unwrap_or("");
+    match word {
+        "yield" => return Some("yield"),
+        "await" => return Some("await"),
+        _ => {}
+    }
+    let bytes = text.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut question = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if let Some(q) = quote {
+            if ch == b'\\' {
+                index += 1;
+            } else if ch == q {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            b'"' | b'\'' | b'`' => quote = Some(ch),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ if depth != 0 => {}
+            b'=' => {
+                let next = bytes.get(index + 1).copied();
+                let prev = index.checked_sub(1).map(|i| bytes[i]);
+                if next == Some(b'>') {
+                    return Some("arrow");
+                }
+                if next == Some(b'=') {
+                    index += 2;
+                    while bytes.get(index) == Some(&b'=') {
+                        index += 1;
+                    }
+                    continue;
+                }
+                if matches!(prev, Some(b'!' | b'<' | b'>' | b'=')) {
+                    // `!=`, `<=`, `>=`: comparisons, unless `<<=`/`>>=`.
+                    let compound = index >= 2 && bytes[index - 2] == prev.unwrap_or(0);
+                    if !compound {
+                        index += 1;
+                        continue;
+                    }
+                }
+                if !question {
+                    return Some("assignment");
+                }
+            }
+            b'?' => {
+                let next = bytes.get(index + 1).copied();
+                if next == Some(b'?') {
+                    index += 2;
+                    continue;
+                }
+                if next == Some(b'.') && !bytes.get(index + 2).is_some_and(u8::is_ascii_digit) {
+                    index += 2;
+                    continue;
+                }
+                question = true;
+            }
+            b':' if question => return Some("conditional"),
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 fn starts_lower(name: &str) -> bool {
@@ -6242,6 +6618,8 @@ fn take_expr_until(
     {
         index += 1;
     }
+    // Open `?` of conditionals; the matching `:` belongs to the expression.
+    let mut pending_conditionals = 0usize;
     loop {
         skip_comments(nodes, &mut index);
         let Some(node) = nodes.get(index) else {
@@ -6249,6 +6627,22 @@ fn take_expr_until(
         };
         if is_expr_stop(node) {
             break;
+        }
+        if operator_is(Some(node), "?")
+            && nodes.get(index + 1).is_some_and(is_expr_start)
+            && !operator_is(nodes.get(index + 1), ".")
+        {
+            pending_conditionals += 1;
+            index += 1;
+            continue;
+        }
+        if pending_conditionals > 0
+            && operator_is(Some(node), ":")
+            && nodes.get(index + 1).is_some_and(is_expr_start)
+        {
+            pending_conditionals -= 1;
+            index += 1;
+            continue;
         }
         if matches!(node, Syntax::Operator { raw, .. } if raw == "," || raw == ":") {
             break;
