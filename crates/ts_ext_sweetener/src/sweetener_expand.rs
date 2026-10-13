@@ -89,7 +89,10 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
         hygiene: HashMap::new(),
         channel_renames: HashMap::new(),
         type_params: user_type_params(&read.children),
-        imports_emitted: false,
+        // Theirs synthesizes a macro module's runtime imports only for a
+        // file that invoked one of its macros. A module whose every item is
+        // a macro definition invokes none.
+        imports_emitted: only_definitions(&read.children),
         form_signals: Vec::new(),
         form_methods: Vec::new(),
         last_form_next: 0,
@@ -103,6 +106,13 @@ pub fn expand(request: ExpandRequest<'_>) -> Expansion {
     // A macro the rules refuse, or a delimiter the reader cannot pair, is
     // reported on the author token. The item that failed is already in
     // `out` as written (verbatim). Other files are separate expansions.
+    // Theirs prints a definition module's comments as trivia of the
+    // definitions they precede, so a module of definitions alone prints
+    // nothing at all.
+    if printer.diagnostics.is_empty() && only_definitions(&read.children) {
+        printer.out.clear();
+        printer.segments.clear();
+    }
     Expansion {
         code: printer.out,
         segments: printer.segments,
@@ -6673,6 +6683,28 @@ fn local_syntax_end(nodes: &[Syntax], index: usize) -> Option<usize> {
         look += 1;
     }
     None
+}
+
+/// True when every top-level item is a `for syntax` import or a macro
+/// definition, so the file can invoke no macro.
+fn only_definitions(nodes: &[Syntax]) -> bool {
+    let mut index = 0;
+    while index < nodes.len() {
+        match &nodes[index] {
+            Syntax::Comment { .. } => index += 1,
+            node if operator_is(Some(node), ";") => index += 1,
+            _ if is_syntax_import_at(nodes, index) => index = skip_syntax_import(nodes, index),
+            _ => {
+                let Some(end) = local_syntax_end(nodes, index) else {
+                    return false;
+                };
+                while index < nodes.len() && (node_span(&nodes[index]).start as usize) < end {
+                    index += 1;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// A following group or word is an attempted call. A name at the end of
