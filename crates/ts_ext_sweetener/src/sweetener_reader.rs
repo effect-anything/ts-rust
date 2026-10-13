@@ -5,7 +5,7 @@
 //! This is not a TypeScript parse. Macro structure is decided here so a bad
 //! form is a Sweetener diagnostic, not a later TypeScript error.
 
-use crate::Diagnostic;
+use crate::{Diagnostic, Severity};
 
 /// A byte range in the original file. Half-open, UTF-8 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +125,7 @@ impl<'a> Reader<'a> {
                     ),
                     start: u32_at(start),
                     end: u32_at(self.index),
+                    severity: Severity::Error,
                 });
                 children.push(Syntax::Operator {
                     span: span(start, self.index),
@@ -160,6 +161,7 @@ impl<'a> Reader<'a> {
                 ),
                 start: u32_at(open_at),
                 end: u32_at(open_at + 1),
+                severity: Severity::Error,
             });
             None
         };

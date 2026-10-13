@@ -12,8 +12,7 @@ function strip(id) {
 function publish(ctx, file, code) {
   const result = session.transform(file, code);
   for (const item of result.diagnostics) {
-    // SWR4025 is a warning upstream: the item is passed through as written.
-    if (item.message.startsWith("SWR4025")) {
+    if (item.severity === "warning") {
       ctx.warn({ message: `${file}: ${item.message}`, id: file });
       continue;
     }

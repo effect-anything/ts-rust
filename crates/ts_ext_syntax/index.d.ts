@@ -16,6 +16,8 @@ export interface Diagnostic {
   message: string
   start: number
   end: number
+  /** `"error"` or `"warning"`. */
+  severity: string
 }
 
 export interface Transformed {

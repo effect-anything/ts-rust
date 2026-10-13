@@ -13,6 +13,8 @@ pub struct NodeDiagnostic {
     pub message: String,
     pub start: u32,
     pub end: u32,
+    /// `"error"` or `"warning"`.
+    pub severity: String,
 }
 
 #[napi(object, js_name = "Transformed")]
@@ -72,5 +74,6 @@ fn to_diagnostic(value: SessionDiagnostic) -> NodeDiagnostic {
         message: value.message,
         start: value.start,
         end: value.end,
+        severity: value.severity.as_str().to_owned(),
     }
 }

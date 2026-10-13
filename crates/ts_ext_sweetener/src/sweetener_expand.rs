@@ -50,7 +50,7 @@ fn share_list<T>(items: Vec<T>) -> SharedList<T> {
     Rc::new(items)
 }
 
-use crate::{Diagnostic, ExpandRequest, Expansion, Segment, SegmentKind};
+use crate::{Diagnostic, ExpandRequest, Expansion, Segment, SegmentKind, Severity};
 
 use super::sweetener_reader::{self, Delimiter, Span, Syntax};
 
@@ -178,6 +178,7 @@ fn expand_pass(
                 ),
                 start: macro_.head.start,
                 end: macro_.head.end,
+                severity: Severity::Error,
             });
         }
         if local_dispatchable(&macro_) {
@@ -298,6 +299,7 @@ fn malformed(message: &str, span: Span) -> Diagnostic {
         message: format!("SWR2016: Malformed template: {message}."),
         start: span.start,
         end: span.end,
+        severity: Severity::Error,
     }
 }
 
@@ -500,6 +502,7 @@ fn unread_items(source: &str, nodes: &[Syntax]) -> Vec<Diagnostic> {
             ),
             start: u32::try_from(node_start(&nodes[head])).unwrap_or(0),
             end: u32::try_from(node_end(&nodes[end])).unwrap_or(0),
+            severity: Severity::Warning,
         });
         let _ = stopped;
         index = end + 1;
@@ -1174,6 +1177,7 @@ impl<'a> Printer<'a> {
                 ),
                 start: at.start,
                 end: at.end,
+                severity: Severity::Error,
             });
             return self.skip_failed(nodes, index);
         }
@@ -1964,6 +1968,7 @@ impl<'a> Printer<'a> {
                         ),
                         start,
                         end,
+                        severity: Severity::Error,
                     });
                 } else {
                     let rules: Vec<Rule> = self
@@ -2116,6 +2121,7 @@ impl<'a> Printer<'a> {
                 ),
                 start,
                 end,
+                severity: Severity::Error,
             });
         }
     }
@@ -2163,6 +2169,7 @@ impl<'a> Printer<'a> {
             message: format!("SWR4001: No rule for macro {name} accepted this input: {detail}."),
             start: span.start,
             end: span.end,
+            severity: Severity::Error,
         });
     }
 
@@ -2253,6 +2260,7 @@ impl<'a> Printer<'a> {
             message: format!("SWR4001: No rule for macro {name} accepted this input: {detail}."),
             start: span.start,
             end: span.end,
+            severity: Severity::Error,
         });
     }
 
@@ -2620,6 +2628,7 @@ fn load_syntax_module(
             ),
             start,
             end,
+            severity: Severity::Error,
         });
         return;
     };
@@ -2662,6 +2671,7 @@ fn load_syntax_module(
                     ),
                     start: import.span.start,
                     end: import.span.end,
+                    severity: Severity::Error,
                 });
             }
             if report && macro_.shadows_core && !core_shadow_valid(&macro_) {
@@ -2672,6 +2682,7 @@ fn load_syntax_module(
                     ),
                     start: import.span.start,
                     end: import.span.end,
+                    severity: Severity::Error,
                 });
             }
             // A core form is dispatched as core unless both the definition
@@ -2692,6 +2703,7 @@ fn load_syntax_module(
                 ),
                 start: import.span.start,
                 end: import.span.end,
+                severity: Severity::Error,
             });
         }
     }

@@ -1,6 +1,6 @@
 use std::fs;
 
-use ts_ext_sweetener::{ExpandRequest, Phase, expand, structure};
+use ts_ext_sweetener::{ExpandRequest, Phase, Severity, expand, structure};
 
 #[test]
 fn every_local_macro_case_matches_theirs() {
@@ -594,6 +594,7 @@ fn unresolved_syntax_module_is_swr5002() {
         phase: Phase::Check,
     });
     assert_eq!(codes(&out), vec!["SWR5002"]);
+    assert_eq!(out.diagnostics[0].severity, Severity::Error);
     assert_eq!(out.diagnostics[0].start as usize, code.find("foo").unwrap());
     assert!(
         out.diagnostics[0]
@@ -618,6 +619,12 @@ let ok = 1;\n";
         phase: Phase::Check,
     });
     assert_eq!(codes(&out), vec!["SWR4025", "SWR4025"]);
+    assert!(
+        out.diagnostics
+            .iter()
+            .all(|d| d.severity == Severity::Warning)
+    );
+    assert_eq!(Severity::Warning.as_str(), "warning");
     assert!(
         out.diagnostics[0]
             .message

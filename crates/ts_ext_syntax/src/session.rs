@@ -58,6 +58,7 @@ pub struct SessionDiagnostic {
     pub message: String,
     pub start: u32,
     pub end: u32,
+    pub severity: crate::Severity,
 }
 
 impl TransformSession {
@@ -153,6 +154,7 @@ fn apply_typegpu(
             message: item.message,
             start: item.start,
             end: item.end,
+            severity: crate::Severity::Error,
         }));
         return Transformed {
             changed: already_changed || gpu.changed,
@@ -202,6 +204,7 @@ fn apply_typegpu(
                     message: item.message,
                     start: mapped.start,
                     end: mapped.end,
+                    severity: crate::Severity::Error,
                 })
             }));
             diagnostics
@@ -225,6 +228,7 @@ fn diagnostics_of(expansion: &crate::Expansion) -> Vec<SessionDiagnostic> {
             message: item.message.clone(),
             start: item.start,
             end: item.end,
+            severity: item.severity,
         })
         .collect()
 }

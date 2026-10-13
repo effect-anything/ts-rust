@@ -20,6 +20,8 @@ pub struct ProtocolDiagnostic {
     pub start: i32,
     pub length: i32,
     pub code: i32,
+    /// TypeScript's `DiagnosticCategory`: 0 warning, 1 error.
+    pub category: i32,
 }
 
 /// The number in an `SWR4001` message. A `TS` prefix is still read so a
@@ -64,6 +66,10 @@ pub fn transform_file(file_name: &str, content: &str) -> TransformResponse {
                 start: i32::try_from(item.start).unwrap_or(0),
                 length: i32::try_from(item.end.saturating_sub(item.start)).unwrap_or(0),
                 code: diagnostic_code(&item.message),
+                category: match item.severity {
+                    crate::Severity::Warning => 0,
+                    crate::Severity::Error => 1,
+                },
             })
             .collect(),
     }

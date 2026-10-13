@@ -45,8 +45,13 @@ fn transform_cli(path: Option<String>) -> ExitCode {
     let response = protocol::transform_file(&path, &content);
     for diagnostic in &response.diagnostics {
         let (line, col) = line_col(&content, diagnostic.start);
+        let level = if diagnostic.category == 0 {
+            "warning"
+        } else {
+            "error"
+        };
         eprintln!(
-            "{path}({line},{col}): error {}",
+            "{path}({line},{col}): {level} {}",
             report_message(diagnostic.code, &diagnostic.message_text)
         );
     }
@@ -129,15 +134,12 @@ fn handle(message: &str) -> String {
         "plugin" => {
             let file_name = json_string(&params, "fileName").unwrap_or_default();
             let content = json_string(&params, "content").unwrap_or_default();
-            let transformed = ts_ext_syntax::TransformSession::new().transform(&file_name, &content);
+            let transformed =
+                ts_ext_syntax::TransformSession::new().transform(&file_name, &content);
             encode_plugin(&transformed)
         }
         _ => {
-            return error_response(
-                id.as_deref(),
-                -32601,
-                &format!("unknown method {method}"),
-            );
+            return error_response(id.as_deref(), -32601, &format!("unknown method {method}"));
         }
     };
     match id {
@@ -164,11 +166,12 @@ fn encode_transform(response: &TransformResponse) -> String {
             diagnostics.push(',');
         }
         diagnostics.push_str(&format!(
-            r#"{{"messageText":{},"start":{},"length":{},"code":{}}}"#,
+            r#"{{"messageText":{},"start":{},"length":{},"code":{},"category":{}}}"#,
             json_encode(&diagnostic.message_text),
             diagnostic.start,
             diagnostic.length,
             diagnostic.code,
+            diagnostic.category,
         ));
     }
     diagnostics.push(']');
@@ -222,7 +225,9 @@ fn read_message(input: &mut impl Read) -> io::Result<Option<String>> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no Content-Length"))?;
     let mut body = vec![0u8; length];
     input.read_exact(&mut body)?;
-    String::from_utf8(body).map(Some).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    String::from_utf8(body)
+        .map(Some)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
 fn write_message(output: &mut impl Write, body: &str) -> io::Result<()> {

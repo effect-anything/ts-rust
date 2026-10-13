@@ -31,12 +31,32 @@ pub struct Segment {
     pub kind: SegmentKind,
 }
 
+/// How serious a diagnostic is. Upstream registers each code with one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Severity {
+    #[default]
+    Error,
+    /// The file still expands; nothing in it was lost (SWR4025).
+    Warning,
+}
+
+impl Severity {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+        }
+    }
+}
+
 /// A diagnostic in the original file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     pub message: String,
     pub start: u32,
     pub end: u32,
+    pub severity: Severity,
 }
 
 /// Result of a pre-check expansion.
