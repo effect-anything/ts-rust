@@ -811,3 +811,20 @@ fn incomplete_variable_swallows_later_unread_items() {
     assert_eq!(codes(&out), vec!["SWR4025"]);
     assert_eq!(out.diagnostics[0].related[0].start, 4);
 }
+
+/// A choice backtracks against the rest of the pattern: `x !` is not the
+/// first alternative followed by `,`, so the second is taken. Checked
+/// against the CLI (`[x, z]`, `[p, q]`).
+#[test]
+fn choice_backtracks_through_the_rest_of_the_pattern() {
+    let code = expand_ok(
+        "backtrack.sts",
+        "export syntax both:expr {\n\
+  rule { both($($a:ident | $a:ident !),*) } => { [$($a),*] }\n\
+}\n\
+const r = both(x !, z);\n\
+const s = both(p, q !);\n",
+    );
+    assert!(code.contains("const r = [x, z];"), "{code}");
+    assert!(code.contains("const s = [p, q];"), "{code}");
+}

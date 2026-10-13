@@ -6429,6 +6429,114 @@ fn match_pats_stop(
     // repetition step stops before `where`, which belongs to the next clause.
     rep_stop: &[String],
 ) -> Option<usize> {
+    match_pats_cont(
+        source,
+        nodes,
+        cursor,
+        pattern,
+        captures,
+        classes,
+        in_rep,
+        rep_stop,
+        &Cont::Free,
+    )
+}
+
+/// What must still match after the pattern being matched, so a choice can
+/// backtrack: upstream's choice tries each alternative against the whole
+/// rest of the pattern, not only against itself.
+enum Cont<'a> {
+    /// Nothing is required (a rule's own tail: the invocation may stop).
+    Free,
+    /// The node list must be used up (the inside of a group).
+    End,
+    /// `pats`, then `then`.
+    Seq(&'a [Pat], &'a Cont<'a>),
+    /// Inside a repetition step: the separator or another step, or `then`.
+    Rep {
+        inner: &'a [Pat],
+        sep: Option<&'a str>,
+        then: &'a Cont<'a>,
+    },
+}
+
+/// Whether `cont` can match at `cursor`. Matching commits inside the
+/// continuation itself, but every choice in it backtracks the same way.
+fn cont_ok(
+    source: &str,
+    nodes: &[Syntax],
+    cursor: usize,
+    captures: &HashMap<String, Capture>,
+    classes: &[SyntaxClass],
+    cont: &Cont<'_>,
+) -> bool {
+    match cont {
+        Cont::Free => true,
+        Cont::End => {
+            let mut at = cursor;
+            skip_comments(nodes, &mut at);
+            at >= nodes.len()
+        }
+        Cont::Seq(pats, then) => {
+            let mut at = cursor;
+            let mut scratch = captures.clone();
+            match_pats_cont(
+                source,
+                nodes,
+                &mut at,
+                pats,
+                &mut scratch,
+                classes,
+                false,
+                &[],
+                then,
+            )
+            .is_some()
+                && cont_ok(source, nodes, at, &scratch, classes, then)
+        }
+        Cont::Rep { inner, sep, then } => {
+            let mut at = cursor;
+            skip_comments(nodes, &mut at);
+            if let Some(sep) = sep {
+                if nodes.get(at).is_some_and(|node| node_is_lit(node, sep)) {
+                    return true;
+                }
+            } else if at > cursor || !inner.is_empty() {
+                let mut again = at;
+                let mut scratch = captures.clone();
+                if match_pats_stop(
+                    source,
+                    nodes,
+                    &mut again,
+                    inner,
+                    &mut scratch,
+                    classes,
+                    true,
+                    &[],
+                )
+                .is_some()
+                    && again > at
+                {
+                    return true;
+                }
+            }
+            cont_ok(source, nodes, cursor, captures, classes, then)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn match_pats_cont(
+    source: &str,
+    nodes: &[Syntax],
+    cursor: &mut usize,
+    pattern: &[Pat],
+    captures: &mut HashMap<String, Capture>,
+    classes: &[SyntaxClass],
+    in_rep: bool,
+    rep_stop: &[String],
+    cont: &Cont<'_>,
+) -> Option<usize> {
     let start_end = nodes.get(*cursor).map(node_start).unwrap_or(0);
     let mut last_end = start_end;
     for (pat_index, pat) in pattern.iter().enumerate() {
@@ -6437,10 +6545,38 @@ fn match_pats_stop(
                 let saved = *cursor;
                 let mut chosen = false;
                 let last = pat_index + 1 == pattern.len();
-                for alternative in choice_order(source, nodes, saved, alternatives, classes, last) {
+                let rest = Cont::Seq(&pattern[pat_index + 1..], cont);
+                // Full backtracking: the first alternative, in written order,
+                // after which the rest of the pattern still matches.
+                let backtracked = (!matches!(cont, Cont::Free) || !last)
+                    .then(|| {
+                        alternatives.iter().find(|alternative| {
+                            let mut tried = saved;
+                            let mut taken = captures.clone();
+                            match_pats_cont(
+                                source,
+                                nodes,
+                                &mut tried,
+                                alternative,
+                                &mut taken,
+                                classes,
+                                in_rep,
+                                rep_stop,
+                                &rest,
+                            )
+                            .is_some()
+                                && cont_ok(source, nodes, tried, &taken, classes, &rest)
+                        })
+                    })
+                    .flatten();
+                let order = match backtracked {
+                    Some(found) => vec![found],
+                    None => choice_order(source, nodes, saved, alternatives, classes, last),
+                };
+                for alternative in order {
                     let mut tried = saved;
                     let mut taken = captures.clone();
-                    if match_pats_stop(
+                    if match_pats_cont(
                         source,
                         nodes,
                         &mut tried,
@@ -6449,6 +6585,7 @@ fn match_pats_stop(
                         classes,
                         in_rep,
                         rep_stop,
+                        &rest,
                     )
                     .is_some()
                     {
@@ -6493,7 +6630,19 @@ fn match_pats_stop(
                     return None;
                 }
                 let mut child = 0;
-                if match_pats(source, children, &mut child, inner, captures, classes).is_none() {
+                if match_pats_cont(
+                    source,
+                    children,
+                    &mut child,
+                    inner,
+                    captures,
+                    classes,
+                    false,
+                    &[],
+                    &Cont::End,
+                )
+                .is_none()
+                {
                     return None;
                 }
                 // `record Name()` is an empty group. It must not accept
@@ -6666,8 +6815,14 @@ fn match_pats_stop(
                             step_stop.push(word.to_owned());
                         }
                     }
-                    if match_pats_stop(
-                        source, nodes, cursor, inner, &mut one, classes, true, &step_stop,
+                    let after_rep = Cont::Seq(&pattern[pat_index + 1..], cont);
+                    let step = Cont::Rep {
+                        inner,
+                        sep: sep.as_deref(),
+                        then: &after_rep,
+                    };
+                    if match_pats_cont(
+                        source, nodes, cursor, inner, &mut one, classes, true, &step_stop, &step,
                     )
                     .is_none()
                     {
