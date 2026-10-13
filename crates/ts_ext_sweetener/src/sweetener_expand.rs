@@ -59,6 +59,29 @@ use super::sweetener_reader::{self, Delimiter, Span, Syntax};
 /// is left as written; the rest of the file still expands.
 #[must_use]
 pub fn expand(request: ExpandRequest<'_>) -> Expansion {
+    // Expansion recurses once per nesting level (reader, matcher, nested
+    // printer). Upstream's limit is 1024 levels, far deeper than a default
+    // thread stack, so the whole expansion runs on its own thread whose
+    // stack is sized from the budget. Its state is thread-local, so the
+    // budget the caller configured is handed over explicitly.
+    let budget = super::sweetener_budget::configured();
+    let stack = super::sweetener_budget::stack_bytes(&budget);
+    let code = request.code;
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("sweetener-expand".to_owned())
+            .stack_size(stack)
+            .spawn_scoped(scope, move || {
+                super::sweetener_budget::with_budget(budget, || expand_here(request))
+            })
+            .ok()
+            .map(|handle| handle.join())
+    })
+    .and_then(Result::ok)
+    .unwrap_or_else(|| crate::unchanged(code))
+}
+
+fn expand_here(request: ExpandRequest<'_>) -> Expansion {
     OWNER_FILTER.with(|filter| filter.borrow_mut().take());
     let first = expand_pass(&request, None);
     // Runtime imports belong to the module that needs them. Upstream prints
@@ -870,7 +893,7 @@ struct Printer<'a> {
     last_original: usize,
     macros: SharedList<Macro>,
     dependencies: Vec<String>,
-    depth: u8,
+    depth: u32,
     /// Set while rendering `#core(...)`, so the inner form is not expanded
     /// as the macro that produced it.
     printing_core: bool,
@@ -2286,7 +2309,7 @@ impl<'a> Printer<'a> {
         if super::sweetener_budget::exhausted() {
             return owned;
         }
-        if usize::from(self.depth) >= MAX_NESTING_DEPTH {
+        if u64::from(self.depth) >= super::sweetener_budget::max_nesting_depth() {
             note_budget(format!(
                 "SWR4015: Expanding {name} reached the nesting-depth limit. No further macros in it were expanded."
             ));
@@ -11291,11 +11314,6 @@ fn render_fold(
     out.push_str(&current);
 }
 
-/// One identifier, literal, or closed group: safe to splice anywhere.
-/// Upstream's `maxNestingDepth` is 1024 syntax levels; a nested printer is
-/// far heavier than one level, so ours bounds replacement re-expansion.
-const MAX_NESTING_DEPTH: usize = 64;
-
 thread_local! {
     /// Fingerprints of the replacements being expanded, outermost first.
     static ACTIVE_EXPANSIONS: std::cell::RefCell<Vec<String>> =
@@ -11342,7 +11360,7 @@ thread_local! {
         const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
-fn note_invoked(rule: &Rule, name: &str, depth: u8) {
+fn note_invoked(rule: &Rule, name: &str, depth: u32) {
     TRACES.with(|traces| {
         traces.borrow_mut().0.push(crate::ExpansionTrace {
             macro_name: name.to_owned(),
@@ -11351,7 +11369,7 @@ fn note_invoked(rule: &Rule, name: &str, depth: u8) {
                 .origin
                 .filter(|_| rule.owner.is_none())
                 .map(|span| span.start),
-            depth: u32::from(depth),
+            depth,
             start: 0,
             end: 0,
         });

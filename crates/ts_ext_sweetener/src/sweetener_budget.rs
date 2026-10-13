@@ -79,6 +79,31 @@ pub(crate) fn with_budget<T>(budget: ResourceBudget, f: impl FnOnce() -> T) -> T
     out
 }
 
+/// The limits the next pass on this thread will use.
+pub(crate) fn configured() -> ResourceBudget {
+    CONFIGURED.with(|c| c.borrow().clone())
+}
+
+/// The nesting limit of the running pass.
+pub(crate) fn max_nesting_depth() -> u64 {
+    TRACKER.with(|t| {
+        t.borrow()
+            .as_ref()
+            .map_or(ResourceBudget::default().max_nesting_depth, |t| {
+                t.budget.max_nesting_depth
+            })
+    })
+}
+
+/// Stack for an expansion thread: a base plus a frame budget per nesting
+/// level. Only touched pages are committed, so reserving is cheap.
+pub(crate) fn stack_bytes(budget: &ResourceBudget) -> usize {
+    const BASE: usize = 16 << 20;
+    const PER_LEVEL: usize = 512 << 10;
+    let levels = usize::try_from(budget.max_nesting_depth.min(1 << 16)).unwrap_or(1 << 16);
+    BASE.saturating_add(levels.saturating_mul(PER_LEVEL))
+}
+
 /// Start a pass: fresh counters, the deadline clock restarted.
 pub(crate) fn reset() {
     let budget = CONFIGURED.with(|c| c.borrow().clone());

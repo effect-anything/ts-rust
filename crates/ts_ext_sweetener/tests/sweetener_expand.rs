@@ -1077,6 +1077,60 @@ fn expansion_cycles_and_depth_are_budgeted() {
 }
 
 #[test]
+fn deep_nesting_is_honored_up_to_the_budget() {
+    // `peel` removes one paren layer per expansion: 1000 levels of nested
+    // re-expansion, well past what a default thread stack holds.
+    let defs = "export syntax peel:expr {\n  rule { peel(($x:expr)) } => { peel($x) }\n  rule { peel($x:expr) } => { $x }\n}\n";
+    let deep = 1000;
+    let code = format!(
+        "{defs}const a = peel({}0{});\n",
+        "(".repeat(deep),
+        ")".repeat(deep)
+    );
+    let request = || ExpandRequest {
+        filename: "deep.sts",
+        code: &code,
+        phase: Phase::Check,
+    };
+    let out = expand(request());
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(
+        out.code.contains("const a = 0;"),
+        "{}",
+        &out.code[out.code.len().saturating_sub(200)..]
+    );
+    let shallow = expand_with_budget(
+        request(),
+        ResourceBudget {
+            max_nesting_depth: 100,
+            ..ResourceBudget::default()
+        },
+    );
+    assert!(
+        shallow.diagnostics.iter().any(|d| d
+            .message
+            .starts_with("SWR4015: Expanding peel reached the nesting-depth limit.")),
+        "{:?}",
+        shallow.diagnostics
+    );
+    // User-written nesting: 1000 macro calls inside each other.
+    let twice = "export syntax wrap:expr {\n  rule { wrap($x:expr) } => { [$x] }\n}\n";
+    let code = format!(
+        "{twice}const b = {}0{};\n",
+        "wrap(".repeat(deep),
+        ")".repeat(deep)
+    );
+    let out = expand(ExpandRequest {
+        filename: "deep2.sts",
+        code: &code,
+        phase: Phase::Check,
+    });
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    let expected = format!("const b = {}0{};", "[".repeat(deep), "]".repeat(deep));
+    assert!(out.code.contains(&expected));
+}
+
+#[test]
 fn traces_and_token_origins() {
     let code = "export syntax twice:expr {\n  rule { twice($x:expr) } => { [$x, $x] }\n}\nexport syntax outer:expr {\n  rule { outer($x:expr) } => { twice($x) }\n}\nconst a = outer(value);\nconst b = 1;\n";
     let out = expand(ExpandRequest {
