@@ -4,7 +4,7 @@
 //! call this session. A bundler has no `tsc`, so the plugin does both
 //! steps when the file needs them:
 //!
-//! - Sweetener source (`.sts`, `.stsx`): macro expansion,
+//! - Sweetener source: macro expansion,
 //!   then [`ts_ext_typegpu::TypegpuSession`] on the expanded text.
 //! - Any other file: that session only. Check leaves operators alone.
 //!   Build rewrites them to `__tsover_*` and then wraps marked functions.

@@ -1,4 +1,4 @@
-//! Macro expansion for `.sts` / `.stsx`.
+//! Macro expansion
 //!
 //! Output is ordinary TypeScript. This pass does not look for `"use gpu"`.
 //! A directive in the expanded text is rewritten later, on that text, by

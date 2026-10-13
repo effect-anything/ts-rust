@@ -1,6 +1,5 @@
-//! Sweetener expansion.
 //!
-//! `.sts` and `.stsx` become ordinary TypeScript plus a span map. This crate
+//! Sweetener expansion: ordinary TypeScript plus a span map. This crate
 //! does not rewrite `"use gpu"`. `ts_ext_syntax` is the content mapper: it
 //! calls [`expand`], then `ts_ext_typegpu`. Cases, `cases.jsonl`, and the
 //! discover/sync tools live in this crate. One directory is one program.
