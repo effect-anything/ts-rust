@@ -775,6 +775,37 @@ const h = [x %%];\n\
     }
 }
 
+/// `:item` reads a module item, including an import or export declaration;
+/// `:stmt` does not, as upstream.
+#[test]
+fn item_hole_reads_exports_and_stmt_hole_does_not() {
+    let source = |kind: &str| {
+        format!(
+            "export syntax wrap:item {{\n  rule {{ wrap $x:{kind} }} => {{ $x }}\n}}\nwrap export const a = 1;\n"
+        )
+    };
+    let item = expand_ok("item.sts", &source("item"));
+    assert!(item.contains("export const a = 1;"), "{item}");
+    assert!(!item.contains("wrap"), "{item}");
+    let out = expand(ExpandRequest {
+        filename: "stmt.sts",
+        code: &source("stmt"),
+        phase: Phase::Check,
+    });
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.starts_with("SWR4001")),
+        "{:?}",
+        out.diagnostics
+    );
+    let call = expand_ok(
+        "stmt.sts",
+        "export syntax wrap:item {\n  rule { wrap $x:stmt } => { $x }\n}\nwrap import(\"y\");\n",
+    );
+    assert!(call.contains("import(\"y\");"), "{call}");
+}
+
 /// Hygiene asks the output, as upstream does: a binder the user wrote inside
 /// input a macro consumed (and did not print again) does not force a rename,
 /// one still printed does.

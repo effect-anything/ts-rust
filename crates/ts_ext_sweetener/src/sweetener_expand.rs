@@ -2633,6 +2633,9 @@ enum Pat {
 enum HoleKind {
     Expr,
     Stmt,
+    /// `$x:item`: a module item. Unlike `:stmt` it also reads an import or
+    /// export declaration.
+    Item,
     Type,
     Binding,
     Ident,
@@ -4490,7 +4493,8 @@ fn hole_kind(raw: &str) -> HoleKind {
         "typeMember" => HoleKind::Member { type_member: true },
         "tt" | "token" => HoleKind::TokenTree,
         // Positions, not user syntax classes. `$body:item` is one item.
-        "item" | "jsx" | "jsxChild" => HoleKind::Stmt,
+        "item" => HoleKind::Item,
+        "jsx" | "jsxChild" => HoleKind::Stmt,
         // A user syntax class (`State`, `Segment`) is not a builtin hole.
         // Matching looks the class up by this spelling.
         other => HoleKind::Class(other.to_owned()),
@@ -7225,7 +7229,23 @@ fn take_hole(
     let node = nodes.get(index)?;
     match kind {
         HoleKind::Class(_) => None,
-        HoleKind::Stmt => {
+        HoleKind::Stmt | HoleKind::Item => {
+            // An import or export declaration is a module item, not a
+            // statement. `import("x")` and `import.meta` are expressions.
+            if matches!(kind, HoleKind::Stmt)
+                && (token_is(Some(node), "export")
+                    || (token_is(Some(node), "import")
+                        && !matches!(
+                            nodes.get(index + 1),
+                            Some(Syntax::Group {
+                                delimiter: Delimiter::Paren,
+                                ..
+                            })
+                        )
+                        && !operator_is(nodes.get(index + 1), ".")))
+            {
+                return None;
+            }
             // `<li>item</li>` is one JSX child. A later `{else}` or `{end}`
             // is the next pattern token, not part of this element, and a
             // `{name}` inside the element is a child, not the end of it.
