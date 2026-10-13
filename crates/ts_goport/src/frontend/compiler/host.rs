@@ -318,9 +318,7 @@ impl CompilerHost for CompilerHostImpl {
             // its embedded text (what `WrappedFs::read_file` copies).
             match take_prefetched(opts, script_kind, None) {
                 Prefetched::Parse(file) => {
-                    return Some(Rc::new(crate::ext::precheck::apply(
-                        opts, file,
-                    )));
+                    return Some(Rc::new(crate::ext::precheck::apply(opts, file)));
                 }
                 Prefetched::Text(text) => text,
                 Prefetched::Nothing => match bundled_text(&opts.file_name) {
@@ -344,9 +342,7 @@ impl CompilerHost for CompilerHostImpl {
             // text.
             match take_prefetched(opts, script_kind, Some(text.as_str())) {
                 Prefetched::Parse(file) => {
-                    return Some(Rc::new(crate::ext::precheck::apply(
-                        opts, file,
-                    )));
+                    return Some(Rc::new(crate::ext::precheck::apply(opts, file)));
                 }
                 Prefetched::Text(worker_text) => worker_text,
                 Prefetched::Nothing => unpacked_lib_text(&opts.file_name, &text)

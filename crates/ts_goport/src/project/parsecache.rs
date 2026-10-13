@@ -190,9 +190,7 @@ pub fn new_parse_cache(options: RefCountCacheOptions) -> Rc<ParseCache> {
             let prefetched =
                 compiler::take_prefetched(&opts, key.script_kind, Some(content.as_str()));
             let file = match prefetched {
-                compiler::Prefetched::Parse(file) => {
-                    crate::ext::precheck::apply(&opts, file)
-                }
+                compiler::Prefetched::Parse(file) => crate::ext::precheck::apply(&opts, file),
                 // The worker text has the same bytes (a static text: this
                 // host's worker parses are static, see
                 // `CompilerHost::freeable_worker_parses`).

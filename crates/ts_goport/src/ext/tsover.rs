@@ -710,7 +710,9 @@ fn rewritten_slice(owner: Node, node: Node, nested: &[Edit]) -> String {
     let origin = skip_trivia(source, node.pos());
     let end = node.end();
     let raw_start = usize::try_from(origin.max(0)).unwrap_or(0);
-    let raw_end = usize::try_from(end.max(origin)).unwrap_or(source.len()).min(source.len());
+    let raw_end = usize::try_from(end.max(origin))
+        .unwrap_or(source.len())
+        .min(source.len());
     let raw = source[raw_start.min(raw_end)..raw_end].to_string();
     let local = nested
         .iter()
@@ -732,7 +734,9 @@ fn rewritten_slice(owner: Node, node: Node, nested: &[Edit]) -> String {
     // contains `segment`. That edit is the whole expression: keep it, and
     // do not leave the extra character in front of `__tsover_*`.
     if local.len() == 1 && local[0].end >= raw.len() as i32 && local[0].start > 0 {
-        let start = usize::try_from(local[0].start).unwrap_or(raw.len()).min(raw.len());
+        let start = usize::try_from(local[0].start)
+            .unwrap_or(raw.len())
+            .min(raw.len());
         let prefix = &raw[..start];
         if call_argument_starts_with(&local[0].text, prefix) {
             return local[0].text.clone();
@@ -903,7 +907,9 @@ mod tests {
         let code = "function f() {\n  \"use gpu\";\n  const corner = id - segment * 3;\n  const turn = (segment / 216) * 6.2831855;\n  const theta = angle + spin + (1.5707963 - 3.14159265 / petals);\n}\n";
         let rewritten = rewrite_text("a.ts", code).unwrap();
         assert!(
-            rewritten.code.contains("__tsover_sub(id, __tsover_mul(segment, 3))"),
+            rewritten
+                .code
+                .contains("__tsover_sub(id, __tsover_mul(segment, 3))"),
             "{}",
             rewritten.code
         );
