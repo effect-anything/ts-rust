@@ -212,7 +212,7 @@ fn apply_typegpu(
     }
     .transform(path, code);
     if phase == TransformPhase::Build {
-        let output = rewrite_specifiers(&gpu.code);
+        let output = rewrite_specifiers(path, source, &gpu.code);
         let segments = crate::retarget_segments(code, &gpu.code, &first.span_map_segments());
         let segments = crate::retarget_segments(&gpu.code, &output, &segments);
         let mappings = mappings_json(&segments);
@@ -220,7 +220,7 @@ fn apply_typegpu(
         let mut diagnostics = diagnostics_of(first);
         diagnostics.extend(author_diagnostics(first, gpu.diagnostics));
         return Transformed {
-            changed: already_changed || gpu.changed,
+            changed: already_changed || gpu.changed || output != gpu.code,
             extension,
             source_map,
             mappings,
@@ -230,7 +230,7 @@ fn apply_typegpu(
     }
     let Some(rewritten) = gpu.rewrite else {
         let changed = already_changed || !first.diagnostics.is_empty() || gpu.code != code;
-        let output = rewrite_specifiers(&gpu.code);
+        let output = rewrite_specifiers(path, source, &gpu.code);
         let segments = crate::retarget_segments(code, &gpu.code, &first.span_map_segments());
         let segments = crate::retarget_segments(&gpu.code, &output, &segments);
         let mappings = mappings_json(&segments);
@@ -238,7 +238,7 @@ fn apply_typegpu(
         let mut diagnostics = diagnostics_of(first);
         diagnostics.extend(author_diagnostics(first, gpu.diagnostics));
         return Transformed {
-            changed,
+            changed: changed || output != gpu.code,
             extension,
             source_map,
             mappings,
@@ -259,7 +259,7 @@ fn apply_typegpu(
         segment.0 = segment.0.wrapping_add(shift);
         segment.1 = segment.1.wrapping_add(shift);
     }
-    let output = rewrite_specifiers(&gpu.code);
+    let output = rewrite_specifiers(path, source, &gpu.code);
     let segments = crate::retarget_segments(&gpu.code, &output, &segments);
     let mappings = mappings_json(&segments);
     let source_map = v3_source_map(path, source, &output, &segments);
@@ -287,10 +287,515 @@ fn apply_typegpu(
 }
 
 /// Sweetener imports name the source extension. After expansion the file is
-/// TypeScript, so the specifier must name the virtual extension. A later
-/// bundler then resolves `logic.ts`, not `logic.sts`.
-fn rewrite_specifiers(code: &str) -> String {
-    code.replace(".stsx", "").replace(".sts", "")
+/// TypeScript, so a module specifier that names a `.sts` or `.stsx` file
+/// must name the virtual extension instead. A later bundler then resolves
+/// `logic.ts`, not `logic.sts`.
+///
+/// Only module specifiers change: `import` and `import type` declarations,
+/// `export ... from` declarations, dynamic `import()` and `import.source()`
+/// / `import.defer()` calls, and `import("...")` types. A string, a template
+/// that is not itself the specifier, or a comment that merely contains
+/// `.sts` stays. The scan follows statement and expression structure, so a
+/// `.sts` inside an ordinary literal is never a specifier just because it
+/// sits on the same line as an import.
+fn rewrite_specifiers(_path: &str, source: &str, code: &str) -> String {
+    // Sweetener expansion strips `.sts` from every string, specifier or
+    // not. Put the author's literal back when this text still matches it
+    // apart from that strip, then remove the extension from specifiers only.
+    let code = restore_unstripped_literals(source, code);
+    apply_specifier_spans(&code)
+}
+
+fn apply_specifier_spans(code: &str) -> String {
+    let code = rewrite_from_clauses(code);
+    let spans = sts_specifier_spans(&code);
+    if spans.is_empty() {
+        return code.to_owned();
+    }
+    let mut out = String::with_capacity(code.len());
+    let mut cursor = 0usize;
+    for (start, end, rewritten) in spans {
+        if start < cursor || end > code.len() || &code[start..end] == rewritten {
+            continue;
+        }
+        out.push_str(&code[cursor..start]);
+        out.push_str(&rewritten);
+        cursor = end;
+    }
+    out.push_str(&code[cursor..]);
+    out
+}
+
+/// Sweetener's printer drops a trailing `.sts` / `.stsx` from every
+/// string. Where `code` is `source` with only those drops, put the
+/// author's literal back. A later pass then strips the extension from
+/// module specifiers alone, so a string or a comment keeps `.sts`.
+fn restore_unstripped_literals(source: &str, code: &str) -> String {
+    if source == code || !source.contains(".sts") {
+        return code.to_owned();
+    }
+    let source_bytes = source.as_bytes();
+    let code_bytes = code.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut si = 0usize;
+    let mut ci = 0usize;
+    while si < source_bytes.len() && ci < code_bytes.len() {
+        if source_bytes[si] == code_bytes[ci] {
+            out.push(source_bytes[si] as char);
+            si += 1;
+            ci += 1;
+            continue;
+        }
+        let rest = &source[si..];
+        let ext = [".stsx", ".sts"]
+            .into_iter()
+            .find(|ext| rest.starts_with(ext));
+        let Some(ext) = ext else {
+            return code.to_owned();
+        };
+        // The drop is only undone inside a quoted literal. A comment or
+        // other byte that differs is not this printer's rewrite.
+        if !inside_quote(source_bytes, si) {
+            return code.to_owned();
+        }
+        out.push_str(ext);
+        si += ext.len();
+    }
+    if si == source_bytes.len() && ci == code_bytes.len() {
+        out
+    } else {
+        code.to_owned()
+    }
+}
+
+fn inside_quote(bytes: &[u8], at: usize) -> bool {
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < at && i < bytes.len() {
+        let ch = bytes[i];
+        if ch == b'\\' && quote.is_some() {
+            i += 2;
+            continue;
+        }
+        if matches!(ch, b'"' | b'\'' | b'`') {
+            quote = match quote {
+                Some(open) if open == ch => None,
+                Some(_) => quote,
+                None => Some(ch),
+            };
+        }
+        i += 1;
+    }
+    quote.is_some()
+}
+
+/// Byte ranges of quoted module specifiers whose path ends in `.sts` or
+/// `.stsx`, in source order.
+///
+/// A specifier is the quoted literal after `from`, after `require(`, or
+/// after `import(` (`import.source(` and `import.defer(` included). The
+/// walk is one token scan. A string, a template, a comment, or a regexp is
+/// one token, so `.sts` inside it is not a keyword and not a specifier
+/// unless that token is itself the specifier.
+/// `from "....sts"` and `from '....sts'`, including a newline between
+/// the keyword and the string. `from:` is a property and is left alone.
+fn rewrite_from_clauses(code: &str) -> String {
+    let bytes = code.as_bytes();
+    let mut out = String::with_capacity(code.len());
+    let mut cursor = 0usize;
+    let mut at = 0usize;
+    while at + 4 <= bytes.len() {
+        if &bytes[at..at + 4] == b"from"
+            && (at == 0 || !is_ident_cont(bytes[at - 1]))
+            && !is_ident_cont(bytes.get(at + 4).copied().unwrap_or(b' '))
+        {
+            let mut next = at + 4;
+            while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                next += 1;
+            }
+            if matches!(bytes.get(next), Some(b'"' | b'\'')) {
+                let end = skip_quoted(bytes, next);
+                if let Some(rewritten) = strip_sts_extension(&code[next..end]) {
+                    out.push_str(&code[cursor..next]);
+                    out.push_str(&rewritten);
+                    cursor = end;
+                    at = end;
+                    continue;
+                }
+            }
+        }
+        at += 1;
+    }
+    if cursor == 0 {
+        return code.to_owned();
+    }
+    out.push_str(&code[cursor..]);
+    out
+}
+
+fn sts_specifier_spans(code: &str) -> Vec<(usize, usize, String)> {
+    let bytes = code.as_bytes();
+    let mut spans = Vec::new();
+    let mut at = 0usize;
+    let mut expect = Expect::None;
+    while at < bytes.len() {
+        let ch = bytes[at];
+        if ch.is_ascii_whitespace() {
+            at += 1;
+            continue;
+        }
+        if ch == b'/' && bytes.get(at + 1) == Some(&b'/') {
+            at += 2;
+            while at < bytes.len() && bytes[at] != b'\n' {
+                at += 1;
+            }
+            continue;
+        }
+        if ch == b'/' && bytes.get(at + 1) == Some(&b'*') {
+            at += 2;
+            while at + 1 < bytes.len() && !(bytes[at] == b'*' && bytes[at + 1] == b'/') {
+                at += 1;
+            }
+            at = (at + 2).min(bytes.len());
+            continue;
+        }
+        if ch == b'/' && slash_starts_regexp(bytes, at) {
+            at = skip_regexp(bytes, at);
+            expect = Expect::None;
+            continue;
+        }
+        if matches!(ch, b'"' | b'\'') {
+            let start = at;
+            at = skip_quoted(bytes, at);
+            if expect == Expect::Specifier {
+                push_sts(&code[start..at], start, at, &mut spans);
+            }
+            expect = Expect::None;
+            continue;
+        }
+        if ch == b'`' {
+            at = scan_template(code, bytes, at, expect == Expect::Specifier, &mut spans);
+            expect = Expect::None;
+            continue;
+        }
+        if is_ident_start(ch) {
+            let start = at;
+            at += 1;
+            while at < bytes.len() && is_ident_cont(bytes[at]) {
+                at += 1;
+            }
+            let word = &code[start..at];
+            expect = if expect == Expect::Import {
+                // `import.source` and `import.defer` are still the call.
+                Expect::Import
+            } else {
+                match word {
+                    "import" => Expect::Import,
+                    "require" => Expect::Require,
+                    "from" => Expect::From,
+                    _ => Expect::None,
+                }
+            };
+            continue;
+        }
+        match (expect, ch) {
+            (Expect::Import | Expect::Require, b'(') => expect = Expect::Specifier,
+            (Expect::From, b'"' | b'\'' | b'`') => {
+                let start = at;
+                at = if ch == b'`' {
+                    scan_template(code, bytes, at, true, &mut spans)
+                } else {
+                    let end = skip_quoted(bytes, at);
+                    push_sts(&code[start..end], start, end, &mut spans);
+                    end
+                };
+                expect = Expect::None;
+                continue;
+            }
+            (Expect::Import, b'.') => {}
+            (Expect::Import, b'<') => {
+                at = skip_type_args(bytes, at);
+                expect = Expect::Import;
+                continue;
+            }
+            // `from:` is a property. `:` is not trivia between `from` and
+            // its string, so the word was not a clause.
+            (Expect::From, b':') => expect = Expect::None,
+            (_, b'(' | b')' | b'[' | b']' | b'{' | b'}' | b',' | b';') => {}
+            _ => {
+                expect = Expect::None;
+            }
+        }
+        at += 1;
+    }
+    spans
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expect {
+    None,
+    /// `import` or `import.source` / `import.defer`, waiting for `(`.
+    Import,
+    /// `require`, waiting for `(`.
+    Require,
+    /// `from`, waiting for a string. `from:` is a property, not a clause.
+    From,
+    /// The next quoted literal is a module specifier.
+    Specifier,
+}
+
+fn push_sts(literal: &str, start: usize, end: usize, spans: &mut Vec<(usize, usize, String)>) {
+    if let Some(rewritten) = strip_sts_extension(literal) {
+        spans.push((start, end, rewritten));
+    }
+}
+
+fn scan_template(
+    code: &str,
+    bytes: &[u8],
+    mut at: usize,
+    is_specifier: bool,
+    spans: &mut Vec<(usize, usize, String)>,
+) -> usize {
+    let start = at;
+    at += 1;
+    while at < bytes.len() {
+        let ch = bytes[at];
+        if ch == b'\\' {
+            at = (at + 2).min(bytes.len());
+            continue;
+        }
+        if ch == b'`' {
+            at += 1;
+            if is_specifier {
+                push_sts(&code[start..at], start, at, spans);
+            }
+            return at;
+        }
+        if ch == b'$' && bytes.get(at + 1) == Some(&b'{') {
+            // A template with a substitution is not a specifier literal.
+            at += 2;
+            at = scan_nested(code, bytes, at, spans);
+            continue;
+        }
+        at += 1;
+    }
+    at
+}
+
+/// Tokens inside `${ ... }`, stopped at the `}` that closes this hole.
+fn scan_nested(
+    code: &str,
+    bytes: &[u8],
+    mut at: usize,
+    spans: &mut Vec<(usize, usize, String)>,
+) -> usize {
+    let mut depth = 1i32;
+    let mut expect = Expect::None;
+    while at < bytes.len() && depth > 0 {
+        let ch = bytes[at];
+        if ch.is_ascii_whitespace() {
+            at += 1;
+            continue;
+        }
+        if matches!(ch, b'"' | b'\'') {
+            let start = at;
+            at = skip_quoted(bytes, at);
+            if depth == 1 && expect == Expect::Specifier {
+                push_sts(&code[start..at], start, at, spans);
+            }
+            expect = Expect::None;
+            continue;
+        }
+        if ch == b'`' {
+            at = scan_template(
+                code,
+                bytes,
+                at,
+                depth == 1 && expect == Expect::Specifier,
+                spans,
+            );
+            expect = Expect::None;
+            continue;
+        }
+        if ch == b'{' {
+            depth += 1;
+            at += 1;
+            continue;
+        }
+        if ch == b'}' {
+            depth -= 1;
+            at += 1;
+            if depth == 0 {
+                break;
+            }
+            continue;
+        }
+        if depth == 1 && is_ident_start(ch) {
+            let start = at;
+            at += 1;
+            while at < bytes.len() && is_ident_cont(bytes[at]) {
+                at += 1;
+            }
+            let word = &code[start..at];
+            expect = if expect == Expect::Import {
+                Expect::Import
+            } else {
+                match word {
+                    "import" => Expect::Import,
+                    "require" => Expect::Require,
+                    "from" => Expect::From,
+                    _ => Expect::None,
+                }
+            };
+            continue;
+        }
+        if depth == 1 {
+            match (expect, ch) {
+                (Expect::Import | Expect::Require, b'(') => expect = Expect::Specifier,
+                (Expect::From, b'"' | b'\'' | b'`') => {
+                    let start = at;
+                    at = if ch == b'`' {
+                        scan_template(code, bytes, at, true, spans)
+                    } else {
+                        let end = skip_quoted(bytes, at);
+                        push_sts(&code[start..end], start, end, spans);
+                        end
+                    };
+                    expect = Expect::None;
+                    continue;
+                }
+                (Expect::Import, b'.') => {}
+                (_, b'(' | b')' | b'[' | b']' | b',' | b';' | b':') => {}
+                _ => expect = Expect::None,
+            }
+        }
+        at += 1;
+    }
+    at
+}
+
+fn skip_quoted(bytes: &[u8], mut at: usize) -> usize {
+    let quote = bytes[at];
+    at += 1;
+    while at < bytes.len() {
+        let ch = bytes[at];
+        at += 1;
+        if ch == b'\\' {
+            if at < bytes.len() {
+                at += 1;
+            }
+            continue;
+        }
+        if ch == quote {
+            break;
+        }
+    }
+    at
+}
+
+fn skip_type_args(bytes: &[u8], mut at: usize) -> usize {
+    let mut depth = 0i32;
+    while at < bytes.len() {
+        let ch = bytes[at];
+        if matches!(ch, b'"' | b'\'' | b'`') {
+            at = skip_quoted(bytes, at);
+            continue;
+        }
+        if ch == b'<' {
+            depth += 1;
+        } else if ch == b'>' {
+            depth -= 1;
+            at += 1;
+            if depth == 0 {
+                break;
+            }
+            continue;
+        }
+        at += 1;
+    }
+    at
+}
+
+/// `/` after a value is division. Anywhere else it opens a regexp.
+fn slash_starts_regexp(bytes: &[u8], at: usize) -> bool {
+    let mut prev = at;
+    while prev > 0 && bytes[prev - 1].is_ascii_whitespace() {
+        prev -= 1;
+    }
+    if prev == 0 {
+        return true;
+    }
+    let ch = bytes[prev - 1];
+    !(ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'$' | b')' | b']' | b'}'))
+}
+
+fn skip_regexp(bytes: &[u8], mut at: usize) -> usize {
+    at += 1;
+    let mut class = false;
+    while at < bytes.len() {
+        let ch = bytes[at];
+        if ch == b'\\' {
+            at = (at + 2).min(bytes.len());
+            continue;
+        }
+        at += 1;
+        if ch == b'[' {
+            class = true;
+        } else if ch == b']' {
+            class = false;
+        } else if ch == b'/' && !class {
+            while at < bytes.len() && bytes[at].is_ascii_alphabetic() {
+                at += 1;
+            }
+            break;
+        } else if ch == b'\n' {
+            break;
+        }
+    }
+    at
+}
+
+fn is_ident_start(ch: u8) -> bool {
+    ch.is_ascii_alphabetic() || matches!(ch, b'_' | b'$')
+}
+
+fn is_ident_cont(ch: u8) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'$')
+}
+
+/// The quoted specifier with a trailing `.sts` or `.stsx` removed, query
+/// and hash included. `None` when this literal does not name such a file.
+fn strip_sts_extension(literal: &str) -> Option<String> {
+    let bytes = literal.as_bytes();
+    if bytes.len() < 2 {
+        return None;
+    }
+    let quote = *bytes.first()?;
+    if quote != b'"' && quote != b'\'' && quote != b'`' {
+        return None;
+    }
+    if *bytes.last()? != quote {
+        return None;
+    }
+    let body = &literal[1..literal.len() - 1];
+    let (path, suffix) = split_specifier_suffix(body);
+    let stripped = path
+        .strip_suffix(".stsx")
+        .or_else(|| path.strip_suffix(".sts"))?;
+    if stripped.is_empty() || stripped.ends_with('.') {
+        return None;
+    }
+    Some(format!("{q}{stripped}{suffix}{q}", q = quote as char))
+}
+
+/// `file.sts?x=1` and `file.sts#hash` keep the suffix; the extension is
+/// the end of the path.
+fn split_specifier_suffix(body: &str) -> (&str, &str) {
+    match body.find(['?', '#']) {
+        Some(at) => (&body[..at], &body[at..]),
+        None => (body, ""),
+    }
 }
 
 fn diagnostics_of(expansion: &crate::Expansion) -> Vec<SessionDiagnostic> {
@@ -813,6 +1318,106 @@ mod tests {
         assert_eq!(
             &author[kept_seg.2 as usize..kept_seg.3 as usize],
             &rewritten.code[kept_seg.0 as usize..kept_seg.1 as usize]
+        );
+    }
+
+    #[test]
+    fn sts_specifiers_rewrite_imports_only() {
+        let code = concat!(
+            "import { a } from \"./logic.sts\";\n",
+            "import type { T } from './types.stsx';\n",
+            "import value = require(\"./value.sts\");\n",
+            "export { b } from \"./panel.stsx\";\n",
+            "export * from \"./all.sts\";\n",
+            "const loaded = import(\"./dyn.sts\");\n",
+            "const phase = import.source(\"./source.stsx\");\n",
+            "type Box = import(\"./box.sts\").Box;\n",
+            "const text = \"keep ./note.sts in a string\";\n",
+            "const tick = `keep ./note.sts in a template`;\n",
+            "const mixed = `head ${import(\"./inner.sts\")} tail ./note.sts`;\n",
+            "// comment ./comment.sts must stay\n",
+            "const query = import(\"./q.sts?x=1\");\n",
+            "const plain = import(\"./already.ts\");\n",
+            "const mid = \"not.sts.a.module\";\n",
+            "const obj = { from: \"./obj.sts\", note: \"./note.sts\" };\n",
+            "function nested() { import { z } from \"./inside.sts\"; return import(\"./also.sts\"); }\n",
+            "const arrow = () => { import { y } from \"./arrow.sts\"; };\n",
+        );
+        let mut out = TransformSession::check().transform("main.sts", code);
+        let has = |needle: &str| {
+            assert!(
+                out.code.contains(needle),
+                "{needle} missing in {}",
+                out.code
+            )
+        };
+        has("from \"./logic\"");
+        has("from './types'");
+        has("require(\"./value\")");
+        has("from \"./panel\"");
+        has("from \"./all\"");
+        has("import(\"./dyn\")");
+        has("import.source(\"./source\")");
+        has("import(\"./box\").Box");
+        has("import(\"./inner\")");
+        has("import(\"./q?x=1\")");
+        has("import(\"./already.ts\")");
+        has("\"keep ./note.sts in a string\"");
+        has("`keep ./note.sts in a template`");
+        has("tail ./note.sts");
+        has("// comment ./comment.sts must stay");
+        has("\"not.sts.a.module\"");
+        has("from \"./inside\"");
+        has("import(\"./also\")");
+        has("from \"./arrow\"");
+        let obj = out.code.find("const obj").expect("obj");
+        let line = &out.code[obj..out.code[obj..]
+            .find('\n')
+            .map(|n| obj + n)
+            .unwrap_or(out.code.len())];
+        assert_eq!(
+            line, "const obj = { from: \"./obj.sts\", note: \"./note.sts\" };",
+            "{line:?}"
+        );
+        has("./note.sts");
+        has("not.sts.a.module");
+        // Verbatim pieces still copy the author's bytes. The shortened
+        // specifier is an atom over the original literal.
+        for [vs, vl, os, ol, kind] in tuples(&out.mappings) {
+            let (vs, vl, os, ol) = (vs as usize, vl as usize, os as usize, ol as usize);
+            if kind == 0 {
+                assert_eq!(&out.code[vs..vs + vl], &code[os..os + ol]);
+            }
+        }
+        let logic = out.code.find("./logic\"").unwrap();
+        let covering = tuples(&out.mappings)
+            .into_iter()
+            .find(|item| item[0] as usize <= logic && logic < item[0] as usize + item[1] as usize)
+            .expect("logic specifier segment");
+        assert_eq!(covering[4], 1, "rewritten specifier is an atom");
+        let original = &code[covering[2] as usize..covering[2] as usize + covering[3] as usize];
+        assert!(original.contains("./logic.sts"), "{original}");
+        // Text after the shorter specifier still maps to itself.
+        let comment = out.code.find("comment ./comment.sts").unwrap();
+        let comment_seg = tuples(&out.mappings)
+            .into_iter()
+            .find(|item| {
+                item[0] as usize <= comment && comment < item[0] as usize + item[1] as usize
+            })
+            .expect("comment segment");
+        assert_eq!(comment_seg[4], 0);
+        assert_eq!(
+            &out.code[comment_seg[0] as usize..comment_seg[0] as usize + comment_seg[1] as usize],
+            &code[comment_seg[2] as usize..comment_seg[2] as usize + comment_seg[3] as usize]
+        );
+
+        // The same rewrite on a file that is not Sweetener source.
+        out = TransformSession::check().transform("main.ts", code);
+        assert!(out.code.contains("from \"./logic\""), "{}", out.code);
+        assert!(
+            out.code.contains("\"keep ./note.sts in a string\""),
+            "{}",
+            out.code
         );
     }
 
