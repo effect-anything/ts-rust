@@ -244,7 +244,9 @@ fn write_node(node: Node, depth: usize, out: &mut String) {
     }
     out.push('\n');
     node.for_each_child(|child| {
-        if child != node {
+        // A trailing comma is formatting. The module note says so; the dump
+        // used to keep `CommaToken`, so import lists differed by that comma.
+        if child != node && child.kind() != SyntaxKind::CommaToken {
             write_node(child, depth + 1, out);
         }
         false

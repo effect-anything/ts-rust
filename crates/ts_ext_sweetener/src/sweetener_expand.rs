@@ -976,6 +976,11 @@ impl<'a> Printer<'a> {
                 if index > 0 && operator_is(nodes.get(index - 1), ".") {
                     return false;
                 }
+                // `#core(function ...)` is ordinary TypeScript. The form pass
+                // must not read it as the implicit-return `function` macro.
+                if self.printing_core && raw == "function" {
+                    return false;
+                }
                 if self.form_signals.iter().any(|(name, _)| name == raw) {
                     return true;
                 }
@@ -1109,6 +1114,14 @@ impl<'a> Printer<'a> {
             channel_renames: self.channel_renames.clone(),
             failed: false,
         };
+        // A form that already rewrote `function (...)` is TypeScript. Matching
+        // it again as the function macro fails the file on the `return` the
+        // form just inserted. Other macros in the replacement still expand.
+        if replacement.trim_start().starts_with("function") {
+            nested
+                .macros_mut()
+                .retain(|macro_| macro_.name != "function");
+        }
         nested.print_nodes(&read.children);
         nested.copy_until(owned.len());
         self.diagnostics.append(&mut nested.diagnostics);
@@ -1151,29 +1164,6 @@ impl<'a> Printer<'a> {
                 );
             }
         }
-        let wants_csp = self
-            .form_signals
-            .iter()
-            .any(|(key, _)| key == "__csp_helpers");
-        if wants_csp && !self.out.contains("type Effect") {
-            let helpers = "type Effect =\n  { readonly kind: \"put\"; readonly value: number } | { readonly kind: \"take\" };\nconst put = (_channel: object, value: number): Effect => ({ kind: \"put\", value, });\nconst take = (channel: object): Effect => { void channel; return { kind: \"take\" }; };\n\n";
-            self.out.insert_str(0, helpers);
-            let added = u32_at(helpers.len());
-            for segment in &mut self.segments {
-                segment.virtual_start = segment.virtual_start.saturating_add(added);
-                segment.virtual_end = segment.virtual_end.saturating_add(added);
-            }
-            self.segments.insert(
-                0,
-                Segment {
-                    virtual_start: 0,
-                    virtual_end: added,
-                    original_start: 0,
-                    original_end: 0,
-                    kind: SegmentKind::Atom,
-                },
-            );
-        }
     }
 
     fn emit_runtime_imports(&mut self) {
@@ -1197,18 +1187,8 @@ impl<'a> Printer<'a> {
                 }
             }
             if !parts.is_empty() {
-                // The captured React import keeps the trailing comma of the
-                // syntax import that used to follow it. Canonical comparison
-                // treats that comma as different from the same list without it.
-                let comma = if import.specifier.contains("react")
-                    && parts.iter().any(|part| part == "useState")
-                {
-                    ","
-                } else {
-                    ""
-                };
                 lines.push_str(&format!(
-                    "import {{ {}{comma} }} from {};\n",
+                    "import {{ {} }} from {};\n",
                     parts.join(", "),
                     import.specifier
                 ));
@@ -1326,6 +1306,16 @@ impl<'a> Printer<'a> {
         if rules.is_empty() {
             return false;
         }
+        // The spelling is a macro, but this token is not where a rule
+        // starts. `async function` is ordinary TypeScript when every rule
+        // is written `function`. Failing the file here is the old "any
+        // leading literal may be skipped" match.
+        if rules
+            .iter()
+            .all(|rule| !prefix_was_written(self.source, nodes, index, &rule.pattern))
+        {
+            return false;
+        }
         self.fail_macro(nodes, index, &name, &rules);
         self.skip_failed(nodes, index);
         self.last_form_next = nodes.len();
@@ -1425,20 +1415,10 @@ impl<'a> Printer<'a> {
         // Curried `function` prints ordinary overloads. An expression
         // `function(...)` is the same macro. Reprinting either matches the
         // imported rule and fails the file on the `return` it just wrote.
-        let mut expanded =
-            if rewritten.text.contains("function") && self.source.contains("shadows core") {
-                rewritten.text.clone()
-            } else {
-                self.expand_replacement(&rewritten.text)
-            };
+        let mut expanded = self.expand_replacement(&rewritten.text);
         // Channel operators name `put` and `take`. The captured file still
         // declares `Effect`, `put`, and `take` when the input does not.
         // The hygiene input is that case. Do not invent them twice.
-        if expanded.contains("yield put(") && self.depth == 0 && !self.source.contains("const put")
-        {
-            self.form_signals
-                .push(("__csp_helpers".to_owned(), String::new()));
-        }
         // `({ kind: "put", value })` keeps the trailing comma. Canonical
         // comparison treats a dropped comma as different.
         if expanded.contains("kind: \"put\"") {
@@ -1928,11 +1908,6 @@ fn load_macros(
     for import in imports {
         load_syntax_module(&mut loaded, &base, &base, import, &mut seen, source, true);
     }
-    if imports.is_empty() && source.contains("unless") {
-        // Unit tests call `unless` with no import. The language form is the
-        // same rule the tour's macros.sts exports.
-        loaded.macros.push(unless_macro());
-    }
     let _ = user_names;
     loaded
 }
@@ -1949,6 +1924,7 @@ fn load_syntax_module(
     source: &str,
     report: bool,
 ) {
+    let _ = source;
     let Some(body) = specifier_body(&import.specifier) else {
         return;
     };
@@ -1963,17 +1939,13 @@ fn load_syntax_module(
             return;
         }
         for name in &import.names {
-            if builtin_unless(name, source, &import.specifier) {
-                loaded.macros.push(unless_macro());
-            } else {
-                loaded.diagnostics.push(Diagnostic {
-                    message: format!(
-                        "SWR4001: Sweetener macro error: macro `{name}` was imported for syntax but its module could not be read"
-                    ),
-                    start: import.span.start,
-                    end: import.span.end,
-                });
-            }
+            loaded.diagnostics.push(Diagnostic {
+                message: format!(
+                    "SWR4001: Sweetener macro error: macro `{name}` was imported for syntax but its module could not be read"
+                ),
+                start: import.span.start,
+                end: import.span.end,
+            });
         }
         return;
     };
@@ -2005,8 +1977,6 @@ fn load_syntax_module(
             }
             macro_.name = name.clone();
             taken.push(macro_);
-        } else if name == "unless" {
-            push_macro(&mut loaded.macros, unless_macro());
         } else if report {
             loaded.diagnostics.push(Diagnostic {
                 message: format!(
@@ -2034,10 +2004,9 @@ fn load_syntax_module(
     for macro_ in found.into_values() {
         push_macro(&mut loaded.macros, macro_);
     }
-    merge_runtime_imports(
-        &mut loaded.runtime_imports,
-        rebase_runtime_imports(user_dir, &path, used),
-    );
+    // A nested `for syntax` module is where the macro it exports is defined.
+    // Its runtime imports are synthesized ahead of the module that imported
+    // it, which is where the original printer puts definition-site imports.
     let nested_dir = path
         .parent()
         .map(Path::to_path_buf)
@@ -2045,6 +2014,10 @@ fn load_syntax_module(
     for nested in syntax_imports(&read.children) {
         load_syntax_module(loaded, user_dir, &nested_dir, &nested, seen, source, true);
     }
+    merge_runtime_imports(
+        &mut loaded.runtime_imports,
+        rebase_runtime_imports(user_dir, &path, used),
+    );
 }
 
 fn push_macro(macros: &mut Vec<Macro>, macro_: Macro) {
@@ -2134,34 +2107,6 @@ fn rename_pat_lit(pats: &mut [Pat], from: &str, to: &str) {
             Pat::Group { inner, .. } | Pat::Rep { inner, .. } => rename_pat_lit(inner, from, to),
             _ => {}
         }
-    }
-}
-
-fn builtin_unless(name: &str, source: &str, specifier: &str) -> bool {
-    name == "unless" && (source.contains("unless (") || specifier.contains("macros"))
-}
-
-fn unless_macro() -> Macro {
-    let template_source = "{if (!($condition)) { $($body)* }}";
-    let read = sweetener_reader::read_syntax(template_source);
-    let template = read
-        .children
-        .first()
-        .map(|group| template_from_source(template_source, group))
-        .unwrap_or_default();
-    Macro {
-        name: "unless".to_owned(),
-        fixity: Fixity::Function,
-        precedence: 0,
-        associativity: Associativity::None,
-        rules: vec![Rule {
-            pattern: parse_pattern("unless ($condition:expr) { $($body:stmt)* }"),
-            introduced: introduced_of(template_source, &read.children),
-            template,
-            expect: None,
-            refines: Vec::new(),
-            literal_alias: None,
-        }],
     }
 }
 
@@ -4554,9 +4499,12 @@ fn match_rule_with(
 ) -> Option<Match> {
     let mut captures = HashMap::new();
     let mut cursor = index;
-    // A rule may write `export function` while the call site already printed
-    // `export` and is matching at `function`. Those leading literals are the
-    // head's modifiers, not a second copy of the name.
+    // A rule may write `export function` while the call site is already at
+    // `function`. The skipped words have to be the modifiers that were
+    // actually written. `async function` does not match `function`.
+    if !prefix_was_written(source, nodes, index, pattern) {
+        return None;
+    }
     let pattern = skip_matched_prefix(nodes, index, pattern);
     // `(-> value, call(...), ...)` is one group in the macro source. The
     // reader already opened that group, so the call site is the operator
@@ -4782,23 +4730,63 @@ fn skip_matched_prefix<'a>(nodes: &[Syntax], index: usize, pattern: &'a [Pat]) -
     }) else {
         return pattern;
     };
-    let Some(at) = pattern
-        .iter()
-        .position(|pat| matches!(pat, Pat::Lit(lit) if lit == head))
-    else {
+    // The matcher VM compares each literal with the token under the cursor.
+    // It does not search ahead for a later copy of the same spelling, and it
+    // does not treat an arbitrary leading literal as optional. A declaration
+    // modifier (`export`, `declare`, `default`) may already have been printed
+    // when matching resumes at the macro name. `async` is not one of those:
+    // `async function` does not match a rule written `function`.
+    let Some(at) = pattern.iter().position(|pat| match pat {
+        Pat::Lit(lit) if lit == head => true,
+        Pat::Lit(lit) if declaration_modifier(lit) => false,
+        _ => return false,
+    }) else {
         return pattern;
     };
-    if at == 0 {
+    if at == 0
+        || !pattern[..at]
+            .iter()
+            .all(|pat| matches!(pat, Pat::Lit(lit) if declaration_modifier(lit)))
+    {
         return pattern;
     }
-    // Only skip modifiers. A hole before the name is the form itself.
-    // `export function` matched at `function` skips `export`. `$left join`
-    // matched at `join` does not: the hole before `join` is the form.
-    if pattern[..at].iter().all(|pat| matches!(pat, Pat::Lit(_))) {
-        &pattern[at..]
-    } else {
-        pattern
+    &pattern[at..]
+}
+
+fn declaration_modifier(word: &str) -> bool {
+    matches!(word, "export" | "declare" | "default")
+}
+
+/// A rule matches from its first literal. A declaration modifier that the
+/// call site already printed may stand in front. Any other token there is
+/// part of the form: `async function` does not match a rule written
+/// `function`. A group boundary (the `}` that closed the macro) is not a
+/// token of the form.
+fn prefix_was_written(source: &str, nodes: &[Syntax], index: usize, pattern: &[Pat]) -> bool {
+    let Some(head) = nodes.get(index).and_then(|node| match node {
+        Syntax::Token { raw, .. } => Some(raw.as_str()),
+        _ => None,
+    }) else {
+        return true;
+    };
+    let starts = pattern.first().is_some_and(
+        |pat| matches!(pat, Pat::Lit(lit) if lit == head || declaration_modifier(lit)),
+    );
+    if !starts || index == 0 {
+        return true;
     }
+    // A previous member (`parse` above `overloaded`) is not a prefix. A word
+    // on the same line is: `async function` does not match `function`.
+    let Syntax::Token { raw, span, .. } = &nodes[index - 1] else {
+        return true;
+    };
+    let between = source
+        .get(span.end as usize..node_start(&nodes[index]))
+        .unwrap_or("");
+    if between.contains('\n') {
+        return true;
+    }
+    declaration_modifier(raw)
 }
 
 /// Words that open the class hole after this repetition. `where` opens
@@ -7018,11 +7006,6 @@ fn skip_syntax_import(nodes: &[Syntax], index: usize) -> usize {
     index + 1
 }
 
-fn parse_pattern(source: &str) -> Vec<Pat> {
-    let read = sweetener_reader::read_syntax(source);
-    pats_from(&read.children)
-}
-
 fn instantiate(
     source: &str,
     template: &[Tpl],
@@ -9061,7 +9044,10 @@ fn infix_rule_binds(
 fn strip_already_printed(source: &str, head: usize, expanded: &str) -> String {
     let before = source[..head].trim_end();
     let mut out = expanded.to_owned();
-    for word in ["export", "async", "declare", "default"] {
+    // `async` is part of the form. Stripping it made `async function`
+    // match a rule written `function`. Only a modifier the rule itself
+    // wrote, and that the call site already printed, is removed.
+    for word in ["export", "declare", "default"] {
         if before.ends_with(word) {
             let trimmed = out.trim_start();
             if let Some(rest) = trimmed.strip_prefix(word) {

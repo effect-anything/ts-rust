@@ -2490,10 +2490,36 @@ fn slice_span<'a>(source: &'a str, nodes: &[Syntax], start: usize, end: usize) -
 }
 
 fn file_binds(source: &str, name: &str) -> bool {
-    source
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-        .any(|word| word == name)
-        && source.contains(&format!("const {name}"))
+    let read = sweetener_reader::read_syntax(source);
+    region_binds_value(&read.children, name)
+}
+
+/// A value binding visible in this region. A brace opens a nested region, so
+/// a `const` inside a function does not shadow a macro temporary outside it.
+fn region_binds_value(nodes: &[Syntax], name: &str) -> bool {
+    let mut index = 0;
+    while index < nodes.len() {
+        if matches!(
+            token_raw(nodes.get(index)).as_deref(),
+            Some("const" | "let" | "var" | "function" | "class")
+        ) {
+            if token_raw(nodes.get(index + 1)).as_deref() == Some(name) {
+                return true;
+            }
+        }
+        if let Syntax::Group {
+            delimiter,
+            children,
+            ..
+        } = &nodes[index]
+        {
+            if *delimiter != Delimiter::Brace && region_binds_value(children, name) {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
 }
 
 fn string_source(text: &str) -> String {

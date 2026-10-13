@@ -11,9 +11,6 @@ use super::sweetener_reader::{self, Delimiter, Syntax};
 /// the cases this file owns.
 #[must_use]
 pub fn expand_apps(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    if let Some(item) = match_runtime_import(source, nodes, index) {
-        return Some(item);
-    }
     if let Some(item) = match_error_item(source, nodes, index) {
         return Some(item);
     }
@@ -222,40 +219,6 @@ fn rewrite(nodes: &[Syntax], index: usize, end: usize, text: String) -> FixtureR
         binds: Vec::new(),
         method: None,
     }
-}
-
-/// The fixture calls `_c`. Theirs imports it before every other import, and
-/// the printer cannot rewind, so the prefix is the first statement.
-fn match_runtime_import(source: &str, nodes: &[Syntax], index: usize) -> Option<FixtureRewrite> {
-    if index != 0 || !token_is(nodes.get(0), "import") {
-        return None;
-    }
-    if source.contains("react/compiler-runtime") {
-        return None;
-    }
-    let fixture = source.contains("memoized function")
-        || (source.contains("shadows core") && source.contains("identity(styles.a"));
-    if !fixture {
-        return None;
-    }
-    let end = import_end(nodes, 0);
-    let first = sweetener_reader::slice_range(source, node_start(&nodes[0]), end);
-    let text = format!("import {{ c as _c }} from \"react/compiler-runtime\";\n{first}");
-    Some(rewrite(nodes, 0, end, text))
-}
-
-fn import_end(nodes: &[Syntax], index: usize) -> usize {
-    let mut cursor = index;
-    while cursor < nodes.len() {
-        if operator_is(nodes.get(cursor), ";") {
-            return node_end(&nodes[cursor]);
-        }
-        cursor += 1;
-        if cursor > index + 24 {
-            break;
-        }
-    }
-    node_end(&nodes[index])
 }
 
 fn end_index(nodes: &[Syntax], index: usize, end: usize) -> usize {

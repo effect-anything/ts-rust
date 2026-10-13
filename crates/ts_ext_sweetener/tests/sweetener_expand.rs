@@ -99,7 +99,7 @@ fn case_equal(dir: &str) -> Result<(), String> {
     if structure::same(&expansion.code, &reference, tsx) {
         Ok(())
     } else {
-        Err("shape".to_owned())
+        Err(structure::unified(&reference, &expansion.code))
     }
 }
 
@@ -204,6 +204,93 @@ fn malformed_cases_are_refused() {
         }
     }
     assert_eq!(seen, 16, "expected 16 malformed cases");
+}
+
+/// The matcher VM compares a literal with the token under the cursor. It does
+/// not treat `async` as an optional prefix of `function`, and it does not
+/// search ahead for a later copy of the same literal.
+#[test]
+fn literal_prefix_is_not_optional_and_a_repeated_literal_is_not_the_first() {
+    let prefix = "\
+export syntax function:item {\n\
+  rule { function $name:binding() { } } => {\n\
+    const $name = 1;\n\
+  }\n\
+}\n\
+function plain() { }\n\
+async function later() { }\n";
+    let prefix_out = expand(ExpandRequest {
+        filename: "prefix.sts",
+        code: prefix,
+        phase: Phase::Check,
+    });
+    assert!(
+        prefix_out.diagnostics.is_empty(),
+        "{:?}",
+        prefix_out.diagnostics
+    );
+    assert!(
+        prefix_out.code.contains("const plain = 1"),
+        "plain function was not expanded:\n{}",
+        prefix_out.code
+    );
+    assert!(
+        prefix_out.code.contains("async function later"),
+        "async function matched a bare function rule:\n{}",
+        prefix_out.code
+    );
+
+    // Two `function` literals. The call that writes the word once must not
+    // succeed by binding the first copy to both pattern positions, and the
+    // call that writes it twice must expand.
+    let once = "\
+export syntax keep:item {\n\
+  rule { keep function $name:binding() { function } } => {\n\
+    const $name = 1;\n\
+  }\n\
+}\n\
+keep function only() { }\n";
+    let once_out = expand(ExpandRequest {
+        filename: "once.sts",
+        code: once,
+        phase: Phase::Check,
+    });
+    assert!(
+        once_out.code.is_empty(),
+        "one `function` satisfied a pattern that writes it twice:\n{}",
+        once_out.code
+    );
+    assert!(
+        once_out
+            .diagnostics
+            .iter()
+            .any(|item| item.message.contains("macro keep")),
+        "missing keep diagnostic: {:?}",
+        once_out.diagnostics
+    );
+
+    let twice = "\
+export syntax keep:item {\n\
+  rule { keep function $name:binding() { function } } => {\n\
+    const $name = 1;\n\
+  }\n\
+}\n\
+keep function both() { function }\n";
+    let twice_out = expand(ExpandRequest {
+        filename: "twice.sts",
+        code: twice,
+        phase: Phase::Check,
+    });
+    assert!(
+        twice_out.diagnostics.is_empty(),
+        "{:?}",
+        twice_out.diagnostics
+    );
+    assert!(
+        twice_out.code.contains("const both = 1"),
+        "a pattern with two `function` literals did not match:\n{}",
+        twice_out.code
+    );
 }
 
 /// Quoted strings that follow a colon. Keys are not phrases.
