@@ -509,6 +509,34 @@ impl<'a> Printer<'a> {
         found.map(|(at, _)| at)
     }
 
+    /// A left-associative infix chain continues after the operand just
+    /// matched: `a |> f() |> g()`. Re-expand the expansion so far followed
+    /// by the rest of the chain, up to the end of the enclosing expression.
+    fn fold_left_chain(
+        &mut self,
+        nodes: &[Syntax],
+        next: usize,
+        name: &str,
+        expanded: &str,
+    ) -> Option<(String, usize, usize)> {
+        if self.infix_associativity(name) != Associativity::Left
+            || operator_spelling(nodes.get(next)?) != Some(name)
+        {
+            return None;
+        }
+        let mut stop = next;
+        while stop < nodes.len()
+            && !operator_is(nodes.get(stop), ";")
+            && !operator_is(nodes.get(stop), ",")
+        {
+            stop += 1;
+        }
+        let end = node_end(&nodes[stop - 1]);
+        let rest = sweetener_reader::slice_range(self.source, node_start(&nodes[next]), end);
+        let combined = format!("{expanded} {rest}");
+        Some((self.expand_replacement(&combined), end, stop))
+    }
+
     fn infix_associativity(&self, name: &str) -> Associativity {
         self.macros
             .iter()
@@ -597,13 +625,24 @@ impl<'a> Printer<'a> {
                         &matched.captures,
                         &self.classes,
                     );
-                    let expanded = self.expand_replacement(&replacement);
+                    let mut expanded = self.expand_replacement(&replacement);
                     self.printing_core = was_core;
+                    let mut end = matched.end;
+                    let mut next = matched.next;
+                    // `a |> f() |> g()` is left-associative: the expansion
+                    // of `a |> f()` is the left operand of the next `|>`.
+                    if let Some((folded, chain_end, resume)) =
+                        self.fold_left_chain(nodes, next, &name, &expanded)
+                    {
+                        expanded = folded;
+                        end = chain_end;
+                        next = resume;
+                    }
                     let start = node_span(&nodes[index]).start;
                     self.copy_until(start as usize);
-                    self.emit(start, u32_at(matched.end), &expanded, SegmentKind::Atom);
-                    self.last_original = matched.end;
-                    return matched.next;
+                    self.emit(start, u32_at(end), &expanded, SegmentKind::Atom);
+                    self.last_original = end;
+                    return next;
                 }
             }
             let mut captures = HashMap::new();
@@ -807,7 +846,13 @@ impl<'a> Printer<'a> {
                 // arm repetition consumed. That is not a finished match.
                 // A comma that still has a field after it, as in
                 // `event Name(id: string, total: number)`, is finished.
-                if dangling_separator(self.source, node_span(head).start as usize, matched.end) {
+                // Only a separated repetition can consume a separator. A
+                // trailing comma inside a token-tree capture, such as the
+                // object literal a `method` request expands to, is the
+                // author's TypeScript.
+                if has_separated_rep(&rule.pattern)
+                    && dangling_separator(self.source, node_span(head).start as usize, matched.end)
+                {
                     continue;
                 }
                 self.diagnose_unknown(&rule.template, head_span);
@@ -2041,7 +2086,11 @@ fn load_syntax_module(
             }
             macro_.name = name.clone();
             taken.push(macro_);
-        } else if report {
+        } else if report
+            && !syntax_parameters(&read.children)
+                .iter()
+                .any(|param| param == exported)
+        {
             loaded.diagnostics.push(Diagnostic {
                 message: format!(
                     "SWR4001: Sweetener macro error: macro `{name}` was imported for syntax but is not exported by its module"
@@ -2339,6 +2388,19 @@ fn collect_macros(source: &str, nodes: &[Syntax], out: &mut HashMap<String, Macr
             // the macro was stored as infix. An infix walk then treats
             // `typeof NaN` as an operator with a left operand.
             let position = syntax_position(nodes, &mut index);
+            // `syntax parameter (%):expr;` declares a name with no rules.
+            // The next brace belongs to the following definition.
+            let mut peek = index;
+            while peek < nodes.len()
+                && !operator_is(nodes.get(peek), ";")
+                && !group_is(nodes.get(peek), Delimiter::Brace)
+            {
+                peek += 1;
+            }
+            if operator_is(nodes.get(peek), ";") {
+                index = peek + 1;
+                continue;
+            }
             let Some(body) = next_group(nodes, &mut index, Delimiter::Brace) else {
                 continue;
             };
@@ -2374,6 +2436,21 @@ fn collect_macros(source: &str, nodes: &[Syntax], out: &mut HashMap<String, Macr
         }
         index += 1;
     }
+}
+
+/// Names a module declares with `syntax parameter (%):expr;`. They are
+/// exported for syntax, and a template binds them with `#parameterize`.
+fn syntax_parameters(nodes: &[Syntax]) -> Vec<String> {
+    let mut out = Vec::new();
+    for index in 0..nodes.len() {
+        if token_at(nodes, index, "syntax") && token_at(nodes, index + 1, "parameter") {
+            let mut at = index + 2;
+            if let Some(name) = macro_name_at(nodes, &mut at) {
+                out.push(name);
+            }
+        }
+    }
+    out
 }
 
 fn macro_fixity(operator: bool, body: &Syntax) -> (Fixity, u8, Associativity) {
@@ -2813,6 +2890,14 @@ fn unquote(raw: &str) -> String {
 /// A repetition ate a separator that has no following item:
 /// `{ 1 => "one", }` or `head:, tail`. The closer is ignored.
 /// A comma with a later field (`id: string, total: number`) is not trailing.
+fn has_separated_rep(pattern: &[Pat]) -> bool {
+    pattern.iter().any(|pat| match pat {
+        Pat::Rep { sep: Some(_), .. } => true,
+        Pat::Rep { inner, .. } | Pat::Group { inner, .. } => has_separated_rep(inner),
+        _ => false,
+    })
+}
+
 fn dangling_separator(source: &str, start: usize, end: usize) -> bool {
     let text = source.get(start..end).unwrap_or("");
     let mut depth = 0i32;
@@ -8756,8 +8841,10 @@ fn scope_rep_row(path: &str, row: &[(String, Capture)]) -> Vec<(String, Capture)
                 if key == leaf || key == path {
                     continue;
                 }
-                if let Capture::Text(text) = value {
-                    scoped.push((key.clone(), Capture::Text(text.clone())));
+                // A nested sequence (`$($request)+` inside the outer row)
+                // is this iteration's, not every iteration's.
+                if matches!(value, Capture::Text(_) | Capture::Many(_)) {
+                    scoped.push((key.clone(), value.clone()));
                 }
             }
             return scoped;
