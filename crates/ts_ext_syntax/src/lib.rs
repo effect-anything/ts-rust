@@ -18,6 +18,7 @@ pub use ts_ext_sweetener::{
 };
 pub use ts_ext_typegpu::structure;
 
+pub mod prewarm;
 pub mod protocol;
 pub use session::{SessionDiagnostic, TransformSession, Transformed, v3_source_map};
 

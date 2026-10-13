@@ -18,7 +18,7 @@ pub struct TransformResponse {
 }
 
 /// One macro invocation (`original_*`) and the virtual range it produced.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ExpansionRegion {
     pub virtual_start: i32,
     pub virtual_length: i32,
@@ -33,17 +33,35 @@ pub struct ExpansionRegion {
 /// copies their own text.
 #[must_use]
 pub fn expansion_regions(expansion: &crate::Expansion) -> Vec<ExpansionRegion> {
+    // Segments that produced output, by original start: an invocation's are
+    // one contiguous run, found by binary search instead of a full scan.
+    let mut produced: Vec<(u32, u32, u32, u32)> = expansion
+        .segments
+        .iter()
+        .filter(|segment| segment.virtual_end > segment.virtual_start)
+        .map(|segment| {
+            (
+                segment.original_start,
+                segment.original_end,
+                segment.virtual_start,
+                segment.virtual_end,
+            )
+        })
+        .collect();
+    produced.sort_unstable();
     let mut out: Vec<ExpansionRegion> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for trace in &expansion.traces {
         let mut low = u32::MAX;
         let mut high = 0;
-        for segment in &expansion.segments {
-            if segment.original_start >= trace.start
-                && segment.original_end <= trace.end
-                && segment.virtual_end > segment.virtual_start
-            {
-                low = low.min(segment.virtual_start);
-                high = high.max(segment.virtual_end);
+        let first = produced.partition_point(|segment| segment.0 < trace.start);
+        for &(_, original_end, virtual_start, virtual_end) in produced[first..]
+            .iter()
+            .take_while(|segment| segment.0 <= trace.end)
+        {
+            if original_end <= trace.end {
+                low = low.min(virtual_start);
+                high = high.max(virtual_end);
             }
         }
         if low >= high {
@@ -60,7 +78,7 @@ pub fn expansion_regions(expansion: &crate::Expansion) -> Vec<ExpansionRegion> {
             original_length: i32::try_from(trace.end.saturating_sub(trace.start)).unwrap_or(0),
             label,
         };
-        if !out.contains(&region) {
+        if seen.insert(region.clone()) {
             out.push(region);
         }
     }
@@ -145,7 +163,70 @@ pub fn transform_file(file_name: &str, content: &str) -> TransformResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::transform_file;
+    use super::{ExpansionRegion, expansion_regions, transform_file};
+
+    /// The scan `expansion_regions` replaced: every segment per invocation.
+    fn regions_by_scan(expansion: &crate::Expansion) -> Vec<ExpansionRegion> {
+        let mut out: Vec<ExpansionRegion> = Vec::new();
+        for trace in &expansion.traces {
+            let (mut low, mut high) = (u32::MAX, 0);
+            for segment in &expansion.segments {
+                if segment.original_start >= trace.start
+                    && segment.original_end <= trace.end
+                    && segment.virtual_end > segment.virtual_start
+                {
+                    low = low.min(segment.virtual_start);
+                    high = high.max(segment.virtual_end);
+                }
+            }
+            if low >= high {
+                continue;
+            }
+            let mut label = format!("macro `{}`", trace.macro_name);
+            if let Some(module) = &trace.module {
+                label.push_str(&format!(" from \"{module}\""));
+            }
+            let region = ExpansionRegion {
+                virtual_start: i32::try_from(low).unwrap(),
+                virtual_length: i32::try_from(high - low).unwrap(),
+                original_start: i32::try_from(trace.start).unwrap(),
+                original_length: i32::try_from(trace.end - trace.start).unwrap(),
+                label,
+            };
+            if !out.contains(&region) {
+                out.push(region);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn indexed_regions_equal_the_full_scan_on_every_case() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../ts_ext_sweetener/cases");
+        let mut compared = 0;
+        for dir in std::fs::read_dir(root).unwrap() {
+            let dir = dir.unwrap().path();
+            for name in ["input.sts", "input.stsx"] {
+                let path = dir.join(name);
+                let Ok(code) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let expansion = crate::expand(crate::ExpandRequest {
+                    filename: &path.display().to_string(),
+                    code: &code,
+                    phase: crate::Phase::Check,
+                });
+                assert_eq!(
+                    expansion_regions(&expansion),
+                    regions_by_scan(&expansion),
+                    "{}",
+                    path.display()
+                );
+                compared += usize::from(!expansion.traces.is_empty());
+            }
+        }
+        assert!(compared > 50, "{compared}");
+    }
 
     #[test]
     fn expansions_cover_the_output_of_each_invocation() {

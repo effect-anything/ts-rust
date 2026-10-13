@@ -128,7 +128,13 @@ fn handle(message: &str) -> String {
         "initialize" => {
             r#"{"positionEncoding":"utf-8","diagnosticSource":"ext-syntax"}"#.to_owned()
         }
-        "openProject" => r#"{"configIdentity":""}"#.to_owned(),
+        "openProject" => {
+            // Expand the project's files in the background so the first
+            // transforms (and the first hover) find them in the memo.
+            let config = json_string(&params, "configFileName").unwrap_or_default();
+            let _ = ts_ext_syntax::prewarm::prewarm_in_background(&config);
+            r#"{"configIdentity":""}"#.to_owned()
+        }
         "closeProject" => "{}".to_owned(),
         "transform" => {
             let file_name = json_string(&params, "fileName").unwrap_or_default();
