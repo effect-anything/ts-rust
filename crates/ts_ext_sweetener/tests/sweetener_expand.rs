@@ -903,6 +903,42 @@ export syntax d:item {\n  rule { d $x:ident $v:expr }\n  bind $x in following as
     );
 }
 
+/// `#fold` threads an accumulator through a sequence (the initial one when
+/// it is empty); `#fresh` makes a new binder each time it is written;
+/// `#callsite`, `#capture` and `#definition` print the captured identifier.
+#[test]
+fn fold_fresh_and_scope_operations() {
+    let code = expand_ok(
+        "ops.sts",
+        "export syntax sum:expr {\n  rule { sum($($x:expr),*) } => {\n    #fold($x, init: { 0 }) { ($acc, $item, $index) => { $acc + $item * $index } }\n  }\n}\n\
+export syntax mk:stmt {\n  rule { mk $v:expr; } => {\n    const #fresh(\"t\") = $v; const #fresh(\"t\") = 3; const t = 2; use(t);\n  }\n}\n\
+export syntax swap:stmt {\n  rule { swap $a:ident $b:ident; } => {\n    const tmp = $a; #callsite($a) = $b; #capture($b) = tmp; #definition($a);\n  }\n}\n\
+const a = sum(1, 2, 3);\nconst e = sum();\nconst t = 1;\nmk 5;\nlet p = 1, q = 2, tmp = 0;\nswap p q;\n",
+    );
+    for piece in [
+        "const a = ((0 + 1 * 0) + 2 * 1) + 3 * 2;",
+        "const e = 0;",
+        "const t_1 = 5; const t_2 = 3; const t_3 = 2; use(t_3);",
+        "const tmp_1 = p; p = q; q = tmp_1; p;",
+    ] {
+        assert!(code.contains(piece), "missing {piece}: {code}");
+    }
+    let bad = "export syntax w:stmt {\n  rule { w $a:ident; } => { #capture(result) = 1; #fresh(\"two words\"); }\n}\nw x;\n";
+    let out = expand(ExpandRequest {
+        filename: "bad.sts",
+        code: bad,
+        phase: Phase::Check,
+    });
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "SWR2017: Invalid argument for template operation #capture.",
+            "SWR2017: Invalid argument for template operation #fresh.",
+        ]
+    );
+}
+
 /// Hygiene asks the output, as upstream does: a binder the user wrote inside
 /// input a macro consumed (and did not print again) does not force a rename,
 /// one still printed does.

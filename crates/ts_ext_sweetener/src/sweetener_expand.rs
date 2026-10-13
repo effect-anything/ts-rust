@@ -2350,15 +2350,26 @@ impl<'a> Printer<'a> {
 
     fn diagnose_unknown(&mut self, template: &[Tpl], fallback: Span) {
         for (name, at) in unknown_directives(template) {
+            let invalid = name.strip_prefix(INVALID_OPERATION);
+            let shown = invalid.unwrap_or(&name);
             let (start, end) = if at < self.source.len() {
-                (u32_at(at), u32_at((at + name.len()).min(self.source.len())))
+                (
+                    u32_at(at),
+                    u32_at((at + shown.len()).min(self.source.len())),
+                )
             } else {
                 (fallback.start, fallback.end)
             };
-            self.diagnostics.push(Diagnostic {
-                message: format!(
+            let message = match invalid {
+                Some(operation) => {
+                    format!("SWR2017: Invalid argument for template operation {operation}.")
+                }
+                None => format!(
                     "SWR4001: Sweetener macro error: template directive `{name}` is not implemented"
                 ),
+            };
+            self.diagnostics.push(Diagnostic {
+                message,
                 start,
                 end,
                 severity: Severity::Error,
@@ -2778,6 +2789,18 @@ enum Tpl {
     Let {
         name: String,
         value: Vec<Tpl>,
+        body: Vec<Tpl>,
+    },
+    /// `#fresh("hint")` — a new binder spelled `hint`, distinct from every
+    /// other, including another `#fresh("hint")` in the same expansion.
+    Fresh(String),
+    /// `#fold($items, init: { ... }) { ($acc, $item, $index) => { ... } }`.
+    Fold {
+        path: String,
+        init: Vec<Tpl>,
+        acc: String,
+        item: String,
+        index: String,
         body: Vec<Tpl>,
     },
     /// `#parameterize([required] p = value) { body }` — inside `body`, the
@@ -5081,6 +5104,78 @@ fn read_directive(source: &str, nodes: &[Syntax], index: usize) -> Option<(Tpl, 
     Some((tpl, index + 2))
 }
 
+/// A template operation whose argument is not what it takes: SWR2017.
+fn invalid_operation(name: &str, at: usize) -> Tpl {
+    Tpl::Unknown {
+        name: format!("{INVALID_OPERATION}{name}"),
+        at,
+    }
+}
+
+const INVALID_OPERATION: &str = "invalid:";
+
+/// `#fold($items, init: { initial }) { ($acc, $item, $index) => { next } }`.
+fn read_fold(
+    source: &str,
+    nodes: &[Syntax],
+    body_at: usize,
+    children: &[Syntax],
+    at: usize,
+) -> Option<(Tpl, usize)> {
+    let invalid = || Some((invalid_operation("#fold", at), body_at + 1));
+    let Some((path, _, next)) = read_var_path(children, 0) else {
+        return invalid();
+    };
+    if !(operator_is(children.get(next), ",")
+        && token_at(children, next + 1, "init")
+        && operator_is(children.get(next + 2), ":"))
+    {
+        return invalid();
+    }
+    let Some(init_group) = children
+        .get(next + 3)
+        .filter(|group| group_is(Some(group), Delimiter::Brace))
+    else {
+        return invalid();
+    };
+    let init = group_template(source, init_group);
+    let Some(Syntax::Group {
+        children: lambda, ..
+    }) = nodes
+        .get(body_at)
+        .filter(|group| group_is(Some(group), Delimiter::Brace))
+    else {
+        return invalid();
+    };
+    let Some(Syntax::Group {
+        children: params, ..
+    }) = lambda.first()
+    else {
+        return invalid();
+    };
+    let names: Vec<String> = (0..params.len())
+        .filter_map(|index| hole_name_at(params, index))
+        .collect();
+    if names.len() != 3 || !is_arrow(lambda, 1) {
+        return invalid();
+    }
+    let body_index = (2..lambda.len()).find(|index| group_is(lambda.get(*index), Delimiter::Brace));
+    let Some(body_group) = body_index.and_then(|index| lambda.get(index)) else {
+        return invalid();
+    };
+    Some((
+        Tpl::Fold {
+            path,
+            init,
+            acc: names[0].clone(),
+            item: names[1].clone(),
+            index: names[2].clone(),
+            body: group_template(source, body_group),
+        },
+        body_at + 1,
+    ))
+}
+
 /// `#let(name = value) { body }` and `#parameterize([required] p = value)
 /// { body }`. The value is a template; so is the body.
 fn read_scoped(
@@ -5091,6 +5186,15 @@ fn read_scoped(
     children: &[Syntax],
     arg_span: &Span,
 ) -> Option<(Tpl, usize)> {
+    if name == "#fold" && group_is(nodes.get(body_at), Delimiter::Brace) {
+        return read_fold(
+            source,
+            nodes,
+            body_at,
+            children,
+            node_start(&nodes[body_at - 1]).saturating_sub(5),
+        );
+    }
     if name != "#let" && name != "#parameterize" {
         return None;
     }
@@ -5246,6 +5350,21 @@ fn directive_tpl(
         "#metavar" => read_metavar(children),
         "#trim" => read_trim(children),
         "#index" => Some(Tpl::Index),
+        "#fresh" => Some(
+            string_value(children.first())
+                .filter(|hint| children.len() == 1 && is_ident_text(hint))
+                .map(Tpl::Fresh)
+                .unwrap_or_else(|| invalid_operation(raw, at)),
+        ),
+        // The capture's identifier, with the call site's, the definition's
+        // or no introduction scope. Output hygiene sees a captured spelling
+        // as the user's in each case, so each prints the capture.
+        "#callsite" | "#definition" | "#capture" => Some(
+            read_var_path(children, 0)
+                .filter(|(_, _, next)| *next == children.len())
+                .map(|(path, _, _)| Tpl::Var(path))
+                .unwrap_or_else(|| invalid_operation(raw, at)),
+        ),
         name if name.starts_with('#') => Some(Tpl::Unknown {
             name: name.to_owned(),
             at,
@@ -9475,6 +9594,14 @@ fn unknown_directives(template: &[Tpl]) -> Vec<(String, usize)> {
             Tpl::Core(inner) | Tpl::Rep { inner, .. } | Tpl::Define(inner) => {
                 found.extend(unknown_directives(inner));
             }
+            Tpl::Let { value, body, .. } | Tpl::Parameterize { value, body, .. } => {
+                found.extend(unknown_directives(value));
+                found.extend(unknown_directives(body));
+            }
+            Tpl::Fold { init, body, .. } => {
+                found.extend(unknown_directives(init));
+                found.extend(unknown_directives(body));
+            }
             Tpl::If {
                 then_body,
                 else_body,
@@ -9525,6 +9652,8 @@ fn introduced_names(
     // The template's own binder stays in the plan when a capture uses the
     // same spelling. The capture text is shielded, so only the binder moves.
     names.retain(|name| declared.iter().any(|item| item == name) || !captured.contains(name));
+    // `#fresh` and `#let` already print a placeholder of their own.
+    names.retain(|name| !super::sweetener_hygiene::is_placeholder(name));
     names
 }
 
@@ -9847,6 +9976,21 @@ fn render_keeping_holes(out: &mut String, template: &[Tpl], captures: &HashMap<S
                 render_keeping_holes(out, body, captures);
                 out.push('}');
             }
+            Tpl::Fresh(hint) => out.push_str(&format!("#fresh(\"{hint}\")")),
+            Tpl::Fold {
+                path,
+                init,
+                acc,
+                item,
+                index,
+                body,
+            } => {
+                out.push_str(&format!("#fold(${path}, init: {{"));
+                render_keeping_holes(out, init, captures);
+                out.push_str(&format!("}}) {{ (${acc}, ${item}, ${index}) => {{"));
+                render_keeping_holes(out, body, captures);
+                out.push_str("} }");
+            }
             Tpl::Parameterize {
                 param,
                 required,
@@ -10015,6 +10159,56 @@ fn render_let(
     }
 }
 
+/// Each element of the sequence makes the next accumulator from the last;
+/// an empty sequence leaves the initial one. A spliced accumulator is one
+/// expression, so it is parenthesized unless it is a single primary.
+fn render_fold(
+    out: &mut String,
+    (path, init, acc, item, index, body): (&str, &[Tpl], &str, &str, &str, &[Tpl]),
+    captures: &HashMap<String, Capture>,
+    classes: &[SyntaxClass],
+) {
+    let mut current = String::new();
+    render(&mut current, init, captures, classes, &mut Vec::new());
+    let mut current = current.trim().to_owned();
+    let rows = capture_sequence(captures, path).unwrap_or_default();
+    let root = path.rsplit('.').next().unwrap_or(path);
+    for (position, row) in rows.iter().enumerate() {
+        let mut scoped = rep_row_scope(captures, path, row);
+        let element = row
+            .iter()
+            .find(|(name, _)| name == root)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| Capture::Record {
+                text: String::new(),
+                fields: row.iter().cloned().collect(),
+            });
+        scoped.insert(item.to_owned(), element);
+        let spliced = if is_primary_text(&current) {
+            current.clone()
+        } else {
+            format!("({current})")
+        };
+        scoped.insert(acc.to_owned(), Capture::Text(spliced));
+        scoped.insert(index.to_owned(), Capture::Text(position.to_string()));
+        scope_record_fields(&mut scoped);
+        let mut next = String::new();
+        render(&mut next, body, &scoped, classes, &mut Vec::new());
+        current = next.trim().to_owned();
+    }
+    out.push_str(&current);
+}
+
+/// One identifier, literal, or closed group: safe to splice anywhere.
+fn is_primary_text(text: &str) -> bool {
+    let read = sweetener_reader::read_syntax(text);
+    match read.children.as_slice() {
+        [Syntax::Token { .. } | Syntax::String { .. }] => true,
+        [Syntax::Group { delimiter, .. }] => *delimiter == Delimiter::Paren,
+        _ => false,
+    }
+}
+
 fn render(
     out: &mut String,
     template: &[Tpl],
@@ -10097,6 +10291,15 @@ fn render(
             Tpl::Let { name, value, body } => {
                 render_let(out, name, value, body, captures, classes, protected)
             }
+            Tpl::Fresh(hint) => out.push_str(&super::sweetener_hygiene::placeholder(hint)),
+            Tpl::Fold {
+                path,
+                init,
+                acc,
+                item,
+                index,
+                body,
+            } => render_fold(out, (path, init, acc, item, index, body), captures, classes),
             Tpl::Parameterize {
                 param,
                 required,
@@ -11153,6 +11356,13 @@ fn collect_vars(template: &[Tpl], names: &mut Vec<String>) {
                 collect_vars(value, names);
                 collect_vars(body, names);
             }
+            Tpl::Fold { path, init, .. } => {
+                if !names.contains(path) {
+                    names.push(path.clone());
+                }
+                collect_vars(init, names);
+            }
+            Tpl::Fresh(_) => {}
             Tpl::If {
                 path,
                 then_body,
@@ -11453,6 +11663,11 @@ fn collect_free_idents(template: &[Tpl], names: &mut std::collections::HashSet<S
                 collect_free_idents(value, names);
                 collect_free_idents(body, names);
             }
+            Tpl::Fold { init, body, .. } => {
+                collect_free_idents(init, names);
+                collect_free_idents(body, names);
+            }
+            Tpl::Fresh(_) => {}
             Tpl::If {
                 then_body,
                 else_body,
