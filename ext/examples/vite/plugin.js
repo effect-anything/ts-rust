@@ -1,56 +1,29 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { TransformSession } from "@effect-x/tsc";
+import { Transformer, formatDiagnostics } from "@effect-x/tsc";
 import { transformWithEsbuild } from "vite";
 
-const session = TransformSession.build();
+// Options come from tsconfig.json (contentMappers "@effect-x/tsc" options).
+const transformer = new Transformer();
 
 function strip(id) {
   return id.split("?")[0];
 }
 
 function publish(ctx, file, code) {
-  const result = session.transform(file, code);
+  const result = transformer.transform(code, file);
+  for (const dependency of result.dependencies) ctx.addWatchFile(dependency);
   for (const item of result.diagnostics) {
-    const related = (item.related ?? []).map(
-      (at) => `\n  ${file}:${where(code, at.start)} ${at.message}`,
-    );
-    const message = `${file}:${where(code, item.start)} ${item.message}${related.join("")}`;
-    if (item.severity === "warning") {
+    const message = formatDiagnostics([item]);
+    if (item.category === "warning") {
       ctx.warn({ message, id: file, pos: item.start });
       continue;
     }
     ctx.error({ message, id: file, pos: item.start });
   }
-  if (result.code === code) return null;
-  return { code: result.code, map: sourceMap(file, code, result) };
-}
-
-function where(code, offset) {
-  const before = Buffer.from(code).subarray(0, offset).toString();
-  const lines = before.split("\n");
-  return `${lines.length}:${lines[lines.length - 1].length + 1}`;
-}
-
-// The session returns a Source Map v3 with exact per-token `mappings`
-// (UTF-16 columns, `sourcesContent`). Hand it to the bundler as is; the
-// raw spanmap `segments` are only for tools that compose span maps.
-function sourceMap(file, original, result) {
-  let map;
-  try {
-    map = JSON.parse(result.sourceMap);
-  } catch {
-    return null;
-  }
-  if (typeof map.mappings !== "string") return null;
-  return {
-    version: 3,
-    file,
-    sources: [file],
-    sourcesContent: map.sourcesContent ?? [original],
-    names: map.names ?? [],
-    mappings: map.mappings,
-  };
+  if (!result.changed) return null;
+  // `map` is a Source Map v3 with exact per-token mappings back to `file`.
+  return { code: result.code, map: result.map };
 }
 
 export function tscExt() {

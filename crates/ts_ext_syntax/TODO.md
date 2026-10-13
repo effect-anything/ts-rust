@@ -26,13 +26,14 @@ Sweetener cases are flat directories under `crates/ts_ext_sweetener/cases`, one 
 
 ## One API
 
-- [ ] Export only `new TransformSession({ typegpu: false | {...}, sweetener: false | {...} })`
-- [ ] Keep Sweetener and TypeGPU internal
-- [ ] `session.check({ filename, source, sweetener, typegpu })`
-- [ ] `session.transform({ filename, source, ... })`
-- [ ] `session.transformFile({ filePath, ... })` for the CLI and tests
-- [ ] `source` does not read disk
-- [ ] Both passes default on
+- [x] Export only `new Transformer({ tsconfig?, sweetener?, typegpu? })` (js/index.d.ts); the class name is one binding in js/index.cjs
+- [x] Keep Sweetener and TypeGPU internal
+- [x] `transformer.transform(code, path, options?)`: `code` is not read from disk
+- [x] `transformer.transformFile(path, options?)` for tests and tools
+- [x] Both passes run; no mode switch (build form, `__TYPEGPU_META__` included)
+- [x] Options by category, the same shape in the tsconfig `contentMappers` entry (`config.rs`)
+- [ ] `sweetener` has no options yet
+- [ ] The content mapper keeps per-project options but nothing reads them yet (Sweetener has none; TypeGPU runs inside tsc)
 
 ## Expander: library forms and missing template behavior
 
