@@ -13,11 +13,12 @@ pub mod session;
 
 pub use ts_ext_sweetener::{
     Diagnostic, ExpandRequest, Expansion, ExpansionTrace, Phase, RelatedLocation, ResourceBudget,
-    Segment, SegmentKind, Severity, TokenOrigin, expand, expand_with_budget, retarget_segments,
-    sweetener_matches, unchanged,
+    Segment, SegmentKind, Severity, TokenOrigin, TraceStep, TryResult, expand, expand_traced,
+    expand_with_budget, retarget_segments, sweetener_matches, unchanged,
 };
 pub use ts_ext_typegpu::structure;
 
+pub mod cli;
 pub mod compose;
 pub mod config;
 pub mod prewarm;
@@ -28,6 +29,6 @@ pub use session::{
 };
 
 // napi-derive registers the exports outside `cfg(test)` only.
+pub mod answer;
 #[cfg_attr(test, allow(dead_code))]
 mod node;
-pub mod answer;

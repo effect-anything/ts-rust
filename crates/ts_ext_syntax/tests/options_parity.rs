@@ -1,15 +1,18 @@
-//! One tsconfig option, three readers: the content mapper (`openProject`
-//! options, then `plugin`), `tsc-ext sweetener --expand --build`, and the
-//! pipeline behind the Node API (`TransformSession::from_options` over the
-//! tsconfig's options, as `node.rs` builds it). Each must print the same
-//! text, and flipping `typegpu.autoNaming` must change that text.
+//! One tsconfig option, every reader. The bundler output: the pipeline
+//! behind the Node API `Transformer` (`TransformSession::from_options` over
+//! the tsconfig's options), the Node API `Project` (`project::open`, then
+//! `get_file`), and `tsc-ext expand --stage bundle` must print the same
+//! text, and flipping `typegpu.autoNaming` must change it. What tsc checks:
+//! the mapper's `transform` (after `openProject` with those options) and
+//! `tsc-ext expand` (stage tsc) must agree, with no TypeGPU rewrite.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use ts_ext_syntax::TransformSession;
-use ts_ext_syntax::config::read_tsconfig_options;
+use ts_ext_syntax::config::{Options, read_tsconfig_options};
+use ts_ext_syntax::project;
 
 const BIN: &str = env!("CARGO_BIN_EXE_tsc-ext");
 
@@ -32,11 +35,10 @@ fn write_project(dir: &Path, auto_naming: bool) -> String {
     options
 }
 
-fn cli(file: &Path, build: bool) -> String {
+fn cli(file: &Path, stage: &str) -> String {
     let out = Command::new(BIN)
-        .args(["sweetener", "--expand"])
+        .args(["expand", "--stage", stage, "--color", "never"])
         .arg(file)
-        .args(if build { &["--build"][..] } else { &[] })
         .output()
         .unwrap();
     assert!(
@@ -70,8 +72,8 @@ fn receive(stdout: &mut impl BufRead) -> serde_json::Value {
     serde_json::from_slice(&body).unwrap()
 }
 
-/// The mapper's `plugin` (bundler) and `transform` (what tsc checks) texts.
-fn mapper(dir: &Path, file: &Path, options: &str) -> (String, String) {
+/// The mapper's `transform` (what tsc checks) text under the project's options.
+fn mapper(dir: &Path, file: &Path, options: &str) -> String {
     let mut child = Command::new(BIN)
         .env("TSC_EXT_NO_PREWARM", "1")
         .stdin(Stdio::piped())
@@ -102,16 +104,6 @@ fn mapper(dir: &Path, file: &Path, options: &str) -> (String, String) {
     send(
         &mut stdin,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":3,"method":"plugin","params":{{"projectHandle":"p","fileName":{file},"content":{content}}}}}"#
-        ),
-    );
-    let built = receive(&mut stdout)["result"]["text"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    send(
-        &mut stdin,
-        &format!(
             r#"{{"jsonrpc":"2.0","id":4,"method":"transform","params":{{"projectHandle":"p","fileName":{file},"content":{content}}}}}"#
         ),
     );
@@ -121,32 +113,40 @@ fn mapper(dir: &Path, file: &Path, options: &str) -> (String, String) {
         .to_owned();
     drop(stdin);
     child.wait().unwrap();
-    (built, checked)
+    checked
 }
 
 #[test]
-fn a_typegpu_option_changes_mapper_cli_and_api_output_alike() {
+fn a_typegpu_option_changes_api_project_and_cli_output_alike() {
     let root = std::env::temp_dir().join(format!("tsc-ext-options-{}", std::process::id()));
     let mut outputs = Vec::new();
     for auto_naming in [true, false] {
         let dir = root.join(auto_naming.to_string());
         let options = write_project(&dir, auto_naming);
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let tsconfig = dir.join("tsconfig.json");
         let file = dir.join("a.sts");
-        let api = TransformSession::from_options(
-            &read_tsconfig_options(&dir.join("tsconfig.json")).unwrap(),
-        )
-        .transform(file.to_str().unwrap(), SOURCE)
-        .code;
+        let api = TransformSession::from_options(&read_tsconfig_options(&tsconfig).unwrap())
+            .transform(file.to_str().unwrap(), SOURCE)
+            .code;
+        let project = project::open(&tsconfig, Options::default(), "{}").unwrap();
+        let answer: serde_json::Value =
+            serde_json::from_str(&project.get_file(file.to_str().unwrap(), None).unwrap()).unwrap();
+        project::close(&project, "{}");
         assert_eq!(
-            cli(&file, true),
+            answer["code"].as_str().unwrap(),
             api,
-            "CLI vs API, autoNaming {auto_naming}"
+            "Project vs Transformer, autoNaming {auto_naming}"
         );
-        let (built, checked) = mapper(&dir, &file, &options);
-        assert_eq!(built, api, "mapper vs API, autoNaming {auto_naming}");
+        assert_eq!(
+            cli(&file, "bundle"),
+            api,
+            "expand --stage bundle vs Transformer, autoNaming {auto_naming}"
+        );
         // What tsc type-checks: no TypeGPU rewrite (tsc keeps the author's
         // operators and does not emit `.sts`), so the same under both.
-        assert_eq!(checked, cli(&file, false), "mapper vs CLI check view");
+        let checked = mapper(&dir, &file, &options);
+        assert_eq!(checked, cli(&file, "tsc"), "mapper vs expand (stage tsc)");
         assert!(!checked.contains("__TYPEGPU"), "{checked}");
         assert!(api.contains("[1, 1]"), "{api}");
         outputs.push(api);
