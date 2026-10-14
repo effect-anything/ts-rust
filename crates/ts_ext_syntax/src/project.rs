@@ -133,8 +133,18 @@ fn read_project(tsconfig: &str) -> (Vec<String>, Vec<String>, Vec<String>, Vec<S
         cwd,
         own: crate::config::own_extensions(Path::new(tsconfig)),
     };
+    // The project is the content mapper: its code is already running, so the
+    // `--runExternalCode` gate (and its diagnostic) does not apply.
+    let options = ts_goport::options::CompilerOptions {
+        run_external_code: ts_goport::options::Tristate::True,
+        ..Default::default()
+    };
     let (parsed, errors) = ts_goport::frontend::tsoptions::get_parsed_command_line_of_config_file(
-        tsconfig, None, None, &host, None,
+        tsconfig,
+        Some(&options),
+        None,
+        &host,
+        None,
     );
     let mut messages: Vec<String> = errors
         .iter()
