@@ -12313,13 +12313,13 @@ fn render_fold(
         let mut next = String::new();
         let mut spliced = Vec::new();
         render(&mut next, body, &scoped, classes, &mut spliced);
-        // The item is an operand where the body puts it: `$acc && $item`
-        // with `q || r` is `... && (q || r)`. The accumulator is spliced as
-        // written, as upstream does: `$acc * 2` after `0 * 2 + a` prints
-        // `0 * 2 + a * 2`.
+        // The accumulator and the item are operands where the body puts
+        // them: `$acc && $item` with `q || r` is `... && (q || r)`, and
+        // `$acc * 2` after `0 * 2 + a` is `(0 * 2 + a) * 2`. Upstream
+        // splices `$acc` as written and prints `0 * 2 + a * 2` (DEVIATIONS).
         let spans: Vec<(usize, usize)> = spliced.iter().map(|(from, to, _)| (*from, *to)).collect();
         let (grouped, _) = super::sweetener_group::group_spans(&next, &spans, |text| {
-            item_text.as_deref() == Some(text) && text != current
+            text == current || item_text.as_deref() == Some(text)
         });
         current = grouped.trim().to_owned();
     }
