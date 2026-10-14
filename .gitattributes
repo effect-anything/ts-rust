@@ -15,8 +15,5 @@ crates/ts_goport/src/binder/lib_bind.bin merge=lib-blob
 # changes.
 *.rs text eol=lf
 crates/ts_goport/libs/*.d.ts text eol=lf
-# Vendored copy of tsc/testdata/fixtures/compiler/checker.ts (pin
-# fed0bf24149f). The format test compares against these exact bytes.
-crates/ts_goport/tests/fixtures/format/checker.ts text eol=lf
 # Bash stops at a CRLF line (`$'\r': command not found`). Git Bash runs these scripts on Windows.
 *.sh text eol=lf
