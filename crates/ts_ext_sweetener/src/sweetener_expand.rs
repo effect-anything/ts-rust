@@ -10013,6 +10013,22 @@ fn take_expr_until(
                 index += 1;
                 continue;
             }
+            // An infix keyword after a finished operand continues the
+            // expression: `x as T`, `k in o`, `v instanceof C`.
+            if index > cursor
+                && matches!(node, Syntax::Token { raw, .. } if matches!(raw.as_str(), "as" | "satisfies" | "in" | "instanceof"))
+            {
+                index += 1;
+                continue;
+            }
+            // A keyword operator takes the operand after it: `await h()`,
+            // `typeof q`, `new Foo(1)`, `x as T`, `k in o`.
+            if index > cursor
+                && matches!(nodes.get(index - 1), Some(Syntax::Token { raw, .. }) if is_keyword_operator(raw))
+            {
+                index += 1;
+                continue;
+            }
             break;
         }
         if is_operand_parameter(nodes, cursor, index) {
@@ -10100,6 +10116,16 @@ fn is_expr_start(node: &Syntax) -> bool {
         }
         Syntax::Comment { .. } => false,
     }
+}
+
+/// A keyword spelled operator: a prefix (`await`, `typeof`, `void`,
+/// `delete`, `new`, `yield`) or an infix (`as`, `satisfies`, `in`,
+/// `instanceof`). The word after it is its operand, not the next statement.
+fn is_keyword_operator(raw: &str) -> bool {
+    matches!(
+        raw,
+        "await" | "typeof" | "void" | "delete" | "new" | "yield" | "as" | "satisfies" | "in" | "instanceof"
+    )
 }
 
 fn is_expr_stop(node: &Syntax) -> bool {

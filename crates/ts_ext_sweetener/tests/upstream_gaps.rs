@@ -46,7 +46,6 @@ fn a_fold_item_keeps_its_precedence() {
 /// `twice(await h())` to `[await h(), await h()]`; this expander reports
 /// SWR4001 at `await`.
 #[test]
-#[ignore = "known gap: an `await` expression is not matched by $x:expr"]
 fn await_in_a_macro_argument() {
     let (code, diagnostics) = run(
         "export syntax twice:expr { rule { twice($x:expr) } => { [$x, $x] } }\nasync function g() { return twice(await h()); }\n",
