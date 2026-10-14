@@ -1667,6 +1667,9 @@ impl ipc::Handler for Session {
             }
             _ => {}
         }
+        if let Some(result) = crate::api::ext_api::handle(self, method, &params) {
+            return result; // PORT: ext
+        }
 
         let parsed = match unmarshal_payload(method, &params) {
             Ok(parsed) => parsed,

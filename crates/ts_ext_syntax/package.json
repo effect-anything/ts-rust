@@ -9,6 +9,10 @@
       "types": "./js/index.d.ts",
       "default": "./js/index.cjs"
     },
+    "./unstable/mapped": {
+      "types": "./js/api.d.mts",
+      "default": "./js/api.mjs"
+    },
     "./unplugin": {
       "types": "./js/unplugin.d.mts",
       "default": "./js/unplugin.mjs"

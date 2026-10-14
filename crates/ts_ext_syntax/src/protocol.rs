@@ -16,6 +16,12 @@ pub struct TransformResponse {
     /// Macro invocations and the virtual text each produced, for language
     /// features ("expanded from", show expansion).
     pub expansions: Vec<ExpansionRegion>,
+    /// Other files the expansion read (`for syntax` macro modules), for
+    /// tools that follow them as imports.
+    pub dependencies: Vec<String>,
+    /// The file's `import ... for syntax` declarations, which the virtual
+    /// text no longer shows.
+    pub syntax_imports: Vec<crate::SyntaxImport>,
 }
 
 /// One macro invocation (`original_*`) and the virtual range it produced.
@@ -131,6 +137,8 @@ pub fn transform_file(file_name: &str, content: &str) -> TransformResponse {
     let expansions = expansion_regions(&expanded);
     TransformResponse {
         expansions,
+        dependencies: expanded.dependencies.clone(),
+        syntax_imports: expanded.syntax_imports.clone(),
         text: expanded.code,
         extension: crate::session::virtual_extension(file_name),
         mappings,

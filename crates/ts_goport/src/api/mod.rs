@@ -5,6 +5,7 @@
 
 pub mod callbackfs;
 pub mod encoder;
+pub mod ext_api; // PORT: ext
 pub mod module_resolution;
 pub mod proto;
 pub mod protocol_msgpack;

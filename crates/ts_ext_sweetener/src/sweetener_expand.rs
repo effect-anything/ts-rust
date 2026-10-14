@@ -394,6 +394,7 @@ fn expand_pass(
     let pass = names.is_some();
     let user_names = names.unwrap_or_else(|| user_spellings(&read.children));
     let mut loaded = load_macros(request.filename, source, &imports, &user_names);
+    let syntax_import_info = describe_syntax_imports(request.filename, &imports);
     let mut local = HashMap::new();
     collect_macros(source, &read.children, &mut local);
     // An operator this file defines or imports with a spelling the reader
@@ -611,6 +612,7 @@ fn expand_pass(
             segments: printer.segments,
             diagnostics: printer.diagnostics,
             dependencies: printer.dependencies,
+            syntax_imports: syntax_import_info,
         },
         printer.consumed,
     )
@@ -4143,6 +4145,47 @@ struct SyntaxImport {
     aliases: Vec<(String, String)>,
     specifier: String,
     span: Span,
+}
+
+/// The public view of this file's syntax imports. A specifier resolves
+/// against the importing file's directory, as `load_syntax_module` does.
+fn describe_syntax_imports(filename: &str, imports: &[SyntaxImport]) -> Vec<crate::SyntaxImport> {
+    let base = Path::new(filename)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    imports
+        .iter()
+        .map(|import| {
+            let body = specifier_body(&import.specifier);
+            let resolved = body.and_then(|body| {
+                super::sweetener_cache::canonicalize(&base.join(body))
+                    .ok()
+                    .filter(|path| path.is_file())
+                    .map(|path| path.display().to_string())
+            });
+            let bindings = import
+                .names
+                .iter()
+                .map(|local| crate::SyntaxBinding {
+                    imported: import
+                        .aliases
+                        .iter()
+                        .find(|(_, alias)| alias == local)
+                        .map_or_else(|| local.clone(), |(exported, _)| exported.clone()),
+                    local: local.clone(),
+                })
+                .collect();
+            crate::SyntaxImport {
+                specifier: body.unwrap_or(&import.specifier).to_owned(),
+                resolved,
+                bindings,
+                shadows_core: import.shadows_core,
+                start: import.span.start,
+                end: import.span.end,
+            }
+        })
+        .collect()
 }
 
 fn load_macros(

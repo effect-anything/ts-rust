@@ -440,7 +440,7 @@ pub struct MappedOutput {
     // virtual ranges and optionally report an error when no diagnostic is produced.
     // PORT: Go `*DiagnosticDirectives`; nil is `None`.
     pub diagnostic_directives: Option<DiagnosticDirectives>,
-    pub expansions: Vec<crate::ext::mapper_protocol::ExpansionInformation>, // PORT: ext
+    pub ext: crate::ext::mapper_protocol::MappedOutputExt, // PORT: ext
 }
 
 impl MappedOutput {
@@ -460,7 +460,7 @@ impl MappedOutput {
             "diagnosticDirectives",
             &self.diagnostic_directives,
         )?;
-        marshal_field_omitempty(enc, first, "expansions", &self.expansions) // PORT: ext
+        self.ext.marshal_fields(enc, first) // PORT: ext
     }
 
     /// Decodes one member of `MappedOutput`; false for an unknown name.
@@ -474,8 +474,7 @@ impl MappedOutput {
             "extension" => json_unmarshal_decode(dec, &mut self.extension)?,
             "mappings" => json_unmarshal_decode(dec, &mut self.mappings)?,
             "diagnosticDirectives" => json_unmarshal_decode(dec, &mut self.diagnostic_directives)?,
-            "expansions" => json_unmarshal_decode(dec, &mut self.expansions)?, // PORT: ext
-            _ => return Ok(false),
+            _ => return self.ext.decode_field(name, dec), // PORT: ext
         }
         Ok(true)
     }
@@ -2758,7 +2757,7 @@ fn decode_mapped_output<'a>(
     }
     let v = |p| virtual_positions.normalize_text_pos(p); // PORT: ext
     let o = |p| original_positions.normalize_text_pos(p);
-    crate::ext::mapper_protocol::attach_expansions(&mut result.mappings, &output.expansions, v, o);
+    crate::ext::mapper_protocol::attach_mapper_info(&mut result.mappings, &output.ext, v, o);
     result.diagnostic_directives = normalize_diagnostic_directives(
         output.diagnostic_directives.as_ref(),
         &virtual_positions,
@@ -3311,7 +3310,7 @@ mod tests {
                         mapped_output: MappedOutput {
                             text: p.content,
                             extension: ".ts".to_string(),
-                            expansions: Vec::new(),
+                            ext: Default::default(),
                             mappings: JsonValue(mappings.into_bytes()),
                             diagnostic_directives: protocol_diagnostic_directives(
                                 vec![MappedDiagnosticDirective {

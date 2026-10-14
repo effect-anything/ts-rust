@@ -90,10 +90,36 @@ pub struct Expansion {
     pub diagnostics: Vec<Diagnostic>,
     /// Other files this expansion read. The build hook watches them.
     pub dependencies: Vec<String>,
+    /// The file's `import ... for syntax` declarations, which the expansion
+    /// consumes: the virtual text no longer shows them.
+    pub syntax_imports: Vec<SyntaxImport>,
     /// Upstream's expansion traces: every macro invocation, in order.
     pub traces: Vec<ExpansionTrace>,
     /// Upstream's token origins: one entry per token of `code`.
     pub origins: Vec<TokenOrigin>,
+}
+
+/// One `import { a, b as c } from "./m.sts" for syntax;` of the file.
+/// `start`/`end` cover the whole declaration in the original text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SyntaxImport {
+    /// The specifier as written, without quotes.
+    pub specifier: String,
+    /// The canonical path of the macro module, `None` when it does not
+    /// resolve (SWR5002 is reported then).
+    pub resolved: Option<String>,
+    pub bindings: Vec<SyntaxBinding>,
+    /// `... for syntax shadows core;`
+    pub shadows_core: bool,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// One name a syntax import binds: `imported as local`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SyntaxBinding {
+    pub imported: String,
+    pub local: String,
 }
 
 /// One macro invocation (upstream `ExpansionTrace`).
@@ -325,6 +351,7 @@ pub fn unchanged(code: &str) -> Expansion {
         }],
         diagnostics: Vec::new(),
         dependencies: Vec::new(),
+        syntax_imports: Vec::new(),
         traces: Vec::new(),
         origins: Vec::new(),
     }
