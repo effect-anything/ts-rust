@@ -398,6 +398,18 @@ pub(crate) fn needs_group(before: &str, expr: &str, after: &str, neutral: bool) 
     if expr.is_empty() || (expr.starts_with('(') && closes_at_end(expr)) {
         return false;
     }
+    // An expression that opens with `{`, `function` or `class` reads as a
+    // block or a declaration where a statement begins, and `{` as a block
+    // after `=>`. Upstream prints `() => { value: 1 }` and
+    // `function () {} ()` as they are (DEVIATIONS).
+    if let Some(start) = statement_lookalike(expr) {
+        let at_statement = statement_start(before, neutral);
+        let after_arrow = left_side(before, neutral) == Side::ArrowBody;
+        let called = right_side(after, neutral, false) == Side::Member;
+        if at_statement || (start == '{' && after_arrow) || (start != '{' && called) {
+            return true;
+        }
+    }
     let shape = shape(expr);
     if shape.atomic {
         return false;
@@ -454,6 +466,25 @@ pub(crate) fn head(text: &str) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+/// `{` for an object literal, `f` for a function or class expression.
+fn statement_lookalike(expr: &str) -> Option<char> {
+    if expr.starts_with('{') {
+        return Some('{');
+    }
+    let word = expr.strip_prefix("async ").unwrap_or(expr).trim_start();
+    let first: String = word.chars().take_while(|ch| ch.is_alphanumeric()).collect();
+    matches!(first.as_str(), "function" | "class").then_some('f')
+}
+
+/// Whether `before` ends where a statement begins.
+fn statement_start(before: &str, neutral: bool) -> bool {
+    match lex(before).last() {
+        None => !neutral,
+        Some(Tok::Punct(";") | Tok::Open('{') | Tok::Close('}')) => true,
+        _ => false,
+    }
 }
 
 /// Whether the `(` that opens `text` closes at its very end.
@@ -576,5 +607,10 @@ mod tests {
         assert!(needs_group("-", "-x", "", true));
         assert!(needs_group("p && ", "() => 1", "", true));
         assert!(!needs_group("", "(v) => v", "", true));
+        assert!(group("const f = () => ", "{ value: 1 }", ";"));
+        assert!(group("x;\n", "{ value: 2 }", ";"));
+        assert!(group("", "function () { return 3; }", "();"));
+        assert!(!group("const o = ", "{ value: 1 }", ";"));
+        assert!(!group("f(", "function () {}", ")"));
     }
 }
