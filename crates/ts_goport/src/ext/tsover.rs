@@ -884,7 +884,9 @@ mod tests {
             supplemental_source_files: Vec::new(),
             canonical_source_file: None,
         });
-        crate::ext::precheck::apply(&opts, file)
+        let file = std::rc::Rc::new(file);
+        let _ = crate::ext::precheck::checked(Some(file.clone()));
+        std::rc::Rc::try_unwrap(file).unwrap_or_else(|_| unreachable!())
     }
 
     fn at(hay: &str, needle: &str) -> i32 {
