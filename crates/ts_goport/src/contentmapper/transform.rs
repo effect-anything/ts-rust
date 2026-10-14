@@ -173,18 +173,6 @@ fn parse_result_with(
         for diagnostic in &result.diagnostics {
             let mut diagnostic = diagnostic.clone();
             diagnostic.set_file(source_file.root);
-            if !diagnostic.related_information().is_empty() {
-                let related = diagnostic
-                    .related_information()
-                    .iter()
-                    .cloned()
-                    .map(|mut item| {
-                        item.set_file(source_file.root);
-                        item
-                    })
-                    .collect();
-                diagnostic.set_related_info(related);
-            }
             diagnostics.push(diagnostic);
         }
         // PORT: Go `sourceFile.SetDiagnostics(...)`. The parsed file keeps its
@@ -258,23 +246,6 @@ fn parse_result_with(
             supplemental_source_files: Vec::new(),
             canonical_source_file: Some(source_file.clone()),
         });
-    }
-    // Internal rewrites after the mapper map is attached.
-    // `precheck::apply` returns another `ParsedSourceFile` in a new `Rc`.
-    // The supplemental files already point at `source_file` with a `Weak`,
-    // so that link is dead once this function drops `source_file`. Point it
-    // at the `Rc` that is published instead. The node-side canonical link
-    // stays the original SourceFile node: `apply` keeps that node when it
-    // does not rewrite the file.
-    if let Some(canonical) = files.canonical.clone() {
-        let published = Rc::new(crate::ext::precheck::apply(
-            &parse_options,
-            (*canonical).clone(),
-        ));
-        for file in &files.supplemental {
-            file.set_canonical_source_file(&published);
-        }
-        files.canonical = Some(published);
     }
     Ok(files)
 }
