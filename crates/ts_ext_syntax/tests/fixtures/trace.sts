@@ -1,0 +1,7 @@
+// tsc-ext: expand --trace
+export syntax unless:stmt {
+  rule { unless ($c:expr) $b:stmt } => { if (!($c)) $b }
+  rule { unless $c:expr then $b:stmt } => { if (!($c)) $b }
+}
+unless done then go();
+unless done work();
