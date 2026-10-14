@@ -108,7 +108,7 @@ impl LanguageService {
         let mut synthesized_by_file: IndexMap<Node, Vec<Diagnostic>> = IndexMap::new();
         for diag_slice in diagnostics {
             for diag in diag_slice.iter() {
-                let diag = &with_expansion_context(diag);
+                let diag = &crate::ext_ls::with_expansion_context(diag); // PORT: ext
                 if is_synthesized_content_mapped_diagnostic(diag) {
                     synthesized_by_file
                         .entry(diag.file())
@@ -137,40 +137,6 @@ impl LanguageService {
     }
 }
 
-/// PORT: ts-rust extension. A compiler diagnostic inside macro output gets
-/// one related location per enclosing invocation, innermost first:
-/// "Expanded from macro `name`" at the code the author wrote.
-pub fn with_expansion_context(diag: &Diagnostic) -> Diagnostic {
-    let file = diag.file();
-    let Some(span_map) = source_file_span_map(file) else {
-        return diag.clone();
-    };
-    if !diag.source().is_empty() {
-        return diag.clone();
-    }
-    let expansions = SpanMap::expansions_containing_virtual(Some(span_map), diag.loc());
-    if expansions.is_empty() {
-        return diag.clone();
-    }
-    let mut out = diag.clone();
-    let source = source_file_content_mapper(file).to_string();
-    for expansion in expansions.iter().take(8) {
-        out.add_related_info(Some(new_external_diagnostic(
-            file,
-            TextRange::new(expansion.original_start, expansion.original_end),
-            if source.is_empty() {
-                "content mapper"
-            } else {
-                &source
-            },
-            crate::diagnostics::Category::Message,
-            0,
-            &format!("Expanded from {}", expansion.label),
-        )));
-    }
-    out
-}
-
 // Go: ls/diagnostics.go:84 isSynthesizedContentMappedDiagnostic
 // isSynthesizedContentMappedDiagnostic reports whether diag is a compiler diagnostic on a content-mapped
 // file whose location lies entirely in synthesized virtual code with no counterpart in the original
@@ -186,10 +152,7 @@ pub fn is_synthesized_content_mapped_diagnostic(diag: &Diagnostic) -> bool {
         return false;
     }
     let (_, fidelity) = SpanMap::virtual_to_original_span(Some(span_map), diag.loc());
-    // PORT: ts-rust extension. Inside a macro expansion the invocation is
-    // the location.
-    fidelity == Fidelity::NONE
-        && SpanMap::expansions_containing_virtual(Some(span_map), diag.loc()).is_empty()
+    fidelity == Fidelity::NONE && !crate::ext_ls::inside(span_map, diag.loc()) // PORT: ext
 }
 
 // Go: ls/diagnostics.go:97 aggregateSynthesizedDiagnostics
@@ -222,89 +185,4 @@ pub fn worst_category(diags: &[Diagnostic]) -> crate::diagnostics::Category {
         }
     }
     worst
-}
-
-#[cfg(test)]
-mod expansion_tests {
-    use super::*;
-    use crate::contentmapper::transform::parse_result;
-    use crate::spanmap;
-    use std::sync::Arc;
-
-    #[test]
-    fn diagnostics_in_macro_output_point_at_the_invocation() {
-        // `const a = twice(value);` expanded to `const a = [value, value];`:
-        // `[` and `, value]` are synthesized, `value` is copied.
-        let original = "const a = twice(value);";
-        let text = "const a = [value, value];";
-        let map = spanmap::new(&[
-            spanmap::Segment {
-                virtual_end: 10,
-                original_end: 10,
-                kind: spanmap::Kind::VERBATIM,
-                features: spanmap::Feature::ALL,
-                ..Default::default()
-            },
-            spanmap::Segment {
-                virtual_start: 11,
-                virtual_end: 16,
-                original_start: 16,
-                original_end: 21,
-                kind: spanmap::Kind::VERBATIM,
-                features: spanmap::Feature::ALL,
-            },
-        ])
-        .with_expansions(vec![spanmap::Expansion {
-            virtual_start: 10,
-            virtual_end: 24,
-            original_start: 10,
-            original_end: 22,
-            label: "macro `twice`".to_string(),
-        }]);
-        let result = crate::contentmapper::Result {
-            text: text.to_string(),
-            virtual_extension: ".ts".to_string(),
-            mappings: Some(Arc::new(map)),
-            ..Default::default()
-        };
-        let options = crate::frontend::parser::SourceFileParseOptions {
-            file_name: "/a.sts".to_string(),
-            path: crate::frontend::tspath::Path("/a.sts".to_string()),
-            ..Default::default()
-        };
-        let files = parse_result(
-            &options,
-            original,
-            &crate::contentmapper::Mapper::default(),
-            "",
-            result,
-        )
-        .unwrap();
-        let file = files.canonical.unwrap().root;
-        // `, value]` (16..24) is synthesized: it used to be reported at the
-        // top of the file; it belongs to the invocation.
-        let synthesized = new_diagnostic(
-            file,
-            TextRange::new(16, 24),
-            diag::Virtual_code_produced_by_the_content_mapper_0_has_problems_with_no_corresponding_location_in_this_file,
-            vec!["m".to_string()],
-        );
-        assert!(!is_synthesized_content_mapped_diagnostic(&synthesized));
-        let with_context = with_expansion_context(&synthesized);
-        let related = with_context.related_information();
-        assert_eq!(related.len(), 1);
-        assert_eq!((related[0].loc().pos(), related[0].loc().end()), (10, 22));
-        // Outside every expansion nothing is added.
-        let plain = new_diagnostic(
-            file,
-            TextRange::new(6, 7),
-            diag::Virtual_code_produced_by_the_content_mapper_0_has_problems_with_no_corresponding_location_in_this_file,
-            vec!["m".to_string()],
-        );
-        assert!(
-            with_expansion_context(&plain)
-                .related_information()
-                .is_empty()
-        );
-    }
 }

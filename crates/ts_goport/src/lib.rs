@@ -50,6 +50,7 @@ pub use goport_core::{args, effect_cached, effect_export_member};
 pub mod api;
 pub mod cmd;
 pub mod format;
+pub mod ext_ls; // PORT: not in Go (language features for ts-rust extensions)
 pub mod ls;
 pub mod lsp;
 pub mod project;
