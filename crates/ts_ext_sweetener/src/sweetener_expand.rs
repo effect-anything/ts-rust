@@ -194,6 +194,38 @@ pub(crate) fn expand_uncached(request: ExpandRequest<'_>, incremental: bool) -> 
     })
 }
 
+/// [`expand_uncached`] with the rule-by-rule trace recorded
+/// ([`crate::expand_traced`]). Incremental replay is off, so every use is
+/// matched again and shows in the trace.
+pub(crate) fn expand_traced(request: ExpandRequest<'_>) -> (Expansion, Vec<crate::TraceStep>) {
+    let budget = super::sweetener_budget::configured();
+    let stack = super::sweetener_budget::stack_bytes(&budget);
+    let again = request.clone();
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn_scoped(scope, move || {
+                TRACE_LOG.with(|log| *log.borrow_mut() = Some(Vec::new()));
+                // A panic is reported by the ordinary path below (SWR4990);
+                // the steps up to it are kept.
+                let expansion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    super::sweetener_budget::with_budget(budget, || {
+                        items::with_incremental(false, || expand_here(request))
+                    })
+                }))
+                .ok();
+                let steps = TRACE_LOG
+                    .with(|log| log.borrow_mut().take())
+                    .unwrap_or_default();
+                (expansion, steps)
+            })
+            .expect("expansion thread")
+            .join()
+            .map(|(expansion, steps)| (expansion.unwrap_or_else(|| crate::expand(again)), steps))
+            .expect("expansion")
+    })
+}
+
 /// Items replayed and items printed by incremental expansion so far.
 pub(crate) fn incremental_stats() -> (usize, usize) {
     items::stats()
@@ -344,6 +376,12 @@ fn expand_pass(
     super::sweetener_budget::reset();
     INVOKED_OWNERS.with(|set| set.borrow_mut().clear());
     TRACES.with(|traces| traces.borrow_mut().clear());
+    // A second hygiene pass expands the file again: trace the pass printed.
+    TRACE_LOG.with(|log| {
+        if let Some(steps) = log.borrow_mut().as_mut() {
+            steps.clear();
+        }
+    });
     if let Err(message) = super::sweetener_budget::charge(
         super::sweetener_budget::Kind::InputTokens,
         super::sweetener_budget::count_tokens(source),
@@ -3265,10 +3303,47 @@ impl<'a> Printer<'a> {
                 None => kept.push(rule.clone()),
             }
         }
+        if tracing() {
+            let rules = kept
+                .iter()
+                .enumerate()
+                .map(|(index, rule)| TracedRule {
+                    pattern: rule.pattern.as_ptr() as usize,
+                    index,
+                    rule_start: rule
+                        .origin
+                        .filter(|_| rule.owner.is_none())
+                        .map(|span| span.start),
+                    module: rule.owner.as_deref().map(str::to_owned),
+                })
+                .collect();
+            TRACE_RULES.with(|traced| {
+                *traced.borrow_mut() = TracedRules {
+                    name: name.to_owned(),
+                    depth: self.depth,
+                    count: kept.len(),
+                    rules,
+                };
+            });
+        }
         kept
     }
 
     fn fail_macro(&mut self, nodes: &[Syntax], index: usize, name: &str, rules: &[Rule]) {
+        // Some paths reject a use before trying its rules one by one: show
+        // each rule's failure in the trace anyway.
+        if tracing() && !traced_use(name, node_start(&nodes[index])) {
+            for rule in rules {
+                trace_attempt(
+                    self.source,
+                    nodes,
+                    index,
+                    &rule.pattern,
+                    &self.classes,
+                    None,
+                );
+            }
+        }
         // A rule that matched but needs a context the invocation is not in.
         let missing = self.context_rejected.iter().find_map(|(rule, context)| {
             let origin = rule.origin;
@@ -3563,6 +3638,9 @@ impl<'a> Printer<'a> {
     fn emit(&mut self, original_start: u32, original_end: u32, text: &str, kind: SegmentKind) {
         let source = self.source;
         let pieces = self.pending_pieces.take();
+        if kind == SegmentKind::Atom && tracing() {
+            trace_expanded(source, original_start, original_end, text, self.depth);
+        }
         if kind == SegmentKind::Atom {
             // An invocation of this printer's own depth is placed here; one
             // a nested printer already placed is lifted to this source.
@@ -7883,6 +7961,21 @@ fn match_rule_with(
     classes: &[SyntaxClass],
     refines: &[Refine],
 ) -> Option<Match> {
+    let matched = match_rule_inner(source, nodes, index, pattern, classes, refines);
+    if tracing() {
+        trace_attempt(source, nodes, index, pattern, classes, matched.as_ref());
+    }
+    matched
+}
+
+fn match_rule_inner(
+    source: &str,
+    nodes: &[Syntax],
+    index: usize,
+    pattern: &[Pat],
+    classes: &[SyntaxClass],
+    refines: &[Refine],
+) -> Option<Match> {
     let mut captures = HashMap::new();
     let mut cursor = index;
     // A rule may write `export function` while the call site is already at
@@ -12084,6 +12177,216 @@ thread_local! {
     /// (`None` until its expansion is printed).
     static TRACES: std::cell::RefCell<Vec<(crate::ExpansionTrace, Option<u32>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// One rule of the macro being tried, keyed by its pattern's buffer
+/// (`rules_named` hands out clones; the buffer does not move with them).
+struct TracedRule {
+    pattern: usize,
+    index: usize,
+    rule_start: Option<u32>,
+    module: Option<String>,
+}
+
+#[derive(Default)]
+struct TracedRules {
+    name: String,
+    depth: u32,
+    count: usize,
+    rules: Vec<TracedRule>,
+}
+
+thread_local! {
+    /// `Some` while [`expand_traced`] runs: the steps so far.
+    static TRACE_LOG: std::cell::RefCell<Option<Vec<crate::TraceStep>>> =
+        const { std::cell::RefCell::new(None) };
+    /// The rules [`Printer::rules_named`] last handed out.
+    static TRACE_RULES: std::cell::RefCell<TracedRules> =
+        std::cell::RefCell::new(TracedRules::default());
+}
+
+fn tracing() -> bool {
+    TRACE_LOG.with(|log| log.borrow().is_some())
+}
+
+/// Whether a rule of `name` was already tried at `at` in this pass.
+fn traced_use(name: &str, at: usize) -> bool {
+    TRACE_LOG.with(|log| {
+        log.borrow().as_ref().is_some_and(|steps| {
+            steps.iter().any(|step| {
+                matches!(step, crate::TraceStep::Try { macro_name, at: start, .. }
+                    if macro_name == name && *start as usize == at)
+            })
+        })
+    })
+}
+
+fn trace_push(step: crate::TraceStep) {
+    TRACE_LOG.with(|log| {
+        if let Some(steps) = log.borrow_mut().as_mut() {
+            steps.push(step);
+        }
+    });
+}
+
+/// The first line of `source` from `at`, at most 60 characters.
+fn excerpt(source: &str, at: usize, end: usize) -> String {
+    let at = at.min(source.len());
+    let end = end.clamp(at, source.len());
+    let text = source.get(at..end).unwrap_or("");
+    let line = text.lines().next().unwrap_or("");
+    let mut out: String = line.chars().take(60).collect();
+    if out.len() < text.len() {
+        out.push_str(" …");
+    }
+    out
+}
+
+/// A rule of the current macro was matched against `nodes[index..]`.
+fn trace_attempt(
+    source: &str,
+    nodes: &[Syntax],
+    index: usize,
+    pattern: &[Pat],
+    classes: &[SyntaxClass],
+    matched: Option<&Match>,
+) {
+    let key = pattern.as_ptr() as usize;
+    let found = TRACE_RULES.with(|traced| {
+        let traced = traced.borrow();
+        traced
+            .rules
+            .iter()
+            .find(|rule| rule.pattern == key)
+            .map(|rule| {
+                (
+                    traced.name.clone(),
+                    traced.depth,
+                    traced.count,
+                    rule.index,
+                    rule.rule_start,
+                    rule.module.clone(),
+                )
+            })
+    });
+    // A pattern outside the last rule set is a probe (a failure message
+    // re-checking a rule), not an attempt.
+    let Some((macro_name, depth, rules, rule, rule_start, module)) = found else {
+        return;
+    };
+    let at = nodes.get(index).map_or(0, node_start);
+    let result = match matched {
+        Some(matched) => crate::TryResult::Matched {
+            end: u32_at(matched.end),
+            text: excerpt(source, at, matched.end),
+        },
+        None => match failure_progress(source, nodes, index, pattern, classes) {
+            Some(stop) => crate::TryResult::Failed {
+                at: stop.span.start,
+                near: excerpt(source, stop.span.start as usize, stop.span.end as usize),
+                expected: stop
+                    .expect
+                    .or_else(|| failing_element(source, nodes, index, pattern, classes)),
+            },
+            None => crate::TryResult::Refused,
+        },
+    };
+    trace_push(crate::TraceStep::Try {
+        macro_name,
+        rule,
+        rules,
+        module,
+        rule_start,
+        depth,
+        at: u32_at(at),
+        input: excerpt(source, at, source.len()),
+        result,
+    });
+}
+
+/// The first top-level element of `pattern` that does not match, described
+/// for the trace (`` `then` ``, `$c:expr`, `( ... )`).
+fn failing_element(
+    source: &str,
+    nodes: &[Syntax],
+    index: usize,
+    pattern: &[Pat],
+    classes: &[SyntaxClass],
+) -> Option<String> {
+    let pattern = skip_matched_prefix(nodes, index, pattern);
+    (0..pattern.len()).find_map(|end| {
+        let mut captures = HashMap::new();
+        let mut cursor = index;
+        let mut progress = 0;
+        let mut expect = None;
+        match_pats_fail(
+            source,
+            nodes,
+            &mut cursor,
+            &pattern[..=end],
+            &mut captures,
+            classes,
+            &mut progress,
+            &mut expect,
+        )
+        .map(|_| describe_pat(&pattern[end]))
+    })
+}
+
+fn describe_pat(pat: &Pat) -> String {
+    match pat {
+        Pat::Lit(text) => format!("`{text}`"),
+        Pat::Group { delimiter, .. } => match delimiter {
+            Delimiter::Paren => "`( ... )`".to_owned(),
+            Delimiter::Bracket => "`[ ... ]`".to_owned(),
+            Delimiter::Brace => "`{ ... }`".to_owned(),
+        },
+        Pat::Hole { name, kind } => {
+            let kind = match kind {
+                HoleKind::Expr => "expr",
+                HoleKind::Stmt => "stmt",
+                HoleKind::Item => "item",
+                HoleKind::Type => "type",
+                HoleKind::Binding => "binding",
+                HoleKind::Ident => "ident",
+                HoleKind::TokenTree => "tt",
+                HoleKind::Member { type_member: false } => "classElement",
+                HoleKind::Member { type_member: true } => "typeMember",
+                HoleKind::JsxChild => "jsx",
+                HoleKind::Class(class) => class.as_str(),
+            };
+            format!("`${name}:{kind}`")
+        }
+        Pat::Rep { inner, .. } => match inner.first() {
+            Some(first) => format!("a repetition starting with {}", describe_pat(first)),
+            None => "a repetition".to_owned(),
+        },
+        Pat::Choice(_) => "one of the `|` alternatives".to_owned(),
+    }
+}
+
+/// A use was replaced by `text` in this printer's output.
+fn trace_expanded(source: &str, start: u32, end: u32, text: &str, depth: u32) {
+    let macro_name = TRACES.with(|traces| {
+        traces
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(trace, _)| trace.depth == depth)
+            .map(|(trace, _)| trace.macro_name.clone())
+            .unwrap_or_default()
+    });
+    trace_push(crate::TraceStep::Expand {
+        macro_name,
+        depth,
+        start,
+        end,
+        original: source
+            .get(start as usize..end as usize)
+            .unwrap_or("")
+            .to_owned(),
+        replacement: text.to_owned(),
+    });
 }
 
 fn note_invoked(rule: &Rule, name: &str, depth: u32) -> usize {

@@ -247,6 +247,66 @@ pub fn expand_unchecked(code: &str) -> Expansion {
     })
 }
 
+/// One step of [`expand_traced`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TraceStep {
+    /// Rule `rule` (0-based, of `rules`) of `macro_name` was matched against
+    /// the input at `at`. `at` and the other offsets are in the file when
+    /// `depth` is 0, else in the expansion being expanded again.
+    Try {
+        macro_name: String,
+        rule: usize,
+        rules: usize,
+        /// The macro module of an imported rule; `None` for this file.
+        module: Option<String>,
+        /// Where this file's rule is written (its `rule {` group).
+        rule_start: Option<u32>,
+        depth: u32,
+        at: u32,
+        /// The input from `at` (first line).
+        input: String,
+        result: TryResult,
+    },
+    /// The use `original` (`start..end`) was replaced by `replacement`.
+    Expand {
+        macro_name: String,
+        depth: u32,
+        start: u32,
+        end: u32,
+        original: String,
+        replacement: String,
+    },
+}
+
+/// How one rule attempt ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TryResult {
+    /// The pattern matched up to `end`; `text` is what it consumed.
+    Matched { end: u32, text: String },
+    /// Matching stopped at `at` (`near` is the token there). `expected` is
+    /// the rule's or class's `expect` text.
+    Failed {
+        at: u32,
+        near: String,
+        expected: Option<String>,
+    },
+    /// The pattern matched but a `refine` clause or a written-prefix check
+    /// refused it.
+    Refused,
+}
+
+/// [`expand`] with a step-by-step trace: every rule tried at every use,
+/// how each attempt ended, and every replacement. For debugging macro
+/// authoring (`tsc-ext expand --trace`); slower than [`expand`], and
+/// uncached.
+#[must_use]
+pub fn expand_traced(request: ExpandRequest<'_>) -> (Expansion, Vec<TraceStep>) {
+    if sweetener::matches(request.filename) {
+        return sweetener_expand::expand_traced(request);
+    }
+    (unchanged(request.code), Vec::new())
+}
+
 pub use sweetener_budget::ResourceBudget;
 pub use sweetener_origins::retarget_segments;
 
