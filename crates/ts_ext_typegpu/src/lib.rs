@@ -1,7 +1,7 @@
 //! The TypeGPU plugin session.
 //!
 //! The rewrite and the tinyest payload live in `ts_goport::ext`, because
-//! they use the compiler's parser and `tsgo` calls them from its own parse
+//! they use the compiler's parser and tsc calls them from its own parse
 //! hook. This crate is the session a bundler calls when there is no `tsc`:
 //! check rewrites operators, build wraps the rewritten text. It does not
 //! expand Sweetener. `ts_ext_syntax` does that first, then calls

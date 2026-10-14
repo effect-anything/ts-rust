@@ -2,7 +2,7 @@
 """Typecheck each case in cases.jsonl against the simulated TypeGPU names.
 
 The package is not installed. `types/sim.d.ts` declares the names the
-snippets use, and `tsgo` adds the operator prelude itself. A clean case
+snippets use, and tsc (the cargo `tsgo` binary) adds the operator prelude itself. A clean case
 gets an empty `ours.check.txt`. This does not discover cases.
 
 Usage:
@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -26,7 +27,37 @@ ROOT = Path(__file__).resolve().parents[3]
 CASES = CRATE / "cases"
 MANIFEST = CRATE / "cases.jsonl"
 STUB = CRATE / "types" / "sim.d.ts"
-TSGO = ROOT / "target" / "debug" / "tsgo"
+
+def find_tsc() -> Path:
+    """The debug tsc (the cargo `tsgo` binary).
+
+    `TSC_BIN` when set, else `<target>/debug/tsgo`, where the target directory
+    is `CARGO_TARGET_DIR`, else `cargo metadata`'s `target_directory`, else
+    `<root>/target`.
+    """
+    override = os.environ.get("TSC_BIN")
+    if override:
+        return Path(override)
+    target = os.environ.get("CARGO_TARGET_DIR")
+    if target:
+        base = ROOT / target
+    else:
+        base = ROOT / "target"
+        try:
+            meta = subprocess.run(
+                ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            base = Path(json.loads(meta.stdout)["target_directory"])
+        except (OSError, subprocess.CalledProcessError, KeyError, ValueError):
+            pass
+    return base / "debug" / ("tsgo.exe" if os.name == "nt" else "tsgo")
+
+
+TSC = find_tsc()
 
 # Module-resolution gaps of the stub, not failures of the rewrite.
 STUB_NOISE = ("TS2307", "TS2305", "TS2614", "TS2595", "TS2749", "TS2694")
@@ -88,7 +119,7 @@ def check_one(case: Path) -> str:
             encoding="utf-8",
         )
         completed = subprocess.run(
-            [str(TSGO), "--noEmit", "--pretty", "false", "-p", "."],
+            [str(TSC), "--noEmit", "--pretty", "false", "-p", "."],
             cwd=stage,
             text=True,
             capture_output=True,
@@ -96,7 +127,7 @@ def check_one(case: Path) -> str:
         )
         report = completed.stdout + completed.stderr
         if completed.returncode != 0 and not report.strip():
-            report = f"tsgo exit {completed.returncode}\n"
+            report = f"tsc exit {completed.returncode}\n"
         kept = [
             line
             for line in report.splitlines()
@@ -108,8 +139,11 @@ def check_one(case: Path) -> str:
 
 
 def main() -> int:
-    if not TSGO.is_file():
-        raise SystemExit(f"tsgo missing at {TSGO}")
+    if not TSC.is_file():
+        raise SystemExit(
+            f"tsc (the cargo `tsgo` binary) missing at {TSC}: "
+            "build it with `cargo build -p ts_goport --bin tsgo`, or set TSC_BIN"
+        )
     args = [arg for arg in sys.argv[1:] if arg != "--apply"]
     apply = "--apply" in sys.argv
     prefix = args[0] if args else ""

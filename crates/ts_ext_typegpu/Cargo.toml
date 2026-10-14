@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "TypeGPU plugin session over ts_goport::ext. Not linked into tsgo."
+description = "TypeGPU plugin session over ts_goport::ext. Not linked into tsc (the cargo `tsgo` binary)."
 
 [dependencies]
 ts_goport = { path = "../ts_goport" }

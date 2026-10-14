@@ -1,7 +1,7 @@
 //! Expand a project's Sweetener files before the host asks for them.
 //!
 //! The content mapper process lives as long as the language server or the
-//! `tsgo` run. On `openProject` it starts this in the background: every
+//! tsc run. On `openProject` it starts this in the background: every
 //! `.sts`/`.stsx` under the config's directory is read and expanded on a
 //! few worker threads, which fills the expansion memo (and the macro-module
 //! reads behind it). A later `transform` of the same file and content is a

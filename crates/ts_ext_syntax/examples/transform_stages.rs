@@ -2,7 +2,7 @@
 //!
 //! `cargo run --release -p ts_ext_syntax --example transform_stages -- [--runs N] <file>...`
 //!
-//! Mapper path (`protocol::transform_file`, what `tsgo` and the LSP call):
+//! Mapper path (`protocol::transform_file`, what tsc and the LSP call):
 //! expand (cold, caches cleared), span-map segments, mappings JSON,
 //! expansion regions; then the whole call again with the expansion cached.
 //! Plugin path (`TransformSession::transform`, what vite calls): build-phase

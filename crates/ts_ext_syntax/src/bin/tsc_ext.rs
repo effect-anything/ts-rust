@@ -2,7 +2,7 @@
 //!
 //! With no arguments (or the hidden `mapper` command) this process speaks
 //! the content-mapper protocol on stdin/stdout; a tsconfig `contentMappers`
-//! entry for `@effect-x/tsc` starts it. `tsgo` does not link this binary.
+//! entry for `@effect-x/tsc` starts it. tsc (the cargo `tsgo` binary) does not link this binary.
 //! Run by hand in a terminal with no arguments, it prints the help instead.
 //!
 //! Every other command (`expand`, `eval`, `explain`, `cheatsheet`, `help`)
