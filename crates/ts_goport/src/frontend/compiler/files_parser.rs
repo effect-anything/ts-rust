@@ -151,7 +151,7 @@ impl ParseTask {
         TAKEN.with(|taken| taken.borrow_mut().take());
         let file = match self.file.clone() {
             Some(file) => Some(file),
-            None => loader.parse_source_file(self),
+            None => crate::ext::precheck::checked(loader.parse_source_file(self)), // PORT: ext
         };
         let Some(file) = file else {
             return;

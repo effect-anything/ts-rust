@@ -173,6 +173,7 @@ fn parse_result_with(
         for diagnostic in &result.diagnostics {
             let mut diagnostic = diagnostic.clone();
             diagnostic.set_file(source_file.root);
+            crate::ext::precheck::retarget_related(&mut diagnostic, source_file.root); // PORT: ext
             diagnostics.push(diagnostic);
         }
         // PORT: Go `sourceFile.SetDiagnostics(...)`. The parsed file keeps its

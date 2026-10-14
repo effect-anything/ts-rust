@@ -8,20 +8,43 @@
 //! attach a span map so diagnostics land on the author's text. Emit still
 //! belongs to this compiler.
 //!
-//! Register another pass in [`apply`]. Do not special-case its name in the
+//! Register another pass in [`checked`]. Do not special-case its name in the
 //! emitter.
 
-use crate::frontend::parser::{ParsedSourceFile, SourceFileParseOptions};
+use crate::frontend::parser::ParsedSourceFile;
+use std::rc::Rc;
 
-/// Run the internal rewrites. Content mapping has already happened.
+/// The program's parse hook: run the internal passes on a file the loader
+/// just parsed (content mapping has already happened) and hand it back.
 ///
 /// Operator overloads are not rewritten here. Check and LSP type the
 /// author's `+` from `Symbol.operatorPlus`. Emit rewrites the calls.
+/// The passes only report: the file and its `Rc` stay the same.
 #[must_use]
-pub fn apply(_opts: &SourceFileParseOptions, file: ParsedSourceFile) -> ParsedSourceFile {
-    crate::ext::tsover::report_nesting(&file);
-    crate::ext::typegpu::report_refusals(&file);
+pub fn checked(file: Option<Rc<ParsedSourceFile>>) -> Option<Rc<ParsedSourceFile>> {
+    if let Some(file) = &file {
+        crate::ext::tsover::report_nesting(file);
+        crate::ext::typegpu::report_refusals(file);
+    }
     file
+}
+
+/// Point the related information of a mapper diagnostic at the mapped file,
+/// as its primary location is.
+pub fn retarget_related(diagnostic: &mut crate::core::Diagnostic, file: crate::core::Node) {
+    if diagnostic.related_information().is_empty() {
+        return;
+    }
+    let related = diagnostic
+        .related_information()
+        .iter()
+        .cloned()
+        .map(|mut item| {
+            item.set_file(file);
+            item
+        })
+        .collect();
+    diagnostic.set_related_info(related);
 }
 
 /// Runtime wrappers for emitted JavaScript. Check does not call this.
