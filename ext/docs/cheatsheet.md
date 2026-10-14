@@ -136,8 +136,10 @@ Errors: SWR4019 (`#parameterize` names something that is not a syntax
 parameter), SWR4022 (`required` parameter unused), SWR4018 (a parameter used
 outside any `#parameterize`), SWR2017 (malformed `#fold`).
 
-Caveat: a spliced capture is not parenthesized. Write `($x)` in a template
-when its precedence matters (`$acc && ($item)`).
+A captured `:expr`, and an expression macro's result, is spliced as one
+operand: with `$a && $b`, `both(p, q || r)` is `(p && (q || r))`. `#fold`'s
+`$acc` is spliced as written, as upstream does; write `($acc)` when its
+precedence matters (`($acc) * 2 + $item`).
 
 ## gpu: `"use gpu"` functions (TypeGPU)
 

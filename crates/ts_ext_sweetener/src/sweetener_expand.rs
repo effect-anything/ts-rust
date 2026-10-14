@@ -2147,12 +2147,27 @@ impl<'a> Printer<'a> {
                 let trace_mark = note_invoked(&rule, &name, self.depth);
                 let _invocation = enter_invocation((head_span.start, u32_at(matched.end)));
                 let mut expanded_pieces: Vec<Piece>;
-                let (mut replacement, protected, mut pieces) = instantiate_marked(
+                let (mut replacement, mut protected, mut pieces) = instantiate_marked(
                     self.source,
                     &rule.template,
                     &matched.captures,
                     &self.classes,
                 );
+                // A captured expression keeps its meaning where the
+                // template puts it: `$a && $b` with `q || r` is `(q || r)`.
+                let exprs = expr_capture_texts(&rule.pattern, &matched.captures);
+                if !exprs.is_empty() {
+                    let (grouped, moved) = super::sweetener_group::group_spans(
+                        &replacement,
+                        &protected,
+                        |text| exprs.contains(text),
+                    );
+                    if grouped != replacement {
+                        pieces = super::sweetener_origins::carry(&replacement, &grouped, &pieces);
+                        replacement = grouped;
+                        protected = moved;
+                    }
+                }
                 if let Err(message) = super::sweetener_budget::charge(
                     super::sweetener_budget::Kind::OutputTokens,
                     super::sweetener_budget::count_tokens(&replacement),
@@ -2237,6 +2252,24 @@ impl<'a> Printer<'a> {
                 {
                     expanded = ";".to_owned();
                     expanded_pieces.clear();
+                }
+                // An expression macro's result is one operand where it
+                // stands: `!both(p, q)` is `!(p && q)`.
+                if self
+                    .macros
+                    .iter()
+                    .any(|macro_| macro_.name == name && macro_.category == "expr")
+                    && super::sweetener_group::needs_group(
+                        super::sweetener_group::tail(&self.source[..head_span.start as usize]),
+                        &expanded,
+                        super::sweetener_group::head(&self.source[matched.end..]),
+                        self.depth > 0,
+                    )
+                {
+                    let grouped = format!("({})", expanded.trim());
+                    expanded_pieces =
+                        super::sweetener_origins::carry(&expanded, &grouped, &expanded_pieces);
+                    expanded = grouped;
                 }
                 self.pending_pieces = Some(expanded_pieces);
                 self.emit(
@@ -11244,6 +11277,57 @@ fn skip_syntax_import(nodes: &[Syntax], index: usize) -> usize {
     index + 1
 }
 
+/// The texts the rule's `:expr` holes captured, every row of a repetition
+/// included.
+fn expr_capture_texts(
+    pattern: &[Pat],
+    captures: &HashMap<String, Capture>,
+) -> std::collections::HashSet<String> {
+    fn names(pattern: &[Pat], out: &mut Vec<String>) {
+        for pat in pattern {
+            match pat {
+                Pat::Hole {
+                    name,
+                    kind: HoleKind::Expr,
+                } => out.push(name.clone()),
+                Pat::Group { inner, .. } | Pat::Rep { inner, .. } => names(inner, out),
+                Pat::Choice(alternatives) => {
+                    for alternative in alternatives {
+                        names(alternative, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    fn walk(
+        wanted: &[String],
+        captures: &mut dyn Iterator<Item = (&String, &Capture)>,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        for (name, capture) in captures {
+            match capture {
+                Capture::Text(text, _) if wanted.contains(name) => {
+                    out.insert(text.trim().to_owned());
+                }
+                Capture::Many(rows) => {
+                    for row in rows {
+                        walk(wanted, &mut row.iter().map(|(name, capture)| (name, capture)), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut wanted = Vec::new();
+    names(pattern, &mut wanted);
+    let mut out = std::collections::HashSet::new();
+    if !wanted.is_empty() {
+        walk(&wanted, &mut captures.iter(), &mut out);
+    }
+    out
+}
+
 fn instantiate_marked(
     source: &str,
     template: &[Tpl],
@@ -12097,18 +12181,26 @@ fn render_fold(
                 at: None,
                 literals: Vec::new(),
             });
-        scoped.insert(item.to_owned(), element);
-        let spliced = if is_primary_text(&current) {
-            current.clone()
-        } else {
-            format!("({current})")
+        let item_text = match &element {
+            Capture::Text(text, _) => Some(text.trim().to_owned()),
+            _ => None,
         };
-        scoped.insert(acc.to_owned(), Capture::Text(spliced, None));
+        scoped.insert(item.to_owned(), element);
+        scoped.insert(acc.to_owned(), Capture::Text(current.clone(), None));
         scoped.insert(index.to_owned(), Capture::Text(position.to_string(), None));
         scope_record_fields(&mut scoped);
         let mut next = String::new();
-        render(&mut next, body, &scoped, classes, &mut Vec::new());
-        current = next.trim().to_owned();
+        let mut spliced = Vec::new();
+        render(&mut next, body, &scoped, classes, &mut spliced);
+        // The item is an operand where the body puts it: `$acc && $item`
+        // with `q || r` is `... && (q || r)`. The accumulator is spliced as
+        // written, as upstream does: `$acc * 2` after `0 * 2 + a` prints
+        // `0 * 2 + a * 2`.
+        let spans: Vec<(usize, usize)> = spliced.iter().map(|(from, to, _)| (*from, *to)).collect();
+        let (grouped, _) = super::sweetener_group::group_spans(&next, &spans, |text| {
+            item_text.as_deref() == Some(text) && text != current
+        });
+        current = grouped.trim().to_owned();
     }
     out.push_str(&current);
 }
@@ -12484,15 +12576,6 @@ fn note_budget(message: String) {
     BUDGET.with(|budget| {
         budget.borrow_mut().get_or_insert(message);
     });
-}
-
-fn is_primary_text(text: &str) -> bool {
-    let read = sweetener_reader::read_syntax(text);
-    match read.children.as_slice() {
-        [Syntax::Token { .. } | Syntax::String { .. }] => true,
-        [Syntax::Group { delimiter, .. }] => *delimiter == Delimiter::Paren,
-        _ => false,
-    }
 }
 
 fn render(

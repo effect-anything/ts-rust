@@ -14,6 +14,7 @@ mod sweetener_cache;
 mod sweetener_context;
 mod sweetener_expand;
 mod sweetener_forms;
+mod sweetener_group;
 mod sweetener_hygiene;
 mod sweetener_origins;
 mod sweetener_reader;

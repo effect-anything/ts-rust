@@ -23,7 +23,6 @@ fn run(code: &str) -> (String, Vec<String>) {
 /// A captured expression is spliced so it keeps its meaning: upstream
 /// prints `(p && (q || r))`; this expander prints `p && q || r`.
 #[test]
-#[ignore = "known gap: captured expressions are spliced without parentheses"]
 fn a_spliced_expression_keeps_its_precedence() {
     let (code, diagnostics) = run(
         "export syntax both:expr { rule { both($a:expr, $b:expr) } => { $a && $b } }\nconst a = both(p, q || r);\n",
@@ -34,7 +33,6 @@ fn a_spliced_expression_keeps_its_precedence() {
 
 /// The same through `#fold`: upstream `(true && p && (q || r) && s)`.
 #[test]
-#[ignore = "known gap: captured expressions are spliced without parentheses"]
 fn a_fold_item_keeps_its_precedence() {
     let (code, _) = run(
         "export syntax all:expr { rule { all($($x:expr),*) } => { #fold($x, init: { true }) { ($acc, $item, $index) => { $acc && $item } } } }\nconst b = all(p, q || r, s);\n",

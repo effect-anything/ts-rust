@@ -967,7 +967,7 @@ export syntax swap:stmt {\n  rule { swap $a:ident $b:ident; } => {\n    const tm
 const a = sum(1, 2, 3);\nconst e = sum();\nconst t = 1;\nmk 5;\nlet p = 1, q = 2, tmp = 0;\nswap p q;\n",
     );
     for piece in [
-        "const a = ((0 + 1 * 0) + 2 * 1) + 3 * 2;",
+        "const a = (0 + 1 * 0 + 2 * 1 + 3 * 2);",
         "const e = 0;",
         "const t_1 = 5; const t_2 = 3; const t_3 = 2; use(t_3);",
         "const tmp_1 = p; p = q; q = tmp_1; p;",
@@ -1509,11 +1509,11 @@ fn context_clauses_select_rules_by_yield_and_await() {
         ),
     );
     for piece in [
-        "const a = yield 1; const f = () => 2;",
+        "const a = (yield 1); const f = () => 2;",
         "const b = 3;",
-        "return await 5;",
-        "const top = await 6;",
-        "return yield 7;",
+        "return (await 5);",
+        "const top = (await 6);",
+        "return (yield 7);",
         "async () => await 8;",
         "return 9;",
     ] {
