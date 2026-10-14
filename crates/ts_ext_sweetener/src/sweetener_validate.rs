@@ -939,13 +939,18 @@ pub(crate) fn unknown_parameterizations(
 
 fn first_unknown_parameter(nodes: &[Syntax], in_scope: &HashSet<String>) -> Option<String> {
     for (index, node) in nodes.iter().enumerate() {
-        let args = if is(Some(node), "#") && is(nodes.get(index + 1), "parameterize") {
-            group(nodes.get(index + 2), Delimiter::Paren)
+        let args_at = if is(Some(node), "#") && is(nodes.get(index + 1), "parameterize") {
+            Some(index + 2)
         } else if is(Some(node), "#parameterize") {
-            group(nodes.get(index + 1), Delimiter::Paren)
+            Some(index + 1)
         } else {
             None
         };
+        // Without its `{ body }` the operation is malformed (SWR2016), and
+        // names nothing.
+        let args = args_at
+            .filter(|at| group(nodes.get(at + 1), Delimiter::Brace).is_some())
+            .and_then(|at| group(nodes.get(at), Delimiter::Paren));
         if let Some(args) = args {
             let mut param = String::new();
             for arg in args {

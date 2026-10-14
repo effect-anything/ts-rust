@@ -725,6 +725,9 @@ fn check_template(nodes: &[Syntax], out: &mut Vec<Diagnostic>) {
                 }
             }
         }
+        if let Some(diagnostic) = malformed_scoped(nodes, index) {
+            out.push(diagnostic);
+        }
         if dollar_at(nodes, index) && group_is(nodes.get(index + 1), Delimiter::Paren) {
             let mut quantifier = index + 2;
             if !operator_is(nodes.get(quantifier), "*") && !operator_is(nodes.get(quantifier), "+")
@@ -744,6 +747,62 @@ fn check_template(nodes: &[Syntax], out: &mut Vec<Diagnostic>) {
         }
         index += 1;
     }
+}
+
+/// `#let(name = value) { body }` / `#parameterize(name = value) { body }`
+/// at `index` that upstream's template parser refuses: SWR2016 at the `#`.
+fn malformed_scoped(nodes: &[Syntax], index: usize) -> Option<Diagnostic> {
+    let token_text = |node: &Syntax| match node {
+        Syntax::Token { raw, .. } => Some(raw.clone()),
+        _ => None,
+    };
+    let (name, args) = if token_at(nodes, index, "#let") || token_at(nodes, index, "#parameterize") {
+        (token_text(&nodes[index])?, index + 1)
+    } else if operator_is(nodes.get(index), "#")
+        && (token_at(nodes, index + 1, "let") || token_at(nodes, index + 1, "parameterize"))
+    {
+        (format!("#{}", token_text(&nodes[index + 1])?), index + 2)
+    } else {
+        return None;
+    };
+    let is_let = name == "#let";
+    let message = if is_let {
+        "#let is written #let(name = value) { body }, naming one identifier and giving a value and a body that are not empty"
+    } else {
+        "#parameterize is written #parameterize(name = replacement) { body }, naming one syntax parameter and giving a replacement that is not empty"
+    };
+    let report = || Some(malformed(message, syntax_span(&nodes[index])));
+    let Some(Syntax::Group {
+        delimiter: Delimiter::Paren,
+        children,
+        ..
+    }) = nodes.get(args)
+    else {
+        return report();
+    };
+    let Some(Syntax::Group {
+        delimiter: Delimiter::Brace,
+        children: body,
+        ..
+    }) = nodes.get(args + 1)
+    else {
+        return report();
+    };
+    let children: Vec<&Syntax> = children
+        .iter()
+        .filter(|node| !matches!(node, Syntax::Comment { .. }))
+        .collect();
+    let Some(equals) = children.iter().position(|node| operator_is(Some(node), "=")) else {
+        return report();
+    };
+    let named = if is_let {
+        equals == 1 && matches!(children[0], Syntax::Token { .. })
+    } else {
+        equals > 0
+    };
+    let valued = equals + 1 < children.len();
+    let bodied = !is_let || body.iter().any(|node| !matches!(node, Syntax::Comment { .. }));
+    if named && valued && bodied { None } else { report() }
 }
 
 /// Words a binding can never be spelled with (TypeScript reserved words).
@@ -3223,6 +3282,16 @@ impl<'a> Printer<'a> {
 
     fn diagnose_unknown(&mut self, template: &[Tpl], fallback: Span) {
         for (name, at) in unknown_directives(template) {
+            // A malformed `#let` / `#parameterize` is SWR2016 at its
+            // definition already.
+            if matches!(name.as_str(), "#let" | "#parameterize" | "let" | "parameterize")
+                && self.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.message.starts_with("SWR2016")
+                        && (diagnostic.start as usize == at || diagnostic.start as usize + 1 == at)
+                })
+            {
+                continue;
+            }
             let invalid = name.strip_prefix(INVALID_OPERATION);
             let shown = invalid.unwrap_or(&name);
             let (start, end) = if at < self.source.len() {

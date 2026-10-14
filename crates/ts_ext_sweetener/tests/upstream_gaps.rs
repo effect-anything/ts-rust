@@ -60,10 +60,9 @@ fn fold_parameters_are_fixed() {
     assert_eq!(diagnostics, ["SWR2017@57"]);
 }
 
-/// A malformed `#let` is SWR2016 upstream (at the `#`); this expander
-/// reports SWR2018 "no operation #let".
+/// A malformed `#let` is SWR2016 upstream (at the `#`), not
+/// SWR2018 "no operation #let".
 #[test]
-#[ignore = "known gap: a #let without a body is SWR2018, not SWR2016"]
 fn a_let_without_a_body_is_malformed() {
     let (_, diagnostics) = run(
         "export syntax f:expr { rule { f($x:expr) } => { #let(v = $x) } }\nconst a = f(1);\n",
