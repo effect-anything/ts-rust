@@ -468,11 +468,8 @@ fn start_text_hashes(
                     None => std::borrow::Cow::Owned(text.to_string()),
                 }
             } else {
-                std::borrow::Cow::Owned(crate::ext::mapper_deps::version_text(
-                    source_file_original_text(file),
-                    source_file_content_mapper_transform_identity(file),
-                    source_file_text(file),
-                )) // PORT: ext: the virtual text is part of the version
+                // PORT: ext: a macro-dependent file's virtual text is part of the version
+                std::borrow::Cow::Owned(crate::ext::mapper_deps::version_text(file))
             }
         })
         .collect();

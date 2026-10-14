@@ -79,7 +79,7 @@ impl MapperHandler for Handler {
                         extension: mapped_extension(&p.content),
                         mappings,
                         diagnostic_directives,
-                        expansions: Vec::new(),
+                        ext: Default::default(),
                     },
                     diagnostics,
                     ..TransformResult::default()

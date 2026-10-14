@@ -143,12 +143,22 @@ pub fn with_dependents<'a>(
 /// a file whose expansion changed with a macro module kept its version,
 /// and the build reused its old diagnostics and output. The virtual text
 /// is what the checker reads; it is part of the version here.
-pub fn version_text(
-    original: impl std::fmt::Display,
-    transform_identity: &str,
-    virtual_text: impl std::fmt::Display,
-) -> String {
-    format!("{original}\x00{transform_identity}\x00{virtual_text}")
+pub fn version_text(file: crate::prelude::Node) -> String {
+    use crate::ast::{
+        source_file_content_mapper_transform_identity, source_file_original_text,
+        source_file_span_map, source_file_text,
+    };
+    let original = source_file_original_text(file);
+    let identity = source_file_content_mapper_transform_identity(file);
+    // Upstream (Go incremental/programtosnapshot.go:94) is original text plus
+    // transform identity. Only a file whose expansion read other modules can
+    // change without either changing, so only it adds the virtual text; every
+    // other mapped file keeps the upstream version and buildinfo.
+    if source_file_span_map(file).is_some_and(|map| !SpanMap::dependencies(Some(map)).is_empty()) {
+        format!("{original}\x00{identity}\x00{}", source_file_text(file))
+    } else {
+        format!("{original}\x00{identity}")
+    }
 }
 
 #[cfg(test)]
