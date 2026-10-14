@@ -440,58 +440,7 @@ pub struct MappedOutput {
     // virtual ranges and optionally report an error when no diagnostic is produced.
     // PORT: Go `*DiagnosticDirectives`; nil is `None`.
     pub diagnostic_directives: Option<DiagnosticDirectives>,
-    // PORT: ts-rust extension. Macro expansions: which virtual range each
-    // invocation in the original produced, in the selected position encoding.
-    pub expansions: Vec<ExpansionInformation>,
-}
-
-// PORT: ts-rust extension. One macro invocation and the virtual text it
-// produced.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ExpansionInformation {
-    pub virtual_start: i32,
-    pub virtual_length: i32,
-    pub original_start: i32,
-    pub original_length: i32,
-    pub label: String,
-}
-
-impl MarshalerTo for ExpansionInformation {
-    fn marshal_json_to(&self, enc: &mut String) -> std::result::Result<(), JsonError> {
-        let first = &mut true;
-        write_object_start(enc);
-        marshal_field(enc, first, "virtualStart", &self.virtual_start)?;
-        marshal_field(enc, first, "virtualLength", &self.virtual_length)?;
-        marshal_field(enc, first, "originalStart", &self.original_start)?;
-        marshal_field(enc, first, "originalLength", &self.original_length)?;
-        marshal_field(enc, first, "label", &self.label)?;
-        write_object_end(enc);
-        Ok(())
-    }
-}
-
-impl UnmarshalerFrom for ExpansionInformation {
-    fn unmarshal_json_from(
-        &mut self,
-        dec: &mut JsonDecoder<'_>,
-    ) -> std::result::Result<(), JsonError> {
-        let is_object =
-            unmarshal_struct_fields(dec, "contentmapper.ExpansionInformation", |name, dec| {
-                match name {
-                    "virtualStart" => json_unmarshal_decode(dec, &mut self.virtual_start)?,
-                    "virtualLength" => json_unmarshal_decode(dec, &mut self.virtual_length)?,
-                    "originalStart" => json_unmarshal_decode(dec, &mut self.original_start)?,
-                    "originalLength" => json_unmarshal_decode(dec, &mut self.original_length)?,
-                    "label" => json_unmarshal_decode(dec, &mut self.label)?,
-                    _ => return Ok(false),
-                }
-                Ok(true)
-            })?;
-        if !is_object {
-            *self = ExpansionInformation::default();
-        }
-        Ok(())
-    }
+    pub expansions: Vec<crate::ext::mapper_protocol::ExpansionInformation>, // PORT: ext
 }
 
 impl MappedOutput {
@@ -511,7 +460,7 @@ impl MappedOutput {
             "diagnosticDirectives",
             &self.diagnostic_directives,
         )?;
-        marshal_field_omitempty(enc, first, "expansions", &self.expansions)
+        marshal_field_omitempty(enc, first, "expansions", &self.expansions) // PORT: ext
     }
 
     /// Decodes one member of `MappedOutput`; false for an unknown name.
@@ -525,7 +474,7 @@ impl MappedOutput {
             "extension" => json_unmarshal_decode(dec, &mut self.extension)?,
             "mappings" => json_unmarshal_decode(dec, &mut self.mappings)?,
             "diagnosticDirectives" => json_unmarshal_decode(dec, &mut self.diagnostic_directives)?,
-            "expansions" => json_unmarshal_decode(dec, &mut self.expansions)?,
+            "expansions" => json_unmarshal_decode(dec, &mut self.expansions)?, // PORT: ext
             _ => return Ok(false),
         }
         Ok(true)
@@ -823,55 +772,7 @@ pub struct Diagnostic {
     pub start: i32,
     pub length: i32,
     pub code: i32,
-    // PORT: ts-rust extension. Optional TypeScript `DiagnosticCategory`
-    // (0 warning, 1 error, 2 suggestion, 3 message); absent means error, as in Go.
-    pub category: Option<i32>,
-    // PORT: ts-rust extension. `relatedInformation`: secondary locations in
-    // the original content (a macro use, the rule that came closest).
-    pub related_information: Vec<RelatedInformation>,
-}
-
-// PORT: ts-rust extension. One `relatedInformation` entry of a mapper
-// diagnostic, in original-source coordinates.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct RelatedInformation {
-    pub message_text: String,
-    pub start: i32,
-    pub length: i32,
-}
-
-impl MarshalerTo for RelatedInformation {
-    fn marshal_json_to(&self, enc: &mut String) -> std::result::Result<(), JsonError> {
-        let first = &mut true;
-        write_object_start(enc);
-        marshal_field(enc, first, "messageText", &self.message_text)?;
-        marshal_field(enc, first, "start", &self.start)?;
-        marshal_field(enc, first, "length", &self.length)?;
-        write_object_end(enc);
-        Ok(())
-    }
-}
-
-impl UnmarshalerFrom for RelatedInformation {
-    fn unmarshal_json_from(
-        &mut self,
-        dec: &mut JsonDecoder<'_>,
-    ) -> std::result::Result<(), JsonError> {
-        let is_object =
-            unmarshal_struct_fields(dec, "contentmapper.RelatedInformation", |name, dec| {
-                match name {
-                    "messageText" => json_unmarshal_decode(dec, &mut self.message_text)?,
-                    "start" => json_unmarshal_decode(dec, &mut self.start)?,
-                    "length" => json_unmarshal_decode(dec, &mut self.length)?,
-                    _ => return Ok(false),
-                }
-                Ok(true)
-            })?;
-        if !is_object {
-            *self = RelatedInformation::default();
-        }
-        Ok(())
-    }
+    pub ext: crate::ext::mapper_protocol::DiagnosticExt, // PORT: ext
 }
 
 impl MarshalerTo for Diagnostic {
@@ -882,10 +783,7 @@ impl MarshalerTo for Diagnostic {
         marshal_field(enc, first, "start", &self.start)?;
         marshal_field(enc, first, "length", &self.length)?;
         marshal_field(enc, first, "code", &self.code)?;
-        if let Some(category) = &self.category {
-            marshal_field(enc, first, "category", category)?;
-        }
-        marshal_field_omitempty(enc, first, "relatedInformation", &self.related_information)?;
+        self.ext.marshal_fields(enc, first)?; // PORT: ext
         write_object_end(enc);
         Ok(())
     }
@@ -902,12 +800,7 @@ impl UnmarshalerFrom for Diagnostic {
                 "start" => json_unmarshal_decode(dec, &mut self.start)?,
                 "length" => json_unmarshal_decode(dec, &mut self.length)?,
                 "code" => json_unmarshal_decode(dec, &mut self.code)?,
-                "category" => {
-                    let mut category = 0i32;
-                    json_unmarshal_decode(dec, &mut category)?;
-                    self.category = Some(category);
-                }
-                "relatedInformation" => json_unmarshal_decode(dec, &mut self.related_information)?,
+                "category" | "relatedInformation" => self.ext.decode_field(name, dec)?, // PORT: ext
                 _ => return Ok(false),
             }
             Ok(true)
@@ -2816,53 +2709,18 @@ fn decode_transform_result(
                     vec![err],
                 )
             })?;
-        let mut diagnostic = ast::new_external_diagnostic(
+        result.diagnostics.push(ast::new_external_diagnostic(
             Node::NIL,
             TextRange::new(start, end),
             diagnostic_source,
-            mapper_diagnostic_category(d.category),
+            crate::diagnostics::Category::Error,
             d.code,
             &d.message_text,
-        );
-        // PORT: ts-rust extension. Related locations use the same coordinate
-        // space; one that does not map is dropped, not an error.
-        let mut related = Vec::with_capacity(d.related_information.len());
-        for item in &d.related_information {
-            if item.start < 0 || item.length < 0 || item.start > i32::MAX - item.length {
-                continue;
-            }
-            let (Ok(start), Ok(end)) = (
-                original_positions.normalize(item.start),
-                original_positions.normalize(item.start + item.length),
-            ) else {
-                continue;
-            };
-            related.push(ast::new_external_diagnostic(
-                Node::NIL,
-                TextRange::new(start, end),
-                diagnostic_source,
-                crate::diagnostics::Category::Message,
-                d.code,
-                &item.message_text,
-            ));
-        }
-        if !related.is_empty() {
-            diagnostic.set_related_info(related);
-        }
-        result.diagnostics.push(diagnostic);
+        ));
+        let at = |p| original_positions.normalize(p); // PORT: ext
+        d.ext.apply(result.diagnostics.last_mut(), at);
     }
     Ok(result)
-}
-
-// PORT: ts-rust extension. Maps the optional protocol category; anything
-// absent or unknown stays an error, as Go reports every mapper diagnostic.
-fn mapper_diagnostic_category(category: Option<i32>) -> crate::diagnostics::Category {
-    match category {
-        Some(0) => crate::diagnostics::Category::Warning,
-        Some(2) => crate::diagnostics::Category::Suggestion,
-        Some(3) => crate::diagnostics::Category::Message,
-        _ => crate::diagnostics::Category::Error,
-    }
 }
 
 // Go: contentmapper/hostimpl.go:1172 decodeMappedOutput
@@ -2890,13 +2748,17 @@ fn decode_mapped_output<'a>(
     // nil, which would mean "not content-mapped".
     if !output.mappings.0.is_empty() {
         let mappings = spanmap::unmarshal(&output.mappings.0)?;
-        let normalized = normalize_mappings(&mappings, &virtual_positions, &original_positions)?;
-        let expansions =
-            normalize_expansions(&output.expansions, &virtual_positions, &original_positions);
-        result.mappings = Some(Arc::new(normalized.with_expansions(expansions)));
+        result.mappings = Some(Arc::new(normalize_mappings(
+            &mappings,
+            &virtual_positions,
+            &original_positions,
+        )?));
     } else {
         result.mappings = Some(Arc::new(spanmap::new(&[])));
     }
+    let v = |p| virtual_positions.normalize_text_pos(p); // PORT: ext
+    let o = |p| original_positions.normalize_text_pos(p);
+    crate::ext::mapper_protocol::attach_expansions(&mut result.mappings, &output.expansions, v, o);
     result.diagnostic_directives = normalize_diagnostic_directives(
         output.diagnostic_directives.as_ref(),
         &virtual_positions,
@@ -3026,36 +2888,6 @@ fn normalize_diagnostic_directives(
         }
     }
     Ok(result)
-}
-
-// PORT: ts-rust extension. Expansions in UTF-8 offsets, like the segments.
-// An entry with a position outside its text is dropped: it is information
-// for language features, not part of the mapping contract.
-fn normalize_expansions(
-    expansions: &[ExpansionInformation],
-    virtual_positions: &PositionNormalizer<'_>,
-    original_positions: &PositionNormalizer<'_>,
-) -> Vec<spanmap::Expansion> {
-    expansions
-        .iter()
-        .filter_map(|item| {
-            Some(spanmap::Expansion {
-                virtual_start: virtual_positions
-                    .normalize_text_pos(item.virtual_start)
-                    .ok()?,
-                virtual_end: virtual_positions
-                    .normalize_text_pos(item.virtual_start + item.virtual_length)
-                    .ok()?,
-                original_start: original_positions
-                    .normalize_text_pos(item.original_start)
-                    .ok()?,
-                original_end: original_positions
-                    .normalize_text_pos(item.original_start + item.original_length)
-                    .ok()?,
-                label: item.label.clone(),
-            })
-        })
-        .collect()
 }
 
 // Go: contentmapper/hostimpl.go:1293 normalizeMappings
@@ -3216,58 +3048,6 @@ mod tests {
     // (`MapperHandler`), and the thread makes its own connection around it.
     use super::*;
     use crate::gostd::context::background;
-
-    // PORT: ts-rust extension. Mapper diagnostics carry `relatedInformation`.
-    #[test]
-    fn diagnostic_related_information_round_trips() {
-        let input = br#"{"messageText":"m","start":1,"length":2,"code":4001,"category":1,"relatedInformation":[{"messageText":"r","start":5,"length":3}]}"#;
-        let mut diagnostic = Diagnostic::default();
-        crate::frontend::json::json_unmarshal(input, &mut diagnostic, &[]).unwrap();
-        assert_eq!(
-            diagnostic.related_information,
-            vec![RelatedInformation {
-                message_text: "r".to_string(),
-                start: 5,
-                length: 3
-            }]
-        );
-        let mut out = String::new();
-        diagnostic.marshal_json_to(&mut out).unwrap();
-        assert!(
-            out.contains(r#""relatedInformation":[{"messageText":"r","start":5,"length":3}]"#),
-            "{out}"
-        );
-    }
-    #[test]
-    fn expansions_decode_and_attach_to_the_span_map() {
-        // `twice(value)` at 10..22 expanded to `[value, value]` at 10..24.
-        let input = br#"{"text":"const a = [value, value];","extension":".ts","mappings":[[0,10,0,10,0],[10,14,10,12,1]],"expansions":[{"virtualStart":10,"virtualLength":14,"originalStart":10,"originalLength":12,"label":"macro `twice`"}]}"#;
-        let mut output = MappedOutput::default();
-        crate::frontend::json::json_unmarshal(input, &mut output, &[]).unwrap();
-        assert_eq!(output.expansions.len(), 1);
-        let mut encoded = String::new();
-        output.marshal_json_to(&mut encoded).unwrap();
-        assert!(
-            encoded.contains(r#""expansions":[{"virtualStart":10"#),
-            "{encoded}"
-        );
-        let (result, _) = decode_mapped_output(
-            &output,
-            "const a = twice(value);",
-            &PositionEncoding::UTF8,
-            "m",
-        )
-        .unwrap();
-        let map = result.mappings.as_deref();
-        let inside = spanmap::SpanMap::expansions_containing_virtual(map, TextRange::new(11, 16));
-        assert_eq!(inside.len(), 1);
-        assert_eq!(inside[0].label, "macro `twice`");
-        assert_eq!((inside[0].original_start, inside[0].original_end), (10, 22));
-        assert!(
-            spanmap::SpanMap::expansions_containing_virtual(map, TextRange::new(0, 5)).is_empty()
-        );
-        assert_eq!(spanmap::SpanMap::expansions_at_original(map, 12).len(), 1);
-    }
     use crate::ipc::{Protocol as _, ReadWriteCloser as _};
     use std::io::Read;
     use std::net::Shutdown;
@@ -3410,8 +3190,7 @@ mod tests {
                             start: 0,
                             length: 3.min(length),
                             code: 9999,
-                            category: None,
-                            related_information: Vec::new(),
+                            ext: Default::default(),
                         }],
                         ..Default::default()
                     })))
@@ -3551,8 +3330,7 @@ mod tests {
                             start: emoji_length,
                             length: text_length - emoji_length,
                             code: 1001,
-                            category: None,
-                            related_information: Vec::new(),
+                            ext: Default::default(),
                         }],
                         ..Default::default()
                     })))
@@ -5387,19 +5165,5 @@ mod tests {
         assert_eq!(spawner.closes.load(Ordering::SeqCst), 1);
         release();
         let _ = r.close();
-    }
-}
-
-#[cfg(test)]
-mod mapper_category_tests {
-    use super::*;
-
-    #[test]
-    fn mapper_diagnostic_category_defaults_to_error() {
-        use crate::diagnostics::Category;
-        assert_eq!(mapper_diagnostic_category(None), Category::Error);
-        assert_eq!(mapper_diagnostic_category(Some(1)), Category::Error);
-        assert_eq!(mapper_diagnostic_category(Some(0)), Category::Warning);
-        assert_eq!(mapper_diagnostic_category(Some(9)), Category::Error);
     }
 }
