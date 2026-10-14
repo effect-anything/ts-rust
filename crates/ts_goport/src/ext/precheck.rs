@@ -145,6 +145,15 @@ fn from_tuples(tuples: &[crate::ext::align::Tuple]) -> Vec<crate::spanmap::Segme
         .collect()
 }
 
+/// The emitter's hook: [`rewrite_emitted_javascript`], then the results.
+#[must_use]
+pub fn rewritten(
+    results: Vec<crate::emitter::program_emit::EmitResult>,
+) -> Vec<crate::emitter::program_emit::EmitResult> {
+    rewrite_emitted_javascript(&results);
+    results
+}
+
 /// Rewrites JavaScript the emit workers already wrote, then composes each
 /// matching `.js.map` through that rewrite. A declaration map is not
 /// JavaScript and is left alone. A missing file was captured in memory by
@@ -189,6 +198,27 @@ pub fn rewrite_emitted_javascript(results: &[crate::emitter::program_emit::EmitR
             }
         }
     }
+}
+
+/// The API emit's outputs, `(file name, text)` in the emitter's order, with
+/// the emit rewrite applied: each JavaScript file is rewritten and its
+/// `.map` composed through that rewrite (against the text the emitter
+/// wrote). The order is kept.
+#[must_use]
+pub fn rewrite_writes(writes: Vec<(String, String)>) -> Vec<(String, String)> {
+    let javascript: std::collections::HashMap<String, String> = writes
+        .iter()
+        .filter(|(name, _)| !name.ends_with(".map"))
+        .map(|(name, text)| (name.clone(), text.clone()))
+        .collect();
+    writes
+        .into_iter()
+        .map(|(name, text)| {
+            let original = name.strip_suffix(".map").and_then(|js| javascript.get(js));
+            let text = emit_output_file(&name, &text, original.map(String::as_str));
+            (name, text)
+        })
+        .collect()
 }
 
 /// Rewrites one captured emit output. A `.map` file is composed through the

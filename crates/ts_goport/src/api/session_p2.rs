@@ -937,31 +937,17 @@ impl Session {
         // apart until the write failures are in.
         let mut results = program_emit::emit_file_results(options);
         let writes = std::mem::take(&mut *writes.lock().unwrap_or_else(PoisonError::into_inner));
+        let writes = crate::ext::precheck::rewrite_writes(writes); // PORT: ext emit rewrite
         let mut output_files: Option<FxHashMap<String, String>> = None;
         if keep_outputs {
             let outputs = output_files.get_or_insert_with(FxHashMap::default);
             for (file_name, text) in writes {
                 outputs.insert(file_name, text);
             }
-            rewrite_captured_outputs(outputs);
         } else {
             let fs = self.snapshot_host.fs();
             let mut failures = Vec::new();
-            // JavaScript first, then its `.map`, so the map composes
-            // against the text the emitter wrote.
-            let mut ordered = writes;
-            ordered.sort_by_key(|(file_name, _)| file_name.ends_with(".map"));
-            let mut javascript: FxHashMap<String, String> = FxHashMap::default();
-            for (file_name, text) in ordered {
-                let original = file_name
-                    .strip_suffix(".map")
-                    .and_then(|name| javascript.get(name))
-                    .cloned();
-                if !file_name.ends_with(".map") {
-                    javascript.insert(file_name.clone(), text.clone());
-                }
-                let text =
-                    crate::ext::precheck::emit_output_file(&file_name, &text, original.as_deref());
+            for (file_name, text) in writes {
                 if let Err(err) = fs.write_file(&file_name, &text) {
                     let output_file = file_name.strip_suffix(".map").unwrap_or(&file_name);
                     let diagnostic = new_compiler_diagnostic(
@@ -1035,41 +1021,6 @@ impl Session {
                 write_file: None,
             },
         )
-    }
-}
-
-/// Applies the emit rewrite to captured outputs, composing each JavaScript
-/// source map through the rewrite of the file it belongs to.
-fn rewrite_captured_outputs(outputs: &mut FxHashMap<String, String>) {
-    let names = outputs.keys().cloned().collect::<Vec<_>>();
-    let mut originals = Vec::new();
-    for name in &names {
-        if name.ends_with(".map") {
-            continue;
-        }
-        let text = outputs.get(name).cloned().unwrap_or_default();
-        originals.push((name.clone(), text.clone()));
-        outputs.insert(
-            name.clone(),
-            crate::ext::precheck::emit_javascript(name, &text),
-        );
-    }
-    for name in &names {
-        let Some(javascript_name) = name.strip_suffix(".map") else {
-            continue;
-        };
-        let Some(original) = originals
-            .iter()
-            .find(|(file, _)| file == javascript_name)
-            .map(|(_, text)| text.clone())
-        else {
-            continue;
-        };
-        let map = outputs.get(name).cloned().unwrap_or_default();
-        outputs.insert(
-            name.clone(),
-            crate::ext::precheck::emit_output_file(name, &map, Some(&original)),
-        );
     }
 }
 
