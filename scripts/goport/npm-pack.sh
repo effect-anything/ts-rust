@@ -25,7 +25,7 @@
 #          darwin-arm64=<path>). It does not run here, so only <tsc> is checked. <tsc> reports the
 #          TypeScript version (not stamped with <v>). Each platform, the host's included, needs an
 #          --ext <os>-<arch>=<dir>: a dir with that platform's tsc-ext (tsc-ext.exe on Windows) and
-#          tsc-ext.node (cargo build -p ts_ext_syntax --bin tsc-ext, and the crate's cdylib renamed).
+#          tsc-ext.node (cargo build --profile ext -p ts_ext_syntax --bin tsc-ext --lib, and the crate's cdylib renamed).
 # The pin is GOPORT_PIN, else the current pin (scripts/upstream/pin.py path goCheckout).
 # NPM_PACK_GO_DIR=<dir> names the pin's Go checkout dir when it is not at the pin.py path (CI, the
 # release workflow). It needs the npm install of the repo root (node_modules/.bin/tsc). Both pin
