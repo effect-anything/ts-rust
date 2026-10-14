@@ -9,6 +9,14 @@
       "types": "./js/index.d.ts",
       "default": "./js/index.cjs"
     },
+    "./unplugin": {
+      "types": "./js/unplugin.d.mts",
+      "default": "./js/unplugin.mjs"
+    },
+    "./unplugin/*": {
+      "types": "./js/unplugin/*.d.mts",
+      "default": "./js/unplugin/*.mjs"
+    },
     "./package.json": "./package.json"
   },
   "bin": {
@@ -31,5 +39,8 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "3.7.1"
+  },
+  "dependencies": {
+    "unplugin": "^3.3.0"
   }
 }

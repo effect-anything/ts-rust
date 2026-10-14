@@ -105,3 +105,27 @@ npx napi build --platform --no-js --dts native.d.ts --output-dir . --release
 
 It writes `tsc-ext.<platform>-<arch>.node` (not tracked). `js/native.cjs` loads it, or in the
 published package `lib/tsc-ext.node` of the platform package. `TSC_EXT_NODE=<path>` overrides.
+
+## Bundler plugin (`@effect-x/tsc/unplugin`)
+
+```js
+import tsc from "@effect-x/tsc/unplugin/vite"; // also /rollup, /rolldown, /webpack, /rspack
+export default { plugins: [tsc(/* { tsconfig, sweetener, typegpu } */), react()] };
+```
+
+The plugin opens a `Project` on the tsconfig and `load`s every file it owns
+(tsconfig `include`/`files`, minus node_modules and declarations), so the
+bundler's own TS strip sees the rewritten TS/TSX with an exact map back to the
+`.sts`/`.ts` source. `.sts`/`.stsx` keep their path; an extensionless relative
+import finds them. Macro modules are watched; a change invalidates the files
+that use them (HMR in Vite).
+
+- Vite 8 / Rolldown / Rollup: complete. Under Vite the plugin strips `.sts`/`.stsx`
+  with Vite's oxc options (vite:oxc picks the language by extension only).
+- webpack / rspack: the loaded code is TypeScript. Add a TS loader rule for
+  `/\.stsx?$/` (ts-loader, `builtin:swc-loader`).
+- esbuild / bun: unsupported for `.sts`/`.stsx` until type erasure; `.ts` files work.
+- The tsover runtime is not injected: `typegpu` imports `tsover-runtime`; an app
+  using tsover without typegpu imports it once at its entry.
+
+Manual mode: `Transformer` from `@effect-x/tsc/ext` (above).

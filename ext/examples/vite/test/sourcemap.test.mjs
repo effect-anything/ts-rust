@@ -46,9 +46,10 @@ test("bundle .js.map maps macro output back to .sts tokens", async () => {
   const code = readFileSync(join(assets, js), "utf8");
   const map = JSON.parse(readFileSync(join(assets, `${js}.map`), "utf8"));
   const points = decode(map.mappings);
-  const original = (needle) => {
-    const at = code.indexOf(needle);
-    assert.ok(at >= 0, `bundle lacks ${needle}`);
+  const original = (needle, delta = 0) => {
+    const found = code.indexOf(needle);
+    assert.ok(found >= 0, `bundle lacks ${needle}`);
+    const at = found + delta;
     const before = code.slice(0, at).split("\n");
     const line = before.length - 1;
     const column = before[line].length;
@@ -60,13 +61,19 @@ test("bundle .js.map maps macro output back to .sts tokens", async () => {
   };
   // `petal.millimeters |> formatMillimeters` expands to a call; each piece
   // keeps its own author position.
-  const call = "formatMillimeters(petal.millimeters)";
+  // Rolldown inlines `const petal = new Length(petalMm)` into the call.
+  const call = "formatMillimeters(new Length(petalMm).millimeters)";
   const fn = original(call);
   assert.match(fn.name, /flower\.sts$/);
   assert.ok(fn.text.startsWith("formatMillimeters;"), fn.text);
-  const arg = original("petal.millimeters)");
-  assert.ok(arg.text.startsWith("petal.millimeters |>"), arg.text);
+  const arg = original(call, call.indexOf("millimeters"));
+  assert.ok(arg.text.startsWith("millimeters |>"), arg.text);
   // `unless (speed > 0)` keeps the condition's author column.
   const cond = original("speed > 0");
   assert.ok(cond.text.startsWith("speed > 0) {"), cond.text);
+  // A tsover operator call maps to its operator expression in flower.sts.
+  const op = code.match(/__tsover_\w+\(/);
+  assert.ok(op, "bundle has no tsover call");
+  const gpu = original(op[0]);
+  assert.match(gpu.name, /flower\.sts$/);
 });

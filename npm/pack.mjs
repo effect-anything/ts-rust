@@ -250,7 +250,10 @@ else {
     );
     fs.chmodSync(path.join(mainDir, "bin", "tsc-ext"), 0o755);
     const extJs = path.join(repoRoot, "crates", "ts_ext_syntax", "js");
-    fs.cpSync(extJs, path.join(mainDir, "lib", "ext"), { recursive: true });
+    fs.cpSync(extJs, path.join(mainDir, "lib", "ext"), {
+        recursive: true,
+        filter: source => path.basename(source) !== "test",
+    });
     // tsc starts the platform package's native lib/tsc-ext directly (platformExec, resolved from
     // this package; a PORT addition to the manifest). exec, the Node launcher, is the fallback
     // when that package is not installed, and for hosts that do not read platformExec.
@@ -264,7 +267,11 @@ else {
     mainPackage.exports = {
         ...mainPackage.exports,
         "./ext": { types: "./lib/ext/index.d.ts", default: "./lib/ext/index.cjs" },
+        // The bundler plugin: "@effect-x/tsc/unplugin" and "@effect-x/tsc/unplugin/<bundler>".
+        "./unplugin": { types: "./lib/ext/unplugin.d.mts", default: "./lib/ext/unplugin.mjs" },
+        "./unplugin/*": { types: "./lib/ext/unplugin/*.d.mts", default: "./lib/ext/unplugin/*.mjs" },
     };
+    mainPackage.dependencies = { ...mainPackage.dependencies, unplugin: "^3.3.0" };
 }
 if (args["native-bin"]) {
     // PORT: not in Go. The native bin on POSIX (npm/install.js).
