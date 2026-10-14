@@ -1,4 +1,4 @@
-# tsc (aka ts-rust)
+# ts-rust (aka tsc-rs)
 
 I wanted to see if LLMs could port the TypeScript compiler, checker and lsp to Rust. Turns out they can.
 
@@ -43,8 +43,8 @@ Also worth mentioning: I've never read a line of this code.
 Be warned, I have no idea if this will actually work.
 
 ```sh
-npm install -D @effect-x/tsc
-npx tsc -p tsconfig.json
+npm install -D tsc-rs
+npx tsc-rs -p tsconfig.json
 ```
 
 ## How did this go?
@@ -65,7 +65,7 @@ Everything below this was written by my LLMs, not me.
 
 ## What actually is this?
 
-`@effect-x/tsc` is a direct port of Microsoft's native TypeScript compiler, which is written in Go
+ts-rust is a direct port of Microsoft's native TypeScript compiler, which is written in Go
 ([microsoft/TypeScript](https://github.com/microsoft/TypeScript), formerly
 [typescript-go](https://github.com/microsoft/typescript-go)). It keeps Go's algorithms and
 behavior and has the same command line (`tsc`), language server and API.
@@ -73,22 +73,22 @@ behavior and has the same command line (`tsc`), language server and API.
 ## Install
 
 ```sh
-npm install -D @effect-x/tsc
-npx tsc -p tsconfig.json
+npm install -D tsc-rs
+npx tsc-rs -p tsconfig.json
 ```
 
-`@effect-x/tsc` takes the same options as `tsc`. The npm package is `@effect-x/tsc` so that it does not clash
-with the `typescript` package. Each [release](https://github.com/effect-anything/tsc/releases) also
+`tsc-rs` takes the same options as `tsc`. The npm package is `tsc-rs` so that it does not clash
+with the `typescript` package. Each [release](https://github.com/pingdotgg/ts-rust/releases) also
 has a standalone archive per platform: the `tsc` binary with the lib files next to it.
 
 Platforms: Linux x64 and arm64 (static, any distribution), macOS arm64, and (from the first
 release after 0.2.0) macOS x64, Windows x64 and Windows arm64.
 
-To use it in VS Code, see the [npm package README](npm/tsc-readme.md#vs-code).
+To use it in VS Code, see the [npm package README](npm/tsc-rs-readme.md#vs-code).
 
 ## Effect diagnostics
 
-`@effect-x/tsc` has the [Effect](https://effect.website) language service diagnostics built in (codes
+`tsc-rs` has the [Effect](https://effect.website) language service diagnostics built in (codes
 377xxx), so an Effect project needs no second compiler. They come from the same check as the
 TypeScript diagnostics, and the language server shows them too. They run only when the tsconfig has
 the plugin, as with `@effect/language-service`:
@@ -299,31 +299,31 @@ comparison keeps all compilers on one runner and saves their full output and exi
 
 The lead of `bun check` is all in the check step. Its checkers share one type store on all cores.
 `tsc` 7 runs 4 checkers, and each one makes its own copies of the types it needs: on T3 Code
-`apps/server`, 57% of the types. `@effect-x/tsc` keeps the `tsc` 7 model, because its goal is output that
-is identical to `tsc` 7. More checkers or one shared store would change that output, so `@effect-x/tsc`
+`apps/server`, 57% of the types. `tsc-rs` keeps the `tsc` 7 model, because its goal is output that
+is identical to `tsc` 7. More checkers or one shared store would change that output, so `tsc-rs`
 does not copy them. `--checkers 8` uses more cores with output identical to `tsc` 7 at
 `--checkers 8` (see [Status](#status)).
 
-Per thread, `@effect-x/tsc` is not slower. On T3 Code it was 1.5× to 7× faster per thread than
+Per thread, `tsc-rs` is not slower. On T3 Code it was 1.5× to 7× faster per thread than
 `bun check`, and on 28 other open-source repos the two did about the same check work per thread.
-`@effect-x/tsc` also loads and parses files as fast as `bun check` or faster.
+`tsc-rs` also loads and parses files as fast as `bun check` or faster.
 
 The output is not the same. `bun check` gave output identical to `tsc` 7 on 37 of 60 open-source
-repos, and `@effect-x/tsc` on all 60. `bun check` also reports errors that `tsc` 7 does not, for example
+repos, and `tsc-rs` on all 60. `bun check` also reports errors that `tsc` 7 does not, for example
 TS2749 on T3 Code `apps/server`. These numbers are from our studies of 2026-10-07 and 2026-10-08,
-with `@effect-x/tsc` 0.1.0 and R179 on Linux.
+with `tsc-rs` 0.1.0 and R179 on Linux.
 
 ## Known problems
 
 - In some monorepos, the source files of a workspace package are reachable both through
-  `node_modules` and through a direct import. There, `@effect-x/tsc` can write output for more of those
+  `node_modules` and through a direct import. There, `tsc-rs` can write output for more of those
   files than `tsc` does, and report TS6059 (file is not under `rootDir`) for them. `tsc` decides
-  this by timing, so its own result changes between runs. `@effect-x/tsc` gives the same result in every
+  this by timing, so its own result changes between runs. `tsc-rs` gives the same result in every
   run (the result of TypeScript 6).
 - In `tsc -b`, when one project imports the output of another project without a project reference,
   the two projects can build at the same time. Then `tsc` reads each output file before or after the
   other project writes it. This is timing, so the result of `tsc` changes between runs, file by
-  file. `@effect-x/tsc` makes the programs one at a time and writes the outputs of a project together when
+  file. `tsc-rs` makes the programs one at a time and writes the outputs of a project together when
   that project ends. So it can read old or missing output where `tsc` reads new output, or the
   reverse. Often the only difference is the file hashes in the reading project's `.tsbuildinfo`.
   Sometimes it is an error, such as TS2305, TS2307 or TS2322. Add the reference to fix it.
@@ -332,7 +332,7 @@ with `@effect-x/tsc` 0.1.0 and R179 on Linux.
   about edit 20 it stays below `tsc`'s. After 10,000 edits (two sessions each) it was 232 and 249
   MiB against `tsc`'s 291 and 305 MiB on Query core, and 314 and 324 MiB against 417 and 422 MiB on
   Hono.
-- `@effect-x/tsc --version` prints the TypeScript version that it ports (7.1.0-dev), not the npm
+- `tsc-rs --version` prints the TypeScript version that it ports (7.1.0-dev), not the npm
   version. The compiler matches `typesVersions` against it.
 
 ## Development
@@ -389,7 +389,7 @@ Push a tag `v<version>` (for example `v0.1.0`). The
 [release workflow](.github/workflows/release.yml) builds, packs and tests the packages, publishes
 them to npm and creates a GitHub release. A stable version goes to the dist-tag `latest`, and a
 prerelease version (`v0.2.0-beta.1`) to `next` and a GitHub prerelease. See
-[npm/README.md](npm/README.md#effect-xtsc-releases).
+[npm/README.md](npm/README.md#tsc-rs-releases).
 
 ## License
 

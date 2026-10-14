@@ -9,7 +9,7 @@ The port tracks the Go code of [`microsoft/TypeScript`](https://github.com/micro
 - Oracle: `tsc/cmd/tsc` built with Go 1.27.1 (`~/.local/bin/tsgo-oracle-fed0bf24149f`)
 - Since tsc-rs 0.4.0. tsc-rs 0.3.0 and earlier releases used the pin `673a5f17d713` below.
 
-`@effect-x/tsc` output is meant to be byte-equal to `tsc` at this commit. When you compare, use the
+`tsc-rs` output is meant to be byte-equal to `tsc` at this commit. When you compare, use the
 pinned build, not `typescript@7.0.x` or `@typescript/native-preview` (its last build is from
 July). A difference that the pinned build also shows is upstream behavior: it changes when the
 port moves to a newer pin after upstream fixes it.

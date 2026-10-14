@@ -1,6 +1,6 @@
 # Native Effect diagnostics
 
-`@effect-x/tsc` reports the diagnostics of the Effect language service
+tsc-rs reports the diagnostics of the Effect language service
 (`@effect/language-service`, codes TS377000 to TS377999) in the same
 program and checker pass as the ordinary TypeScript diagnostics. No Go
 binary, patch or second pass is needed.
@@ -37,12 +37,12 @@ The code is `crates/ts_goport/src/effect`, a port of
 - Effect options are stored in `.tsbuildinfo`, so a change to them
   invalidates the cached diagnostics. With the plugin on, `.tsbuildinfo`
   records the version `<version>+effect-tsgo.0.51.1`, as effect-tsgo does.
-  Plain tsgo and `@effect-x/tsc` without the plugin then check the project again
+  Plain tsgo and tsc-rs without the plugin then check the project again
   instead of reading Effect diagnostics (plain tsgo panics on those:
-  "Unknown diagnostic message"). `@effect-x/tsc` from Theo PR #4, before this
+  "Unknown diagnostic message"). tsc-rs from Theo PR #4, before this
   suffix, wrote the plain version with Effect options and diagnostics.
-  `@effect-x/tsc` checks that build info again too, as effect-tsgo does. Plain tsgo
-  still panics on it until one `@effect-x/tsc` run writes it again. The language
+  tsc-rs checks that build info again too, as effect-tsgo does. Plain tsgo
+  still panics on it until one tsc-rs run writes it again. The language
   server shows the same diagnostics. `tsc -v`, `tsc --help` and the
   language server's `serverInfo` print the plain version; effect-tsgo
   prints `<version>+effect-tsgo.0.51.1` there.
@@ -112,7 +112,7 @@ All take the reference Effect-patched `tsc` as `--ref`:
   each with expected codes and exit status.
 - `scripts/effect/incremental-check.mjs`: `--incremental` and `--watch`
   after source, imported type, config and directive edits. With `--plain`
-  (the tsgo oracle), plain tsgo and `@effect-x/tsc` also take turns on one
+  (the tsgo oracle), plain tsgo and tsc-rs also take turns on one
   `.tsbuildinfo`.
 - `scripts/effect/t3-parity.mjs` and `scripts/effect/bench-t3.mjs`: T3 Code
   parity and timing.
@@ -148,7 +148,7 @@ The language server (`--lsp`) has these editor features of effect-tsgo
   `typeToEffectSchemaClass`, `makeSchemaOpaque`, `makeSchemaOpaqueWithNs`,
   `structuralTypeToSchema`. When more than one Schema in scope matches a
   type, `structuralTypeToSchema` in effect-tsgo picks one in Go map order
-  (it can change from run to run). `@effect-x/tsc` picks the first in scope order.
+  (it can change from run to run). tsc-rs picks the first in scope order.
 
 tsc mode never runs them.
 
