@@ -136,9 +136,24 @@ fn seed_runs(old: &Side<'_>, new: &Side<'_>, pair: &mut [Option<usize>], used: &
     }
     // (length, old start, new start, seed old, seed new)
     let mut runs: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
-    for &(oc, i, nc, j) in counts.values() {
-        if oc != 1 || nc != 1 {
-            continue;
+    let mut seeds: Vec<(usize, usize)> = counts
+        .values()
+        .filter(|&&(oc, _, nc, _)| oc == 1 && nc == 1)
+        .map(|&(_, i, _, j)| (i, j))
+        .collect();
+    seeds.sort_unstable();
+    // Seeds on one diagonal inside one run share it: a file the mapper
+    // barely touches is one run holding every word, and growing it again
+    // for each seed is quadratic (4k lines took 40 s).
+    let mut grown: HashMap<isize, (usize, usize, usize)> = HashMap::new();
+    for (i, j) in seeds {
+        #[allow(clippy::cast_possible_wrap)]
+        let diagonal = i as isize - j as isize;
+        if let Some(&(i0, j0, len)) = grown.get(&diagonal) {
+            if i < i0 + len {
+                runs.push((len, i0, j0, i, j));
+                continue;
+            }
         }
         let (mut i0, mut j0) = (i, j);
         while i0 > 0 && j0 > 0 && old.tok(i0 - 1) == new.tok(j0 - 1) {
@@ -152,6 +167,7 @@ fn seed_runs(old: &Side<'_>, new: &Side<'_>, pair: &mut [Option<usize>], used: &
         {
             len += 1;
         }
+        grown.insert(diagonal, (i0, j0, len));
         runs.push((len, i0, j0, i, j));
     }
     runs.sort_unstable_by(|a, b| b.cmp(a));
@@ -550,5 +566,17 @@ mod tests {
             vec![(0, 8, 0, 8, 0), (8, 12, 8, 14, 1), (12, 13, 14, 15, 0)]
         );
         let _ = source;
+    }
+
+    /// A large file the mapper barely changes is one long run of unique
+    /// words. Seeds share that run instead of each growing it again, so this
+    /// stays linear (it was quadratic: a 4k-line TypeGPU file took 40 s).
+    #[test]
+    fn a_long_unchanged_run_is_grown_once() {
+        let old: String = (0..40_000).map(|k| format!("let v{k} = {k};\n")).collect();
+        let new = format!("{old}export {{}};\n");
+        let started = std::time::Instant::now();
+        assert_eq!(mapped(&old, &new, "v39999 ="), Some("v39999 ="));
+        assert!(started.elapsed().as_secs() < 10, "align is quadratic again");
     }
 }
