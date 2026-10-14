@@ -1,6 +1,6 @@
 //! Structural comparison of Sweetener's expanded TypeScript.
 //!
-//! This is not TypeGPU's comparator. A Sweetener case is `input.sts`
+//! This is not `TypeGPU`'s comparator. A Sweetener case is `input.sts`
 //! against `theirs.ts`, and both sides are ordinary TypeScript after
 //! expansion. Formatting is not a difference: line breaks, indentation, a
 //! trailing comma, and a redundant pair of parentheses. Stripping every
@@ -11,6 +11,7 @@
 //! The parser is `ts_goport`. The expander's printer is not used here,
 //! because the printer is what the two sides are being compared about.
 
+use std::fmt::Write as _;
 use ts_goport::astdata::SyntaxKind;
 use ts_goport::core::Node;
 use ts_goport::flags::ScriptKind;
@@ -52,10 +53,11 @@ pub fn unified(theirs: &str, ours: &str) -> String {
     let right = lines_of(ours);
     let mut out = String::from("--- theirs.ts\n+++ ours.ts\n");
     for hunk in hunks(&left, &right) {
-        out.push_str(&format!(
-            "@@ -{},{} +{},{} @@\n",
+        let _ = writeln!(
+            out,
+            "@@ -{},{} +{},{} @@",
             hunk.left_start, hunk.left_len, hunk.right_start, hunk.right_len
-        ));
+        );
         for line in &hunk.lines {
             out.push_str(line);
             out.push('\n');
@@ -181,40 +183,6 @@ fn edits(left: &[&str], right: &[&str]) -> Vec<Edit> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{same, unified};
-
-    #[test]
-    fn parentheses_are_shape_and_a_block_is_not_an_object() {
-        assert!(same(
-            "const f = () => (a && b) && c\n",
-            "const f = () => a && (b && c)\n",
-            false
-        ));
-        assert!(same(
-            "const f = () => (a + b)\n",
-            "const f = () => a + b\n",
-            false
-        ));
-        assert!(!same(
-            "const f = () => ({ tag: \"None\" })\n",
-            "const f = () => { tag: \"None\" }\n",
-            false
-        ));
-    }
-
-    #[test]
-    fn the_diff_names_the_files_and_not_a_temp_directory() {
-        let text = unified("a\nb\n", "a\nc\n");
-        assert!(text.starts_with("--- theirs.ts\n+++ ours.ts\n"), "{text}");
-        assert!(!text.contains("/var/"), "{text}");
-        assert!(!text.contains("2026-"), "{text}");
-        assert!(text.contains("-b\n"), "{text}");
-        assert!(text.contains("+c\n"), "{text}");
-    }
-}
-
 fn write_node(node: Node, depth: usize, out: &mut String) {
     if node.is_nil() {
         return;
@@ -225,16 +193,16 @@ fn write_node(node: Node, depth: usize, out: &mut String) {
     // are the same expansion. An object literal and a block are not.
     if let Some(op) = logic_op(node) {
         out.push_str(&"  ".repeat(depth));
-        out.push_str(&format!("Chain {op}\n"));
+        let _ = writeln!(out, "Chain {op}");
         let mut operands = Vec::new();
-        flatten_logic(node, &op, &mut operands);
+        flatten_logic(node, op, &mut operands);
         for operand in operands {
             write_node(operand, depth + 1, out);
         }
         return;
     }
     out.push_str(&"  ".repeat(depth));
-    out.push_str(&format!("{kind:?}"));
+    let _ = write!(out, "{kind:?}");
     if node.children().nodes().is_empty() {
         let text = node.text();
         if !text.is_empty() {
@@ -298,4 +266,38 @@ fn flatten_logic(node: Node, op: &str, operands: &mut Vec<Node>) {
         return;
     }
     operands.push(node);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{same, unified};
+
+    #[test]
+    fn parentheses_are_shape_and_a_block_is_not_an_object() {
+        assert!(same(
+            "const f = () => (a && b) && c\n",
+            "const f = () => a && (b && c)\n",
+            false
+        ));
+        assert!(same(
+            "const f = () => (a + b)\n",
+            "const f = () => a + b\n",
+            false
+        ));
+        assert!(!same(
+            "const f = () => ({ tag: \"None\" })\n",
+            "const f = () => { tag: \"None\" }\n",
+            false
+        ));
+    }
+
+    #[test]
+    fn the_diff_names_the_files_and_not_a_temp_directory() {
+        let text = unified("a\nb\n", "a\nc\n");
+        assert!(text.starts_with("--- theirs.ts\n+++ ours.ts\n"), "{text}");
+        assert!(!text.contains("/var/"), "{text}");
+        assert!(!text.contains("2026-"), "{text}");
+        assert!(text.contains("-b\n"), "{text}");
+        assert!(text.contains("+c\n"), "{text}");
+    }
 }

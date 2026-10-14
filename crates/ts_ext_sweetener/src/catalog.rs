@@ -7,6 +7,7 @@
 //! that each `bad` example really reports its code, and that the generated
 //! page is current (`TSC_EXT_UPDATE=1` rewrites it).
 
+use std::fmt::Write as _;
 /// How a code is reported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
@@ -68,28 +69,30 @@ pub fn markdown() -> String {
          from binding contracts, 4xxx from expanding a use, and 5xxx from `for syntax` imports.\n\n",
     );
     for entry in CATALOG {
-        out.push_str(&format!(
-            "- [{}](#{}) {}\n",
+        let _ = writeln!(
+            out,
+            "- [{}](#{}) {}",
             entry.code,
             entry.code.to_ascii_lowercase(),
             entry.title
-        ));
+        );
     }
     for entry in CATALOG {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\n## {}\n\n**{}** ({})\n\n{}\n",
             entry.code,
             entry.title,
             entry.level.as_str(),
             entry.explanation
-        ));
+        );
         if !entry.bad.is_empty() {
             for (name, text) in entry.files {
-                out.push_str(&format!("\n`{name}`:\n\n```ts\n{text}```\n"));
+                let _ = write!(out, "\n`{name}`:\n\n```ts\n{text}```\n");
             }
-            out.push_str(&format!("\nTriggers it:\n\n```ts\n{}```\n", entry.bad));
+            let _ = write!(out, "\nTriggers it:\n\n```ts\n{}```\n", entry.bad);
         }
-        out.push_str(&format!("\nFix:\n\n{}\n", entry.fix));
+        let _ = write!(out, "\nFix:\n\n{}\n", entry.fix);
     }
     out
 }

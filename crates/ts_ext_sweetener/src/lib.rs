@@ -185,7 +185,7 @@ pub struct ExpandRequest<'a> {
     pub phase: Phase,
 }
 
-/// True when `filename` is a Sweetener source. TypeGPU is not matched here.
+/// True when `filename` is a Sweetener source. `TypeGPU` is not matched here.
 #[must_use]
 pub fn sweetener_matches(filename: &str) -> bool {
     sweetener::matches(filename)
