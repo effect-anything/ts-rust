@@ -151,7 +151,7 @@ pub struct SpanMap {
 
     // origOnce guards lazy construction of the interval index used for original-to-virtual lookups.
     original_index: OnceLock<OriginalIndex>,
-    pub(crate) expansions: crate::ext::spanmap_ext::Expansions, // PORT: ext
+    pub(crate) mapper_info: crate::ext::spanmap_ext::MapperInfo, // PORT: ext
 }
 
 // Go: spanmap/spanmap.go:140 MappingErrorKind
@@ -832,7 +832,7 @@ pub fn new(segments: &[Segment]) -> SpanMap {
     SpanMap {
         segments: sorted,
         original_index: OnceLock::new(),
-        expansions: Default::default(), // PORT: ext
+        mapper_info: Default::default(), // PORT: ext
     }
 }
 

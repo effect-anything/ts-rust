@@ -4048,7 +4048,7 @@ export const a: T | Dep | number = x + (h as never);
                 extension: extension.to_string(),
                 mappings: JsonValue(mappings),
                 diagnostic_directives: None,
-                expansions: Vec::new(),
+                ext: Default::default(),
             }
         }
 
@@ -4077,7 +4077,7 @@ export const a: T | Dep | number = x + (h as never);
                         extension: ".ts".to_string(),
                         mappings: JsonValue(b"[]".to_vec()),
                         diagnostic_directives: None,
-                        expansions: Vec::new(),
+                        ext: Default::default(),
                     },
                 });
             }

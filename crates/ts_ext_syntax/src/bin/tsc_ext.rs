@@ -176,8 +176,48 @@ fn encode_transform(response: &TransformResponse) -> String {
             .collect();
         format!(r#""expansions":[{}],"#, items.join(","))
     };
+    let dependencies = if response.dependencies.is_empty() {
+        String::new()
+    } else {
+        let items: Vec<String> = response.dependencies.iter().map(|d| json_encode(d)).collect();
+        format!(r#""dependencies":[{}],"#, items.join(","))
+    };
+    let syntax_imports = if response.syntax_imports.is_empty() {
+        String::new()
+    } else {
+        let items: Vec<String> = response
+            .syntax_imports
+            .iter()
+            .map(|item| {
+                let bindings: Vec<String> = item
+                    .bindings
+                    .iter()
+                    .map(|b| {
+                        format!(
+                            r#"{{"imported":{},"local":{}}}"#,
+                            json_encode(&b.imported),
+                            json_encode(&b.local)
+                        )
+                    })
+                    .collect();
+                let resolved = item
+                    .resolved
+                    .as_ref()
+                    .map_or_else(String::new, |path| format!(r#""resolved":{},"#, json_encode(path)));
+                let shadows = if item.shadows_core { r#""shadowsCore":true,"# } else { "" };
+                format!(
+                    r#"{{"specifier":{},{resolved}"bindings":[{}],{shadows}"originalStart":{},"originalLength":{}}}"#,
+                    json_encode(&item.specifier),
+                    bindings.join(","),
+                    item.start,
+                    item.end.saturating_sub(item.start),
+                )
+            })
+            .collect();
+        format!(r#""syntaxImports":[{}],"#, items.join(","))
+    };
     format!(
-        r#"{{"text":{},"extension":{},{mappings}{diagnostics}{expansions}}}"#,
+        r#"{{"text":{},"extension":{},{mappings}{diagnostics}{expansions}{dependencies}{syntax_imports}}}"#,
         json_encode(&response.text),
         json_encode(response.extension),
     )

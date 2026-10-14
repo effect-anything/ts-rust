@@ -16,17 +16,104 @@ pub struct Expansion {
     pub label: String,
 }
 
-/// The expansions attached to a [`SpanMap`], sorted by virtual start.
-#[derive(Clone, Debug, Default)]
-pub struct Expansions(Vec<Expansion>);
+/// One name a `for syntax` import binds: `imported as local`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SyntaxBinding {
+    pub imported: String,
+    pub local: String,
+}
+
+/// One `import { ... } from "m" for syntax;` of the original file. The
+/// expansion consumes it, so the virtual AST does not show it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SyntaxImport {
+    /// The specifier as written, without quotes.
+    pub specifier: String,
+    /// The macro module it resolved to; `None` when it did not resolve.
+    pub resolved: Option<String>,
+    pub bindings: Vec<SyntaxBinding>,
+    pub shadows_core: bool,
+    /// The whole declaration in the original text.
+    pub original_start: i32,
+    pub original_end: i32,
+}
+
+/// What the content mapper reported beyond the segments: its expansions
+/// (sorted by virtual start), the files the transform read, and the file's
+/// `for syntax` imports.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MapperInfo {
+    pub expansions: Vec<Expansion>,
+    pub dependencies: Vec<String>,
+    pub syntax_imports: Vec<SyntaxImport>,
+}
+
+impl MapperInfo {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.expansions.is_empty() && self.dependencies.is_empty() && self.syntax_imports.is_empty()
+    }
+}
 
 impl SpanMap {
     /// This map with the mapper's expansions attached.
     #[must_use]
-    pub fn with_expansions(mut self, mut expansions: Vec<Expansion>) -> SpanMap {
-        expansions.sort_by_key(|item| (item.virtual_start, -item.virtual_end));
-        self.expansions = Expansions(expansions);
+    pub fn with_expansions(mut self, expansions: Vec<Expansion>) -> SpanMap {
+        self.mapper_info.expansions = expansions;
+        self.sort_expansions();
         self
+    }
+
+    /// This map with the mapper's whole report attached.
+    #[must_use]
+    pub fn with_mapper_info(mut self, info: MapperInfo) -> SpanMap {
+        self.mapper_info = info;
+        self.sort_expansions();
+        self
+    }
+
+    fn sort_expansions(&mut self) {
+        self.mapper_info
+            .expansions
+            .sort_by_key(|item| (item.virtual_start, -item.virtual_end));
+    }
+
+    /// A fresh map with the same segments and mapper report, for when the
+    /// decoded map is already shared and cannot be changed in place.
+    #[must_use]
+    pub fn copied(&self) -> SpanMap {
+        let mut map = crate::spanmap::new(&self.segments_slice_owned());
+        map.mapper_info = self.mapper_info.clone();
+        map
+    }
+
+    fn segments_slice_owned(&self) -> Vec<Segment> {
+        SpanMap::segments(Some(self))
+    }
+
+    /// The mapper's report; empty for a map without one (or no map).
+    #[must_use]
+    pub fn mapper_info(m: Option<&SpanMap>) -> &MapperInfo {
+        static EMPTY: std::sync::OnceLock<MapperInfo> = std::sync::OnceLock::new();
+        m.map_or_else(|| EMPTY.get_or_init(MapperInfo::default), |m| &m.mapper_info)
+    }
+
+    /// The files the transform read; empty when the mapper named none.
+    #[must_use]
+    pub fn dependencies(m: Option<&SpanMap>) -> &[String] {
+        &SpanMap::mapper_info(m).dependencies
+    }
+
+    /// Every expansion attached to the map, by virtual start.
+    #[must_use]
+    pub fn expansions(m: Option<&SpanMap>) -> &[Expansion] {
+        &SpanMap::mapper_info(m).expansions
+    }
+
+    /// The original file's `for syntax` imports.
+    #[must_use]
+    pub fn syntax_imports(m: Option<&SpanMap>) -> &[SyntaxImport] {
+        &SpanMap::mapper_info(m).syntax_imports
     }
 
     /// Every expansion whose virtual text contains the virtual range `r`,
@@ -37,8 +124,8 @@ impl SpanMap {
             return Vec::new();
         };
         let mut found: Vec<&Expansion> = m
+            .mapper_info
             .expansions
-            .0
             .iter()
             .filter(|item| item.virtual_start <= r.pos() && r.end() <= item.virtual_end)
             .filter(|item| item.virtual_start < item.virtual_end)
@@ -55,8 +142,8 @@ impl SpanMap {
             return Vec::new();
         };
         let mut found: Vec<&Expansion> = m
+            .mapper_info
             .expansions
-            .0
             .iter()
             .filter(|item| item.original_start <= pos && pos < item.original_end)
             .collect();

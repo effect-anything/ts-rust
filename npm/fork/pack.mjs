@@ -272,6 +272,8 @@ else {
     mainPackage.exports = {
         ...mainPackage.exports,
         "./ext": { types: "./lib/ext/index.d.ts", default: "./lib/ext/index.cjs" },
+        // Typed wrappers for the content-mapper API methods (tsc --api).
+        "./unstable/mapped": { types: "./lib/ext/api.d.mts", default: "./lib/ext/api.mjs" },
         // The bundler plugin: "@effect-x/tsc/unplugin" and "@effect-x/tsc/unplugin/<bundler>".
         "./unplugin": { types: "./lib/ext/unplugin.d.mts", default: "./lib/ext/unplugin.mjs" },
         "./unplugin/*": { types: "./lib/ext/unplugin/*.d.mts", default: "./lib/ext/unplugin/*.mjs" },
