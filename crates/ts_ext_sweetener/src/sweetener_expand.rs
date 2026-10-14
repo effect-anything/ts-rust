@@ -3501,6 +3501,13 @@ impl<'a> Printer<'a> {
         let owned = nested_macro_name(self.source, span);
         let nested = owned.as_deref() == Some("record");
         let name = if nested { "record" } else { name };
+        // Upstream names the token after the field's colon (`,` in
+        // `head:, tail`), where the type was expected.
+        let span = if nested {
+            token_after_colon(self.source, span).unwrap_or(span)
+        } else {
+            span
+        };
         let detail = if nested {
             "field type after colon".to_owned()
         } else {
@@ -3513,24 +3520,34 @@ impl<'a> Printer<'a> {
         } else if name == "each" {
             // The child list ends at `each`. The body line is the next line
             // of the source after the group's `}`.
+            // When the node is the `{each ...}` group itself, its end is
+            // already past that `}`.
             let from = node_end(&nodes[index]);
-            let at = self
-                .source
-                .get(from..)
-                .and_then(|rest| rest.find('}'))
-                .map(|rel| from + rel + 1)
-                .unwrap_or(from);
+            let at = if self.source[..from].ends_with('}') {
+                from
+            } else {
+                self.source
+                    .get(from..)
+                    .and_then(|rest| rest.find('}'))
+                    .map(|rel| from + rel + 1)
+                    .unwrap_or(from)
+            };
             each_line_after(self.source, at.saturating_sub(1)).unwrap_or(span)
         } else {
             span
         };
-        self.diagnostics.push(Diagnostic {
+        let diagnostic = Diagnostic {
             message: format!("SWR4001: No rule for macro {name} accepted this input: {detail}."),
             start: span.start,
             end: span.end,
             severity: Severity::Error,
             related,
-        });
+        };
+        // A macro whose arguments are reread (`#[1, , 3]`) fails the same way
+        // twice. Upstream reports it once.
+        if !self.diagnostics.contains(&diagnostic) {
+            self.diagnostics.push(diagnostic);
+        }
     }
 
     /// Upstream's held names (SWR4017, SWR4013, SWR4024). They are warnings
@@ -7851,6 +7868,23 @@ fn each_line_after(source: &str, at: usize) -> Option<Span> {
     // element, not the failure.
     let start = u32_at(end);
     Some(Span { start, end: start })
+}
+
+/// The first token after the last `:` before `span` on its line: in
+/// `record Cons(head:, tail)` the `,` where the field type was expected.
+fn token_after_colon(source: &str, span: Span) -> Option<Span> {
+    let before = source.get(..span.start as usize)?;
+    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+    let colon = line_start + before[line_start..].rfind(':')?;
+    let rest = &source[colon + 1..];
+    let skip = rest.len() - rest.trim_start().len();
+    let at = colon + 1 + skip;
+    let ch = source[at..].chars().next()?;
+    let start = u32_at(at);
+    Some(Span {
+        start,
+        end: start + u32_at(ch.len_utf8()),
+    })
 }
 
 /// `{each (...)}` wanted a braced body on the next line. Upstream
