@@ -33,6 +33,24 @@ pub fn hover_expression(node: Node) -> Option<Node> {
     in_overload_scope(expr).then_some(expr)
 }
 
+/// The checker's hook. `+` stays in the tree. A `Symbol.operatorPlus` (and
+/// the other five) on either operand supplies the type, and a compound
+/// assignment is checked against it. Emit turns it into `__tsover_*` later.
+pub fn check_binary(
+    checker: &mut Checker,
+    left: Node,
+    operator: SyntaxKind,
+    right: Node,
+    left_type: TypeId,
+    right_type: TypeId,
+) -> Option<TypeId> {
+    let overloaded = binary_type(checker, left, operator, right, left_type, right_type)?;
+    if crate::ast::is_compound_assignment(operator) {
+        checker.check_assignment_operator(left, operator, right, left_type, overloaded);
+    }
+    Some(overloaded)
+}
+
 /// The type of `left operator right`, when an overload symbol applies.
 pub fn binary_type(
     checker: &mut Checker,

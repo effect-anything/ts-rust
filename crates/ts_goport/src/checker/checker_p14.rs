@@ -397,16 +397,11 @@ impl Checker {
                 self.check_truthiness_of_type(left_type, left);
             }
         }
-        // `+` stays in the tree. A `Symbol.operatorPlus` (and the other
-        // five) on either operand supplies the type. Emit turns it into
-        // `__tsover_*` later.
-        if let Some(overloaded) =
-            crate::ext::overload::binary_type(self, left, operator, right, left_type, right_type)
+        // PORT: operator overloading (ext/overload.rs).
+        if let Some(t) =
+            crate::ext::overload::check_binary(self, left, operator, right, left_type, right_type)
         {
-            if is_compound_assignment(operator) {
-                self.check_assignment_operator(left, operator, right, left_type, overloaded);
-            }
-            return overloaded;
+            return t;
         }
         match operator {
             SyntaxKind::AsteriskToken
