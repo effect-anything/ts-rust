@@ -144,8 +144,9 @@ fn diagnostic_json(path: &str, positions: &Positions<'_>, item: &SessionDiagnost
 }
 
 /// Transform one file. Answers a JSON object: `code`, `hostPath`,
-/// `dependencies`, `diagnostics`, `map` (v3, or null when unchanged),
-/// `changed`, `spans` (span-map tuples for `composeNative`) and `tsconfig`
+/// `dependencies`, `diagnostics`, `map` (v3; the identity map when
+/// unchanged), `changed`, `spans` (span-map tuples for `composeNative`; one
+/// verbatim span when unchanged) and `tsconfig`
 /// (the config the options came from, or null).
 ///
 /// # Errors
@@ -160,6 +161,9 @@ pub fn transform_native(
     search_tsconfig: bool,
     options: Option<String>,
 ) -> napi::Result<String> {
+    if let Some(message) = crate::unsupported_source(&path) {
+        return Err(error(message));
+    }
     let (options, config) = options_for(
         &path,
         tsconfig.as_deref(),
@@ -173,16 +177,22 @@ pub fn transform_native(
         .iter()
         .map(|item| diagnostic_json(&path, &positions, item))
         .collect();
-    let map = if result.changed {
-        let mut map: Value =
-            serde_json::from_str(&result.source_map).map_err(|err| error(err.to_string()))?;
-        if let Some(object) = map.as_object_mut() {
-            object.remove("segments");
-        }
-        map
+    // Unchanged: one verbatim span, so `map` is the identity map and
+    // `composeMap` renames the later map's source to `path` like any other.
+    let (source_map, spans) = if result.changed {
+        (result.source_map.clone(), result.mappings.clone())
     } else {
-        Value::Null
+        let len = i32::try_from(code.len()).map_err(|err| error(err.to_string()))?;
+        let identity = [(0, len, 0, len, 0)];
+        (
+            crate::v3_source_map(&path, &code, &code, &identity),
+            crate::session::mappings_json(&identity),
+        )
     };
+    let mut map: Value = serde_json::from_str(&source_map).map_err(|err| error(err.to_string()))?;
+    if let Some(object) = map.as_object_mut() {
+        object.remove("segments");
+    }
     Ok(json!({
         "code": result.code,
         "hostPath": host_path(&path, result.extension),
@@ -190,7 +200,7 @@ pub fn transform_native(
         "diagnostics": diagnostics,
         "map": map,
         "changed": result.changed,
-        "spans": result.mappings,
+        "spans": spans,
         "tsconfig": config,
     })
     .to_string())

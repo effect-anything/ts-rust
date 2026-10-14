@@ -20,8 +20,8 @@
 // (bin/tsc-ext is a Node launcher that runs the platform's lib/tsc-ext), the tsconfig
 // `contentMappers` manifest (typescript.contentMapper.platformExec, the platform's lib/tsc-ext,
 // with exec ./bin/tsc-ext as the fallback), and the Node API
-// (crates/ts_ext_syntax/js as lib/ext, the package root export; TypeScript's root export, the
-// version, moves to "./version"). The tsc keeps reporting the TypeScript version
+// (crates/ts_ext_syntax/js as lib/ext, the subpath export "./ext"; the root export stays
+// TypeScript's). The tsc keeps reporting the TypeScript version
 // (--version): the compiler matches `typesVersions` against it, so a tsc that reported 0.1.0 would
 // pick the typings that packages keep for TypeScript 5.6 and older. The main package records it as
 // `tscVersion`, for the postinstall check.
@@ -260,21 +260,11 @@ else {
             platformExec: `${mainPackage.name}-\${platform}-\${arch}/lib/tsc-ext`,
         },
     };
-    const rootExport = { types: "./lib/ext/index.d.ts", default: "./lib/ext/index.cjs" };
-    const exports = {};
-    for (const [key, value] of Object.entries(mainPackage.exports ?? {})) {
-        if (key === ".") {
-            exports["."] = rootExport;
-            exports["./version"] = value;
-        }
-        else {
-            exports[key] = value;
-        }
-    }
-    exports["."] ??= rootExport;
-    mainPackage.exports = exports;
-    mainPackage.main = "./lib/ext/index.cjs";
-    mainPackage.types = "./lib/ext/index.d.ts";
+    // The root export stays TypeScript's (the version); the Node API is "@effect-x/tsc/ext".
+    mainPackage.exports = {
+        ...mainPackage.exports,
+        "./ext": { types: "./lib/ext/index.d.ts", default: "./lib/ext/index.cjs" },
+    };
 }
 if (args["native-bin"]) {
     // PORT: not in Go. The native bin on POSIX (npm/install.js).

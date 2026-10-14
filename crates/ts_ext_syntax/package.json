@@ -4,10 +4,8 @@
   "private": true,
   "description": "Development package of crates/ts_ext_syntax: the tsc-ext content mapper and the Node API. The published @effect-x/tsc is built by npm/pack.mjs.",
   "type": "commonjs",
-  "main": "./js/index.cjs",
-  "types": "./js/index.d.ts",
   "exports": {
-    ".": {
+    "./ext": {
       "types": "./js/index.d.ts",
       "default": "./js/index.cjs"
     },
@@ -28,7 +26,8 @@
     "packageName": "@effect-x/tsc"
   },
   "scripts": {
-    "build": "napi build --platform --no-js --dts native.d.ts --output-dir . --release"
+    "build": "napi build --platform --no-js --dts native.d.ts --output-dir . --release",
+    "test": "node --test js/test/"
   },
   "devDependencies": {
     "@napi-rs/cli": "3.7.1"

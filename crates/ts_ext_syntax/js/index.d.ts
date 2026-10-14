@@ -5,6 +5,11 @@
 // with __TYPEGPU_META__), as unplugin-typegpu does in a bundler. Any other
 // file runs the TypeGPU step only. To leave a file alone, do not call
 // transform on it.
+//
+// .sjs/.sjsx (Sweetener over JavaScript) are not supported: transform throws.
+//
+// Options shape the output of this API only (the runtime JavaScript). `tsc`
+// checks the Sweetener expansion as TypeScript; no option changes it.
 
 /** Sweetener options. */
 export interface SweetenerOptions {
@@ -78,9 +83,17 @@ export interface Result {
   hostPath: string;
   /** Absolute paths of files the expansion read (macro modules). Watch them. */
   dependencies: string[];
+  /** Every diagnostic, in source order. */
   diagnostics: Diagnostic[];
-  /** `code` → the file passed to transform. `null` when `changed` is false. */
-  map: SourceMapV3 | null;
+  /** The diagnostics whose category is "error". A bundler fails the file on any. */
+  errors: Diagnostic[];
+  /** The other diagnostics (warnings, suggestions, messages). */
+  warnings: Diagnostic[];
+  /**
+   * `code` → the file passed to transform. Always a map: when `changed` is
+   * false it is the identity map (each line to itself under `path`).
+   */
+  map: SourceMapV3;
   changed: boolean;
   /** The tsconfig the options came from, or null. */
   tsconfig: string | null;
@@ -90,7 +103,8 @@ export interface Result {
    * position in macro output maps to the start of the author text that
    * produced it; text the expansion introduced is unmapped. With several
    * sources, the one named `hostPath` (or its basename) is `code`; the
-   * others are kept. Returns `map` itself when nothing changed.
+   * others are kept. Unchanged files compose through the identity map, so
+   * the result always names the original `path`.
    */
   composeMap(map: SourceMapV3 | string): SourceMapV3;
 }

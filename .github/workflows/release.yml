@@ -449,7 +449,7 @@ jobs:
           npx --no-install --package @effect-x/tsc tsc-ext help
           printf 'export syntax twice:expr {\n  rule { twice($x:expr) } => { [$x, $x] }\n}\nexport const a = twice(1);\n' > m.sts
           npx --no-install --package @effect-x/tsc tsc-ext sweetener --expand m.sts | grep -q "\[1, 1\]"
-          node --input-type=module -e 'import { Transformer } from "@effect-x/tsc"; const r = new Transformer({ tsconfig: false }).transformFile("m.sts"); if (!r.code.includes("[1, 1]") || r.hostPath !== "m.ts") process.exit(1)'
+          node --input-type=module -e 'import { Transformer } from "@effect-x/tsc/ext"; const r = new Transformer({ tsconfig: false }).transformFile("m.sts"); if (!r.code.includes("[1, 1]") || r.hostPath !== "m.ts") process.exit(1)'
           echo '{"compilerOptions":{"strict":true,"noEmit":true,"allowArbitraryExtensions":true},"include":["m.sts"],"contentMappers":[{"package":"@effect-x/tsc","extensions":[".sts"]}]}' > tsconfig.json
           $tsc -p tsconfig.json
       - name: Archive check

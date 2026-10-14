@@ -1067,6 +1067,21 @@ fn segment_at(first: &crate::Expansion, pos: u32) -> Option<&crate::Segment> {
     })
 }
 
+/// The error for a file kind tsc-ext does not take: `.sjs`/`.sjsx`
+/// (Sweetener over JavaScript) are not supported. `None` for any other path.
+#[must_use]
+pub fn unsupported_source(path: &str) -> Option<String> {
+    let bare = path.split(['?', '#']).next().unwrap_or(path);
+    [".sjs", ".sjsx"]
+        .iter()
+        .find(|ext| bare.ends_with(*ext))
+        .map(|ext| {
+            format!(
+                "{path}: {ext} (Sweetener over JavaScript) is not supported; write .sts or .stsx (TypeScript)"
+            )
+        })
+}
+
 pub fn virtual_extension(path: &str) -> &'static str {
     let path = path.split(['?', '#']).next().unwrap_or(path);
     let ext = path.rsplit_once('.').map_or("", |(_, ext)| ext);

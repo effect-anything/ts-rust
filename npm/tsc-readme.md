@@ -69,10 +69,13 @@ Register the content mapper in tsconfig.json and run `tsc --runExternalCode`:
 - `tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map] [--build]` prints the expansion
   (`--build`: the bundler output, as the Node API returns it); diagnostics
   go to stderr.
-- `import { Transformer, formatDiagnostics } from "@effect-x/tsc"` for bundler plugins:
-  `new Transformer().transform(code, path)` returns `{ code, hostPath, dependencies, diagnostics,
-  map, changed, composeMap }`. The options are the tsconfig's, explicit ones override them.
-- TypeScript's version export moved from the package root to `@effect-x/tsc/version`.
+- `import { Transformer, formatDiagnostics } from "@effect-x/tsc/ext"` for bundler plugins:
+  `new Transformer().transform(code, path)` returns `{ code, hostPath, dependencies, diagnostics, errors,
+  warnings, map, changed, composeMap }`. The options are the tsconfig's, explicit ones override them.
+- The package root keeps TypeScript's exports (the version); the Node API is the subpath `/ext`.
+- Options shape the bundler output only. `tsc` checks the Sweetener expansion as TypeScript, the
+  same under any option.
+- `.sjs` and `.sjsx` (Sweetener over JavaScript) are not supported; they are an error.
 
 ## Platforms
 

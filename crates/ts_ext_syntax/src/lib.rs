@@ -22,7 +22,9 @@ pub mod compose;
 pub mod config;
 pub mod prewarm;
 pub mod protocol;
-pub use session::{SessionDiagnostic, TransformSession, Transformed, v3_source_map};
+pub use session::{
+    SessionDiagnostic, TransformSession, Transformed, unsupported_source, v3_source_map,
+};
 
 // napi-derive registers the exports outside `cfg(test)` only.
 #[cfg_attr(test, allow(dead_code))]

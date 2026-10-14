@@ -4,7 +4,7 @@ The published `@effect-x/tsc` npm package has two bins and a Node API:
 
 - `tsc`: the compiler (crates/ts_goport).
 - `tsc-ext`: this crate's binary, `src/bin/tsc_ext.rs`.
-- `import { Transformer, formatDiagnostics } from "@effect-x/tsc"`: this crate's Node addon
+- `import { Transformer, formatDiagnostics } from "@effect-x/tsc/ext"`: this crate's Node addon
   (`src/node.rs`) behind the JavaScript wrapper in `js/`.
 
 ## Options
@@ -39,6 +39,9 @@ above a file (JSONC; a relative `extends` is followed when the config has no `co
 
 - `tsc` sends the entry's options with `openProject`; the content mapper validates them,
   reports invalid ones as option diagnostics, and keeps them per project handle.
+
+**Options shape the build output only; the check treats files as TypeScript.** This is the
+design, not a gap.
 
 One pipeline turns the options into output (`TransformSession::from_options`): the Node API, the
 mapper's `plugin` method and `sweetener --expand --build` print the same bundler text for the same
@@ -77,7 +80,8 @@ with `--runExternalCode`.
 
 ## Node API
 
-See `js/index.d.ts`. One pipeline for dev and build, as a bundler plugin needs it: Sweetener
+`import { Transformer, formatDiagnostics } from "@effect-x/tsc/ext"` (the package root is
+TypeScript's). See `js/index.d.ts`. One pipeline for dev and build, as a bundler plugin needs it: Sweetener
 expansion for `.sts`/`.stsx`, then TypeGPU in its build form (operators rewritten, `"use gpu"`
 functions wrapped with `__TYPEGPU_META__`, as unplugin-typegpu does). There is no mode option:
 the build form is also what a dev server must serve, since the TypeGPU runtime reads
@@ -85,7 +89,12 @@ the build form is also what a dev server must serve, since the TypeGPU runtime r
 
 `Result.composeMap(map)` takes a map of a later transform of `result.code` and returns one onto
 the `.sts`: exact for copied text (the same character), the start of the author text for macro
-output, unmapped for text the expansion introduced (`src/compose.rs`).
+output, unmapped for text the expansion introduced (`src/compose.rs`). `map` is never null: an
+unchanged file gets the identity map and composes through it, so a composed map always names the
+original path. `errors` and `warnings` split `diagnostics` (warnings: every non-error category).
+
+`.sjs` and `.sjsx` (Sweetener over JavaScript) are not supported. `transform` throws, `tsc-ext
+sweetener --expand` exits 1, and the content mapper answers `transform` with an error.
 
 Build the addon here (development):
 

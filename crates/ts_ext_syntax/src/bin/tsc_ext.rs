@@ -80,6 +80,10 @@ fn sweetener_cli(args: &[String]) -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    if let Some(message) = ts_ext_syntax::unsupported_source(&path) {
+        eprintln!("tsc-ext: {message}");
+        return ExitCode::from(1);
+    }
     let content = match fs::read_to_string(&path) {
         Ok(content) => content,
         Err(err) => {
@@ -310,6 +314,9 @@ fn handle(message: &str, projects: &mut Projects) -> String {
         }
         "transform" => {
             let file_name = json_string(&params, "fileName").unwrap_or_default();
+            if let Some(message) = ts_ext_syntax::unsupported_source(&file_name) {
+                return error_response(id.as_deref(), -32602, &message);
+            }
             let content = json_string(&params, "content").unwrap_or_default();
             encode_transform(&protocol::transform_file(&file_name, &content))
         }

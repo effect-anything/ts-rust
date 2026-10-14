@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { Transformer, formatDiagnostics } from "@effect-x/tsc";
+import { Transformer, formatDiagnostics } from "@effect-x/tsc/ext";
 import { transformWithEsbuild } from "vite";
 
 // Options come from tsconfig.json (contentMappers "@effect-x/tsc" options).
@@ -13,13 +13,12 @@ function strip(id) {
 function publish(ctx, file, code) {
   const result = transformer.transform(code, file);
   for (const dependency of result.dependencies) ctx.addWatchFile(dependency);
-  for (const item of result.diagnostics) {
-    const message = formatDiagnostics([item]);
-    if (item.category === "warning") {
-      ctx.warn({ message, id: file, pos: item.start });
-      continue;
-    }
-    ctx.error({ message, id: file, pos: item.start });
+  for (const item of result.warnings) {
+    ctx.warn({ message: formatDiagnostics([item]), id: file, pos: item.start });
+  }
+  if (result.errors.length > 0) {
+    const [first] = result.errors;
+    ctx.error({ message: formatDiagnostics(result.errors), id: file, pos: first.start });
   }
   if (!result.changed) return null;
   // `map` is a Source Map v3 with exact per-token mappings back to `file`.

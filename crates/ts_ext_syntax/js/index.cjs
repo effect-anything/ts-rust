@@ -70,12 +70,13 @@ function makeResult(raw, source, path) {
     hostPath: fields.hostPath,
     dependencies: fields.dependencies,
     diagnostics: fields.diagnostics,
+    errors: fields.diagnostics.filter((item) => item.category === "error"),
+    warnings: fields.diagnostics.filter((item) => item.category !== "error"),
     map: fields.map,
     changed: fields.changed,
     tsconfig: fields.tsconfig,
     composeMap(map) {
-      if (map == null) return fields.map;
-      if (!fields.changed) return map;
+      if (map == null) throw new TypeError("composeMap(map): map must be a source map");
       const text = typeof map === "string" ? map : JSON.stringify(map);
       return JSON.parse(binding().composeNative(path, fields.hostPath, source, fields.code, spans, text));
     },
