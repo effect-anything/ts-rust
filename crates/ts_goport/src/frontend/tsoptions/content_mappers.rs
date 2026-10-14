@@ -106,16 +106,14 @@ pub fn resolve_content_mapper_manifest(
             )),
         );
     }
-    // PORT: not in tsgo. A native executable for this platform, when the
-    // package names one and it is installed, replaces `exec` (often a Node
-    // launcher) so a mapper start does not pay for a Node process.
-    let (platform_exec, has_platform_exec) = cm.platform_exec.get_value();
-    let exec = if has_platform_exec {
-        resolve_platform_exec(host, &resolver, &package_directory, &platform_exec)
-            .map_or(exec, |path| vec![path])
-    } else {
-        exec
-    };
+    // PORT: not in tsgo. A mapper package whose `exec` is one launcher
+    // (`./bin/<name>`) may ship that program natively in a per-platform
+    // package, `<package>-<platform>-<arch>/lib/<name>`, as npm packages with
+    // optional platform dependencies do. When that file is installed it
+    // replaces `exec`, so a mapper start does not pay for a Node process.
+    // Nothing in the manifest names it: this is a host convention.
+    let exec = native_exec(host, &resolver, &package_directory, &name, &exec)
+        .map_or(exec, |path| vec![path]);
     let (compiler_options, _) = cm.compiler_options.get_value();
     let (dynamic_config, _) = cm.dynamic_config.get_value();
     (
@@ -147,30 +145,31 @@ fn node_platform() -> (&'static str, &'static str) {
     (platform, arch)
 }
 
-/// `platformExec` (`"<package>/<path>"`, `${platform}` and `${arch}` in
-/// Node's spelling) resolved from the mapper's package directory to an
-/// existing file; `.exe` is tried on Windows. `None` keeps `exec`.
-fn resolve_platform_exec(
+/// The native program for a one-entry `exec` (`[".../<name>"]`):
+/// `<package>-<platform>-<arch>/lib/<name>` (Node's spelling of platform
+/// and arch), resolved from the mapper's package directory, when that file
+/// exists; `.exe` is tried on Windows. `None` keeps `exec`.
+fn native_exec(
     host: &dyn ParseConfigHost,
     resolver: &DefaultResolver,
     package_directory: &str,
-    template: &str,
+    package_name: &str,
+    exec: &[String],
 ) -> Option<String> {
-    let (platform, arch) = node_platform();
-    let spec = template
-        .replace("${platform}", platform)
-        .replace("${arch}", arch);
-    let parts: Vec<&str> = spec.split('/').collect();
-    let name_len = if spec.starts_with('@') { 2 } else { 1 };
-    if parts.len() <= name_len || parts.iter().any(|part| part.is_empty() || *part == "..") {
+    let [launcher] = exec else {
         return None;
-    }
-    let package = parts[..name_len].join("/");
+    };
+    let program = launcher
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty() && *name != "..")?;
+    let (platform, arch) = node_platform();
+    let package = format!("{package_name}-{platform}-{arch}");
     let containing_file = combine_paths(package_directory, &["package.json"]);
     let resolved = resolver
         .resolve_package_directory(&package, &containing_file, RESOLUTION_MODE_NONE, None)
         .filter(|resolved| !resolved.resolved_file_name.is_empty())?;
-    let path = combine_paths(&resolved.resolved_file_name, &parts[name_len..]);
+    let path = combine_paths(&resolved.resolved_file_name, &["lib", program]);
     let fs = host.fs();
     if fs.file_exists(&path) {
         return Some(path);
@@ -180,7 +179,7 @@ fn resolve_platform_exec(
 }
 
 #[cfg(test)]
-mod platform_exec_tests {
+mod native_exec_tests {
     use super::*;
     use crate::frontend::vfs::osvfs_fs;
 
@@ -202,7 +201,7 @@ mod platform_exec_tests {
 
     /// An installed platform package replaces `exec`; a missing one keeps it.
     #[test]
-    fn platform_exec_names_the_installed_native_binary() {
+    fn an_installed_platform_package_replaces_the_launcher() {
         let root =
             std::env::temp_dir().join(format!("goport-platform-exec-{}", std::process::id()));
         let root = std::path::PathBuf::from(os_fs_realpath_dir(&root));
@@ -210,11 +209,11 @@ mod platform_exec_tests {
         let modules = root.join("node_modules");
         write(
             &modules.join("@x/m/package.json"),
-            r#"{"name":"@x/m","version":"1.0.0","typescript":{"contentMapper":{"exec":["./bin/m"],"platformExec":"@x/m-${platform}-${arch}/lib/m"}}}"#,
+            r#"{"name":"@x/m","version":"1.0.0","typescript":{"contentMapper":{"exec":["./bin/m"]}}}"#,
         );
         write(
             &modules.join("missing/package.json"),
-            r#"{"name":"missing","typescript":{"contentMapper":{"exec":["./bin/m"],"platformExec":"missing-${platform}-${arch}/lib/m"}}}"#,
+            r#"{"name":"missing","typescript":{"contentMapper":{"exec":["./bin/m"]}}}"#,
         );
         let native = modules.join(format!("@x/m-{platform}-{arch}/lib/m"));
         write(

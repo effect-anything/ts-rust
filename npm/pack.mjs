@@ -18,8 +18,8 @@
 // (tsc-ext.node). The --ext platforms must be exactly the --exe platforms. Each platform package then
 // has lib/tsc, lib/tsc-ext and lib/tsc-ext.node; the main package has the bins `tsc` and `tsc-ext`
 // (bin/tsc-ext is a Node launcher that runs the platform's lib/tsc-ext), the tsconfig
-// `contentMappers` manifest (typescript.contentMapper.platformExec, the platform's lib/tsc-ext,
-// with exec ./bin/tsc-ext as the fallback), and the Node API
+// `contentMappers` manifest (exec ./bin/tsc-ext; tsc starts the platform package's lib/tsc-ext
+// in its place when it is installed, by convention), and the Node API
 // (crates/ts_ext_syntax/js as lib/ext, the subpath export "./ext"; the root export stays
 // TypeScript's). The tsc keeps reporting the TypeScript version
 // (--version): the compiler matches `typesVersions` against it, so a tsc that reported 0.1.0 would
@@ -254,13 +254,14 @@ else {
         recursive: true,
         filter: source => path.basename(source) !== "test",
     });
-    // tsc starts the platform package's native lib/tsc-ext directly (platformExec, resolved from
-    // this package; a PORT addition to the manifest). exec, the Node launcher, is the fallback
-    // when that package is not installed, and for hosts that do not read platformExec.
+    // tsc starts the platform package's native lib/tsc-ext directly: for a one-entry exec
+    // ./bin/<name>, the port's tsc looks for <package>-<platform>-<arch>/lib/<name> next to the
+    // mapper package (crates/ts_goport/src/frontend/tsoptions/content_mappers.rs `native_exec`).
+    // exec, the Node launcher, is the fallback when that package is not installed, and the
+    // command for hosts without that convention.
     mainPackage.typescript = {
         contentMapper: {
             exec: ["./bin/tsc-ext"],
-            platformExec: `${mainPackage.name}-\${platform}-\${arch}/lib/tsc-ext`,
         },
     };
     // The root export stays TypeScript's (the version); the Node API is "@effect-x/tsc/ext".
