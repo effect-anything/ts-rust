@@ -58,10 +58,6 @@ fn try_expand_fixture_scoped(
     if let Some(read) = match_signal_read(nodes, index, signals) {
         return Some(read);
     }
-    // Library and sample app macros that the expander still prints as source.
-    if let Some(app) = super::sweetener_apps::expand_apps(source, nodes, index) {
-        return Some(app);
-    }
     let _ = (source, nodes, index);
     None
 }
