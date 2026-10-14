@@ -71,19 +71,17 @@ fn a_let_without_a_body_is_malformed() {
 }
 
 /// An identifier-spelled syntax parameter used outside any
-/// `#parameterize`: upstream reports SWR4018 once, at the use; this
-/// expander also reports it at the declaration.
+/// `#parameterize`: upstream reports SWR4018 once, at the use, not at
+/// the declaration.
 #[test]
-#[ignore = "known gap: SWR4018 is also reported at the declaration"]
 fn an_unbound_parameter_is_reported_once() {
     let (_, diagnostics) = run("export syntax parameter it:expr;\nconst c = it;\n");
     assert_eq!(diagnostics, ["SWR4018@43"]);
 }
 
-/// SWR4022 covers the body upstream (`1` in `3 |> 1`); here it starts
-/// before the left operand.
+/// SWR4022 covers the body upstream (`1` in `3 |> 1`), not the
+/// invocation.
 #[test]
-#[ignore = "known gap: SWR4022 is not reported over the body"]
 fn an_unused_required_parameter_is_reported_at_the_body() {
     let source = "export syntax parameter (%):expr;\nexport operator (|>):expr { fixity infix; associativity right; precedence 20;\n  rule { $value:expr |> $body:expr } => { #let(topic = $value) { #parameterize(required % = topic) { $body } } } }\nconst n = 3 |> 1;\n";
     let (_, diagnostics) = run(source);

@@ -75,6 +75,8 @@ pub(crate) fn hoist_marker(binder: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Unused {
     pub param: String,
+    /// The region's body as printed: where upstream reports SWR4022.
+    pub body: String,
 }
 
 thread_local! {
@@ -256,7 +258,10 @@ pub(crate) fn resolve_parameters(code: &str) -> (String, Vec<Unused>) {
         };
         let (replaced, count) = substitute(&code[paren + 1..close], &param, &value);
         if required && count == 0 {
-            unused.push(Unused { param });
+            unused.push(Unused {
+                param,
+                body: code[paren + 1..close].trim().to_owned(),
+            });
         }
         code.replace_range(at..close + 1, &replaced);
     }

@@ -3780,17 +3780,31 @@ impl<'a> Printer<'a> {
             });
             self.failed = true;
         }
-        if self.depth == 0 {
+        // Only the expansion itself: the expansion is rendered before the
+        // text in front of the invocation is copied.
+        if self.depth == 0 && kind == SegmentKind::Atom {
             // `#parameterize(required % = ...)` around a body that never
             // uses `%`. The body is inside this expansion.
             for unused in super::sweetener_scoped::take_unused() {
+                // Upstream reports it over the body the region holds, when
+                // that body is the author's text in this invocation.
+                let invocation = source
+                    .get(original_start as usize..original_end as usize)
+                    .unwrap_or_default();
+                let (start, end) = invocation
+                    .rfind(unused.body.as_str())
+                    .filter(|_| !unused.body.is_empty())
+                    .map_or((original_start, original_end), |at| {
+                        let start = original_start + u32_at(at);
+                        (start, start + u32_at(unused.body.len()))
+                    });
                 self.diagnostics.push(Diagnostic {
                     message: format!(
                         "SWR4022: This must use {0}, and does not. The macro gives {0} a meaning here only for syntax that uses it.",
                         unused.param
                     ),
-                    start: original_start,
-                    end: original_end,
+                    start,
+                    end,
                     severity: Severity::Error,
                     ..Default::default()
                 });
@@ -5016,6 +5030,19 @@ fn unbound_parameter_uses(source: &str, segments: &[Segment]) -> Vec<Diagnostic>
             let after = source[end..].trim_start();
             // `import { (%) }` and `syntax parameter (%)` name it.
             if before.ends_with('(') && after.starts_with(')') {
+                continue;
+            }
+            // `syntax parameter it:expr;` declares an identifier-spelled
+            // one, and `import { it }` / `export { it }` name it: neither
+            // is a use.
+            let statement = before[before.rfind(';').map_or(0, |at| at + 1)..].trim_start();
+            let previous_word = before
+                .rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
+                .next();
+            if previous_word == Some("parameter")
+                || statement.starts_with("import")
+                || (statement.starts_with("export") && statement.contains('{'))
+            {
                 continue;
             }
             let copied = segments.iter().any(|segment| {

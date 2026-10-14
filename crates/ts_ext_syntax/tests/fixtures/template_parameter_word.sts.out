@@ -1,0 +1,15 @@
+exit: 1
+--- stdout
+// tsc-ext: expand
+;
+const c = [it, it];
+
+--- stderr
+template_parameter_word.sts:4:12: error SWR4018: Syntax parameter it is used outside any #parameterize that gives it a meaning. It is declared without rules, so it means nothing here.
+  4 | const c = [it, it];
+    |            ^^
+  help: tsc-ext explain SWR4018
+template_parameter_word.sts:4:16: error SWR4018: Syntax parameter it is used outside any #parameterize that gives it a meaning. It is declared without rules, so it means nothing here.
+  4 | const c = [it, it];
+    |                ^^
+  help: tsc-ext explain SWR4018
