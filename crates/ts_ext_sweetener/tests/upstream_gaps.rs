@@ -1,7 +1,6 @@
-//! Known differences from upstream Sweetener (vendor/sweetener, CLI
-//! `expand`), found while documenting `#let`, `#fold` and `#parameterize`.
-//! Each test states upstream's output and is ignored until the expander
-//! matches it: `cargo test -p ts_ext_sweetener --test upstream_gaps -- --ignored`.
+//! Differences from upstream Sweetener (vendor/sweetener, CLI `expand`)
+//! found while documenting `#let`, `#fold` and `#parameterize`, now fixed.
+//! Each test states upstream's output for the case.
 
 use ts_ext_sweetener::{ExpandRequest, Phase, expand};
 
@@ -21,7 +20,7 @@ fn run(code: &str) -> (String, Vec<String>) {
 }
 
 /// A captured expression is spliced so it keeps its meaning: upstream
-/// prints `(p && (q || r))`; this expander prints `p && q || r`.
+/// prints `(p && (q || r))`, not `p && q || r`.
 #[test]
 fn a_spliced_expression_keeps_its_precedence() {
     let (code, diagnostics) = run(
@@ -41,8 +40,7 @@ fn a_fold_item_keeps_its_precedence() {
 }
 
 /// `await` in a macro argument inside an async function: upstream expands
-/// `twice(await h())` to `[await h(), await h()]`; this expander reports
-/// SWR4001 at `await`.
+/// `twice(await h())` to `[await h(), await h()]`.
 #[test]
 fn await_in_a_macro_argument() {
     let (code, diagnostics) = run(
@@ -53,9 +51,8 @@ fn await_in_a_macro_argument() {
 }
 
 /// The `#fold` parameter list is fixed to `($acc, $item, $index)` upstream
-/// (SWR2017 otherwise); this expander accepts any three names.
+/// (SWR2017 otherwise).
 #[test]
-#[ignore = "known gap: #fold accepts any parameter names"]
 fn fold_parameters_are_fixed() {
     let (_, diagnostics) = run(
         "export syntax all:expr { rule { all($($x:expr),*) } => { #fold($x, init: { true }) { ($acc, $item, $i) => { $acc && $item } } } }\nconst b = all(p);\n",

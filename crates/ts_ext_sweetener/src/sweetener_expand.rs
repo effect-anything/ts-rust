@@ -6544,7 +6544,8 @@ fn read_fold(
     let names: Vec<String> = (0..params.len())
         .filter_map(|index| hole_name_at(params, index))
         .collect();
-    if names.len() != 3 || !is_arrow(lambda, 1) {
+    // Upstream fixes the binders' spelling: `($acc, $item, $index)`.
+    if names != ["acc", "item", "index"] || !is_arrow(lambda, 1) {
         return invalid();
     }
     let body_index = (2..lambda.len()).find(|index| group_is(lambda.get(*index), Delimiter::Brace));
