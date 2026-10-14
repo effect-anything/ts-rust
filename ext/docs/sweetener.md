@@ -65,6 +65,32 @@ Macro diagnostics stay in the expansion result. They are not delayed until
 `tsc`, where the same mistake would look like a TypeScript error in
 generated code.
 
+## DEVIATIONS
+
+Places where tsc-ext deliberately prints something other than upstream,
+because upstream's output changes the meaning or is not valid TypeScript.
+Each is pinned by `crates/ts_ext_syntax/tests/fixtures/template_deviations.sts`
+and by unit tests in `sweetener_group.rs`; the parity classifier labels them
+`DEVIATION` rather than a regression.
+
+1. `#fold` accumulator is grouped. `$acc * 2 + $item` over `a, b` prints
+   `((0 * 2 + a) * 2 + b)`; upstream splices `$acc` raw and prints
+   `0 * 2 + a * 2 + b`, which is a different number.
+2. An expression macro whose result is an arrow function is grouped where it
+   is an operand: `p && arrow()` prints `p && (() => 1)`; upstream prints
+   `p && () => 1`, a syntax error.
+3. An expression result that opens with `{` is grouped after `=>` and at the
+   start of a statement: `() => obj(1)` prints `() => ({ value: 1 })`;
+   upstream prints `() => { value: 1 }`, a block with a label that returns
+   `undefined`.
+4. An expression result that opens with `function` or `class` is grouped at
+   the start of a statement and where it is called: `fn1(3)();` prints
+   `(function () { return 3; })();`; upstream prints
+   `function () { return 3; } ();`, a syntax error.
+5. A comma expression result (`$a, $b`) is grouped as one operand,
+   `[(a, b)]`; upstream rejects it with SWR4011 ("not one expr"). Grouping
+   gives the comma expression its one meaning, so tsc-ext accepts it.
+
 ## What is still open
 
 The expander matches the reference compiler on a minority of the captured

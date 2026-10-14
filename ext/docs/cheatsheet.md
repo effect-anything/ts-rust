@@ -138,8 +138,8 @@ outside any `#parameterize`), SWR2017 (malformed `#fold`).
 
 A captured `:expr`, and an expression macro's result, is spliced as one
 operand: with `$a && $b`, `both(p, q || r)` is `(p && (q || r))`. `#fold`'s
-`$acc` is spliced as written, as upstream does; write `($acc)` when its
-precedence matters (`($acc) * 2 + $item`).
+`$acc` and `$item` are operands too: `$acc * 2 + $item` over `a, b` is
+`((0 * 2 + a) * 2 + b)`. See DEVIATIONS in sweetener.md.
 
 ## gpu: `"use gpu"` functions (TypeGPU)
 
