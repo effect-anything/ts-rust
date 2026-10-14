@@ -756,7 +756,8 @@ fn malformed_scoped(nodes: &[Syntax], index: usize) -> Option<Diagnostic> {
         Syntax::Token { raw, .. } => Some(raw.clone()),
         _ => None,
     };
-    let (name, args) = if token_at(nodes, index, "#let") || token_at(nodes, index, "#parameterize") {
+    let (name, args) = if token_at(nodes, index, "#let") || token_at(nodes, index, "#parameterize")
+    {
         (token_text(&nodes[index])?, index + 1)
     } else if operator_is(nodes.get(index), "#")
         && (token_at(nodes, index + 1, "let") || token_at(nodes, index + 1, "parameterize"))
@@ -792,7 +793,10 @@ fn malformed_scoped(nodes: &[Syntax], index: usize) -> Option<Diagnostic> {
         .iter()
         .filter(|node| !matches!(node, Syntax::Comment { .. }))
         .collect();
-    let Some(equals) = children.iter().position(|node| operator_is(Some(node), "=")) else {
+    let Some(equals) = children
+        .iter()
+        .position(|node| operator_is(Some(node), "="))
+    else {
         return report();
     };
     let named = if is_let {
@@ -801,8 +805,15 @@ fn malformed_scoped(nodes: &[Syntax], index: usize) -> Option<Diagnostic> {
         equals > 0
     };
     let valued = equals + 1 < children.len();
-    let bodied = !is_let || body.iter().any(|node| !matches!(node, Syntax::Comment { .. }));
-    if named && valued && bodied { None } else { report() }
+    let bodied = !is_let
+        || body
+            .iter()
+            .any(|node| !matches!(node, Syntax::Comment { .. }));
+    if named && valued && bodied {
+        None
+    } else {
+        report()
+    }
 }
 
 /// Words a binding can never be spelled with (TypeScript reserved words).
@@ -2216,11 +2227,10 @@ impl<'a> Printer<'a> {
                 // template puts it: `$a && $b` with `q || r` is `(q || r)`.
                 let exprs = expr_capture_texts(&rule.pattern, &matched.captures);
                 if !exprs.is_empty() {
-                    let (grouped, moved) = super::sweetener_group::group_spans(
-                        &replacement,
-                        &protected,
-                        |text| exprs.contains(text),
-                    );
+                    let (grouped, moved) =
+                        super::sweetener_group::group_spans(&replacement, &protected, |text| {
+                            exprs.contains(text)
+                        });
                     if grouped != replacement {
                         pieces = super::sweetener_origins::carry(&replacement, &grouped, &pieces);
                         replacement = grouped;
@@ -3284,12 +3294,13 @@ impl<'a> Printer<'a> {
         for (name, at) in unknown_directives(template) {
             // A malformed `#let` / `#parameterize` is SWR2016 at its
             // definition already.
-            if matches!(name.as_str(), "#let" | "#parameterize" | "let" | "parameterize")
-                && self.diagnostics.iter().any(|diagnostic| {
-                    diagnostic.message.starts_with("SWR2016")
-                        && (diagnostic.start as usize == at || diagnostic.start as usize + 1 == at)
-                })
-            {
+            if matches!(
+                name.as_str(),
+                "#let" | "#parameterize" | "let" | "parameterize"
+            ) && self.diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.starts_with("SWR2016")
+                    && (diagnostic.start as usize == at || diagnostic.start as usize + 1 == at)
+            }) {
                 continue;
             }
             let invalid = name.strip_prefix(INVALID_OPERATION);
@@ -10254,7 +10265,16 @@ fn is_expr_start(node: &Syntax) -> bool {
 fn is_keyword_operator(raw: &str) -> bool {
     matches!(
         raw,
-        "await" | "typeof" | "void" | "delete" | "new" | "yield" | "as" | "satisfies" | "in" | "instanceof"
+        "await"
+            | "typeof"
+            | "void"
+            | "delete"
+            | "new"
+            | "yield"
+            | "as"
+            | "satisfies"
+            | "in"
+            | "instanceof"
     )
 }
 
@@ -11409,7 +11429,11 @@ fn expr_capture_texts(
                 }
                 Capture::Many(rows) => {
                     for row in rows {
-                        walk(wanted, &mut row.iter().map(|(name, capture)| (name, capture)), out);
+                        walk(
+                            wanted,
+                            &mut row.iter().map(|(name, capture)| (name, capture)),
+                            out,
+                        );
                     }
                 }
                 _ => {}

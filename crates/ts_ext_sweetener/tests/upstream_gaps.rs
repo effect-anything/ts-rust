@@ -64,9 +64,8 @@ fn fold_parameters_are_fixed() {
 /// SWR2018 "no operation #let".
 #[test]
 fn a_let_without_a_body_is_malformed() {
-    let (_, diagnostics) = run(
-        "export syntax f:expr { rule { f($x:expr) } => { #let(v = $x) } }\nconst a = f(1);\n",
-    );
+    let (_, diagnostics) =
+        run("export syntax f:expr { rule { f($x:expr) } => { #let(v = $x) } }\nconst a = f(1);\n");
     assert_eq!(diagnostics, ["SWR2016@48"]);
 }
 

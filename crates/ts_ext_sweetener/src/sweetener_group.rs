@@ -49,7 +49,9 @@ fn lex(text: &str) -> Vec<Tok> {
         } else if text[at..].starts_with("//") {
             at = text[at..].find('\n').map_or(bytes.len(), |end| at + end);
         } else if text[at..].starts_with("/*") {
-            at = text[at + 2..].find("*/").map_or(bytes.len(), |end| at + 2 + end + 2);
+            at = text[at + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |end| at + 2 + end + 2);
         } else if matches!(ch, '"' | '\'' | '`') {
             at = string_end(text, at);
             out.push(Tok::Atom);
@@ -126,7 +128,10 @@ fn top_level(text: &str) -> Vec<Tok> {
 }
 
 fn is_prefix_word(word: &str) -> bool {
-    matches!(word, "typeof" | "void" | "delete" | "await" | "new" | "yield")
+    matches!(
+        word,
+        "typeof" | "void" | "delete" | "await" | "new" | "yield"
+    )
 }
 
 fn infix_word(word: &str) -> Option<u32> {
@@ -158,7 +163,9 @@ fn infix(punct: &str) -> Option<(u32, bool)> {
 /// Whether a token ends an operand, so a `+` / `-` / `<` after it is infix.
 fn ends_operand(tok: Option<&Tok>) -> bool {
     match tok {
-        Some(Tok::Word(word)) => !is_prefix_word(word) && infix_word(word).is_none() && !is_statement_word(word),
+        Some(Tok::Word(word)) => {
+            !is_prefix_word(word) && infix_word(word).is_none() && !is_statement_word(word)
+        }
         Some(Tok::Atom | Tok::Close(_)) => true,
         Some(Tok::Punct(punct)) => matches!(*punct, "++" | "--"),
         _ => false,
@@ -168,7 +175,16 @@ fn ends_operand(tok: Option<&Tok>) -> bool {
 fn is_statement_word(word: &str) -> bool {
     matches!(
         word,
-        "return" | "throw" | "case" | "else" | "do" | "export" | "default" | "const" | "let" | "var"
+        "return"
+            | "throw"
+            | "case"
+            | "else"
+            | "do"
+            | "export"
+            | "default"
+            | "const"
+            | "let"
+            | "var"
     )
 }
 
@@ -231,7 +247,10 @@ enum Side {
     Separator,
     /// An operator the expression is an operand of: the least precedence
     /// it must have to hold together without parentheses, and its spelling.
-    Operand { minimum: u32, spelling: &'static str },
+    Operand {
+        minimum: u32,
+        spelling: &'static str,
+    },
     /// A member access, call, index or tagged template: only an atomic
     /// expression holds together before it.
     Member,
@@ -244,24 +263,43 @@ enum Side {
 fn left_side(before: &str, neutral: bool) -> Side {
     let toks = lex(before);
     let Some(last) = toks.last() else {
-        return if neutral { Side::Neutral } else { Side::Nothing };
+        return if neutral {
+            Side::Neutral
+        } else {
+            Side::Nothing
+        };
     };
     let previous = toks.len().checked_sub(2).and_then(|at| toks.get(at));
     match last {
         Tok::Open('(' | '[') => Side::ListEdge,
         Tok::Punct("," | ";") => Side::Separator,
         Tok::Punct("=>") => Side::ArrowBody,
-        Tok::Punct("?") => Side::Operand { minimum: 11, spelling: "?" },
-        Tok::Punct(":") if open_conditional(&toks) => Side::Operand { minimum: ARROW, spelling: ":" },
-        Tok::Punct("+" | "-" | "~" | "!" | "++" | "--") if !ends_operand(previous) => Side::Operand {
-            minimum: UNARY + 1,
-            spelling: "prefix",
+        Tok::Punct("?") => Side::Operand {
+            minimum: 11,
+            spelling: "?",
         },
+        Tok::Punct(":") if open_conditional(&toks) => Side::Operand {
+            minimum: ARROW,
+            spelling: ":",
+        },
+        Tok::Punct("+" | "-" | "~" | "!" | "++" | "--") if !ends_operand(previous) => {
+            Side::Operand {
+                minimum: UNARY + 1,
+                spelling: "prefix",
+            }
+        }
         Tok::Word(word) if is_prefix_word(word) => Side::Operand {
-            minimum: if word == "yield" { ARROW + 1 } else { UNARY + 1 },
+            minimum: if word == "yield" {
+                ARROW + 1
+            } else {
+                UNARY + 1
+            },
             spelling: "prefix",
         },
-        Tok::Word(word) if infix_word(word).is_some() => Side::Operand { minimum: 111, spelling: "in" },
+        Tok::Word(word) if infix_word(word).is_some() => Side::Operand {
+            minimum: 111,
+            spelling: "in",
+        },
         Tok::Punct(punct) => match infix(punct) {
             Some((20, _)) if declares(&toks) => Side::Nothing,
             Some((prec, right)) => Side::Operand {
@@ -277,16 +315,32 @@ fn left_side(before: &str, neutral: bool) -> Side {
 fn right_side(after: &str, neutral: bool, conditional: bool) -> Side {
     let toks = lex(after);
     let Some(first) = toks.first() else {
-        return if neutral { Side::Neutral } else { Side::Nothing };
+        return if neutral {
+            Side::Neutral
+        } else {
+            Side::Nothing
+        };
     };
     match first {
         Tok::Close(')' | ']') => Side::ListEdge,
         Tok::Punct("," | ";") => Side::Separator,
         Tok::Punct("." | "?." | "!") | Tok::Open('(' | '[') | Tok::Atom => Side::Member,
-        Tok::Punct("?") => Side::Operand { minimum: 40, spelling: "?" },
-        Tok::Punct(":") if conditional => Side::Operand { minimum: 11, spelling: ":" },
-        Tok::Punct("++" | "--") => Side::Operand { minimum: 171, spelling: "postfix" },
-        Tok::Word(word) if infix_word(word).is_some() => Side::Operand { minimum: 110, spelling: "in" },
+        Tok::Punct("?") => Side::Operand {
+            minimum: 40,
+            spelling: "?",
+        },
+        Tok::Punct(":") if conditional => Side::Operand {
+            minimum: 11,
+            spelling: ":",
+        },
+        Tok::Punct("++" | "--") => Side::Operand {
+            minimum: 171,
+            spelling: "postfix",
+        },
+        Tok::Word(word) if infix_word(word).is_some() => Side::Operand {
+            minimum: 110,
+            spelling: "in",
+        },
         Tok::Punct(punct) => match infix(punct) {
             Some((prec, right)) => Side::Operand {
                 minimum: if right { prec + 1 } else { prec },
@@ -305,9 +359,8 @@ fn open_conditional(toks: &[Tok]) -> bool {
     for tok in toks[..toks.len() - 1].iter().rev() {
         match tok {
             Tok::Close(_) => depth += 1,
-            Tok::Open(_) if depth == 0 => break,
+            Tok::Open(_) | Tok::Punct(";" | ",") if depth == 0 => break,
             Tok::Open(_) => depth -= 1,
-            Tok::Punct(";" | ",") if depth == 0 => break,
             Tok::Punct("?") if depth == 0 => open += 1,
             Tok::Punct(":") if depth == 0 => open -= 1,
             _ => {}
@@ -324,10 +377,11 @@ fn declares(toks: &[Tok]) -> bool {
         match tok {
             Tok::Close(_) => depth += 1,
             Tok::Open('(') if depth == 0 => return true,
-            Tok::Open(_) if depth == 0 => return false,
+            Tok::Open(_) | Tok::Punct(";") if depth == 0 => return false,
             Tok::Open(_) => depth -= 1,
-            Tok::Punct(";") if depth == 0 => return false,
-            Tok::Word(word) if depth == 0 && matches!(word.as_str(), "const" | "let" | "var" | "using") => {
+            Tok::Word(word)
+                if depth == 0 && matches!(word.as_str(), "const" | "let" | "var" | "using") =>
+            {
                 return true;
             }
             _ => {}
@@ -424,11 +478,20 @@ fn closes_at_end(text: &str) -> bool {
 /// Wrap each span of `text` that [`needs_group`] says so. `spans` are
 /// byte ranges, possibly overlapping or out of order; the wrapped text and
 /// the spans moved with it come back.
-pub(crate) fn group_spans(text: &str, spans: &[(usize, usize)], eligible: impl Fn(&str) -> bool) -> (String, Vec<(usize, usize)>) {
+pub(crate) fn group_spans(
+    text: &str,
+    spans: &[(usize, usize)],
+    eligible: impl Fn(&str) -> bool,
+) -> (String, Vec<(usize, usize)>) {
     let mut wrap: Vec<(usize, usize)> = spans
         .iter()
         .copied()
-        .filter(|&(from, to)| from < to && to <= text.len() && text.is_char_boundary(from) && text.is_char_boundary(to))
+        .filter(|&(from, to)| {
+            from < to
+                && to <= text.len()
+                && text.is_char_boundary(from)
+                && text.is_char_boundary(to)
+        })
         .filter(|&(from, to)| eligible(text[from..to].trim()))
         .filter(|&(from, to)| needs_group(&text[..from], &text[from..to], &text[to..], true))
         .collect();
