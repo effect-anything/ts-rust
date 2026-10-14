@@ -36,17 +36,6 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 
-# Profile for the shipped tsc-ext bin and its Node addon (tsc-ext.node):
-# `cargo build --profile ext -p ts_ext_syntax --bin tsc-ext --lib`.
-# Fat LTO with one codegen unit and stripped symbols. On darwin-arm64,
-# against the release profile: tsc-ext 29.4 -> 22.2 MB, tsc-ext.node
-# 28.5 -> 23.0 MB, startup about 12% faster, transform time the same.
-[profile.ext]
-inherits = "release"
-lto = "fat"
-codegen-units = 1
-strip = "symbols"
-
 # Size profile for the wasm build (crates/ts_wasm, scripts/wasm/build.sh):
 # `cargo build --profile wasm --target wasm32-wasip1`. wasm cannot unwind,
 # so panics abort. Panic messages stay.
