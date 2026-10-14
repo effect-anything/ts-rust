@@ -135,8 +135,12 @@ fn every_command_has_help() {
         let again = Command::new(BIN).args(["help", command]).output().unwrap();
         assert_eq!(String::from_utf8(again.stdout).unwrap(), text);
     }
-    let out = Command::new(BIN).args(["frobnicate"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(2));
+    for unknown in ["frobnicate", "sweetener"] {
+        let out = Command::new(BIN).args([unknown, "--expand", "a.sts"]).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{unknown}");
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(stderr.starts_with(&format!("tsc-ext: unknown command {unknown}")), "{stderr}");
+    }
     let out = Command::new(BIN)
         .args(["explain", "SWR9999"])
         .output()

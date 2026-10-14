@@ -268,10 +268,6 @@ pub fn run(args: &[String]) -> u8 {
         "eval" => with(command, rest, EVAL_FLAGS, expand::eval),
         "explain" => with(command, rest, DOC_FLAGS, explain),
         "cheatsheet" => with(command, rest, DOC_FLAGS, cheatsheet),
-        "sweetener" => usage_error(
-            "sweetener",
-            "`tsc-ext sweetener --expand <file>` was replaced by `tsc-ext expand <file>`",
-        ),
         other => {
             eprintln!("tsc-ext: unknown command {other}\n\n{HELP}");
             EXIT_USAGE
