@@ -14,9 +14,9 @@
 //! Three readers share this module, so they see the same values:
 //!
 //! - the content mapper (`tsc-ext` with no arguments): `tsc` sends the
-//!   entry's `options` with `openProject`, already parsed; `plugin` builds
-//!   under them, `transform` (the check view) has no option that changes it;
-//! - `tsc-ext sweetener --expand`: `--tsconfig`, else the nearest
+//!   entry's `options` with `openProject`, already parsed; `transform` (the
+//!   check view) has no option that changes it;
+//! - `tsc-ext expand` and `eval`: `--tsconfig`, else the nearest
 //!   `tsconfig.json` above the file;
 //! - the Node API (`Transformer`): its `tsconfig` option, else the nearest
 //!   `tsconfig.json` above each file. Explicit API options override single

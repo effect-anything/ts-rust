@@ -43,13 +43,13 @@ above a file (JSONC; a relative `extends` is followed when the config has no `co
 **Options shape the build output only; the check treats files as TypeScript.** This is the
 design, not a gap.
 
-One pipeline turns the options into output (`TransformSession::from_options`): the Node API, the
-mapper's `plugin` method and `sweetener --expand --build` print the same bundler text for the same
-options (`tests/options_parity.rs`). The mapper's `transform` (what `tsc` type-checks) and plain
-`sweetener --expand` are the check view: Sweetener only. No current option changes it: `tsc` keeps
-the author's operators in `"use gpu"` code and does not emit `.sts` files, so `typegpu.*` and
-`sweetener.rewriteImports` only shape runtime JavaScript.
-- `tsc-ext sweetener --expand` reads `--tsconfig`, else the nearest tsconfig.json.
+One pipeline turns the options into output (`TransformSession::from_options`): the Node API
+`Transformer`, the Node API `Project` and `tsc-ext expand --stage bundle` print the same bundler
+text for the same options (`tests/options_parity.rs`). The mapper's `transform` (what `tsc`
+type-checks) and `tsc-ext expand` (stage `tsc`, the default) are the check view: Sweetener only.
+No current option changes it: `tsc` keeps the author's operators in `"use gpu"` code and does not
+emit `.sts` files, so `typegpu.*` and `sweetener.rewriteImports` only shape runtime JavaScript.
+- `tsc-ext expand` and `eval` read `--tsconfig`, else the nearest tsconfig.json.
 - `Transformer` reads its `tsconfig` option, else the nearest tsconfig.json of each file
   (`tsconfig: false` reads none). Explicit options override single fields.
 
@@ -57,16 +57,40 @@ the author's operators in `"use gpu"` code and does not emit `.sts` files, so `t
 
 ```
 tsc-ext                       content mapper on stdin/stdout (started by tsc)
-tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map] [--build]
-tsc-ext help
+tsc-ext expand <file>...      what a file becomes, with its diagnostics
+tsc-ext eval [code|-]         the same for code given inline or on stdin
+tsc-ext explain <SWRcode>     what a diagnostic means and how to fix it
+tsc-ext cheatsheet [topic]    syntax quick reference, options, diagnostics
+tsc-ext help [command]        help; every command also takes --help
 ```
 
-`sweetener --expand` prints the text `tsc` type-checks (Sweetener expansion, check phase) to
-stdout. Diagnostics go to stderr as `file(line,col): error SWRxxxx: message` (warnings as
-`warning`), related locations indented below; an error exits 1. `--map` appends the v3 source map
-as an inline `//# sourceMappingURL=data:application/json;base64,...` comment, so stdout stays one
-file that tools and browsers read. `--build` prints the bundler output instead (the
-`Transformer` result under the tsconfig's options).
+`expand` prints the text of a stage to stdout: `--stage tsc` (default) is what `tsc` type-checks
+(Sweetener expansion, check phase); `--stage bundle` is the bundler output (the `Transformer`
+result under the tsconfig's options: Sweetener, then tsover, then the TypeGPU wrap). `--only
+sweetener|typegpu|tsover` runs one pass. Diagnostics go to stderr with a code frame, related
+locations and a `tsc-ext explain` hint (`--format tsc` prints `file(line,col): error SWRxxxx:
+message` instead). `--trace` prints every macro use, each rule tried, where and why it stopped,
+and the replacement. `--diff` prints a unified diff from input to output, `--json` one object
+per file, `--map[=file]` the v3 source map (inline by default, so stdout stays one file that tools
+and browsers read). Exit codes: 0 ok (warnings allowed), 1 error diagnostics, 2 usage, 3 I/O or
+config. `eval` takes the same flags plus `--jsx`, `--lang ts|tsx` and `--as <path>`.
+
+```
+$ tsc-ext expand src/step.sts --trace
+trace: src/step.sts (stage tsc)
+  1. 6:1 unless `unless done work(); …`
+       ✗ rule 1/2 (line 3) stopped at 6:8 `done`, expected `( ... )`
+       ✗ rule 2/2 (line 4) stopped at 6:13 `work`, expected `then`
+src/step.sts:6:13: error SWR4001: No rule for macro unless accepted this input: 2 rule attempt(s).
+  ...
+  help: tsc-ext explain SWR4001
+```
+
+The cheatsheet, the options reference and the diagnostics catalog are built into the binary
+(`ext/docs/{cheatsheet,options,diagnostics}.md`; `--raw` prints the Markdown).
+`ext/docs/diagnostics.md` is generated from `ts_ext_sweetener::catalog`
+(`TSC_EXT_UPDATE=1 cargo test -p ts_ext_sweetener --test catalog`). Command snapshots are in
+`tests/fixtures` (`TSC_EXT_UPDATE=1 cargo test -p ts_ext_syntax --test cli_snapshots`).
 
 `tsc` starts the mapper from the package's `typescript.contentMapper.exec` (`./bin/tsc-ext`), run
 in the package directory. When the platform package `@effect-x/tsc-<platform>-<arch>` is
@@ -95,7 +119,7 @@ unchanged file gets the identity map and composes through it, so a composed map 
 original path. `errors` and `warnings` split `diagnostics` (warnings: every non-error category).
 
 `.sjs` and `.sjsx` (Sweetener over JavaScript) are not supported. `transform` throws, `tsc-ext
-sweetener --expand` exits 1, and the content mapper answers `transform` with an error.
+expand` exits 1, and the content mapper answers `transform` with an error.
 
 Build the addon here (development):
 

@@ -66,9 +66,12 @@ Register the content mapper in tsconfig.json and run `tsc --runExternalCode`:
                      "options": { "typegpu": { "autoNaming": true } } }]
 ```
 
-- `tsc-ext sweetener --expand <file> [--tsconfig <path>] [--map] [--build]` prints the expansion
-  (`--build`: the bundler output, as the Node API returns it); diagnostics
-  go to stderr.
+- `tsc-ext expand <file>` prints what tsc type-checks; `--stage bundle` prints the bundler output,
+  as the Node API returns it. `--trace` shows why each macro rule matched or not, `--diff` the
+  change, `--json` a machine-readable result. Diagnostics go to stderr with a code frame.
+- `tsc-ext eval 'code'` (or stdin) does the same for a snippet; `tsc-ext explain SWR4001` explains a
+  diagnostic; `tsc-ext cheatsheet [topic]` is the syntax and options reference. Every command
+  takes `--help`. Exit codes: 0 ok, 1 errors, 2 usage, 3 I/O or config.
 - `import { Transformer, formatDiagnostics } from "@effect-x/tsc/ext"` for bundler plugins:
   `new Transformer().transform(code, path)` returns `{ code, hostPath, dependencies, diagnostics, errors,
   warnings, map, changed, composeMap }`. The options are the tsconfig's, explicit ones override them.
