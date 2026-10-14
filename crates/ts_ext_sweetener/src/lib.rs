@@ -8,7 +8,6 @@ pub mod catalog;
 pub mod structure;
 
 mod sweetener;
-mod sweetener_apps;
 mod sweetener_budget;
 mod sweetener_cache;
 mod sweetener_context;

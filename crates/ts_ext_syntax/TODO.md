@@ -43,9 +43,9 @@ Found while adding Effect atom macros to `ext/examples/vite`. The form pass runs
 
 The token walk should not know Effect, signals, or React. What it still does:
 
-- `sweetener_apps.rs` `expand_apps` still matches `error`, `effect name()`, `handle`, and `gen` by keyword. `query`, `table`, and `memoized` expand through the imported macro. `service` does too: a macro that says `Context.Service` is the one that runs.
+- No keyword forms remain: `error`, `effect name()`, `handle`, and `gen` run only as imported macros (`sweetener_apps.rs` is gone). `query`, `table`, and `memoized` expand through the imported macro. `service` does too: a macro that says `Context.Service` is the one that runs.
 - `sweetener_forms.rs` no longer switches on `useState`, `latestRef`, or `shadows core`. `state` and `effect { ... }` are the imported macro.
-- `match_runtime_import` still prefixes `import { c as _c } from "react/compiler-runtime"` when the file is the React compiler fixture and the macro module's import was not copied. The fixture itself expands through `emitCompilerFixture`.
+- The React compiler-runtime import is no longer injected; it comes from the macro module's runtime imports. The fixture itself expands through `emitCompilerFixture`.
 
 ### Not implemented, so some macros cannot be written
 
