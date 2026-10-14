@@ -23,7 +23,7 @@ function findTsconfig(dir) {
 }
 
 export const unplugin = createUnplugin((options = {}, meta) => {
-  const { tsconfig, ...categories } = options;
+  const { tsconfig, stripTypes = true, ...categories } = options;
   let root = process.cwd();
   let project;
   let viteConfig;
@@ -110,7 +110,7 @@ export const unplugin = createUnplugin((options = {}, meta) => {
       // with Vite's own oxc options (JSX runtime, refresh) and lang ts/tsx.
       async transform(code, id) {
         const file = strip(id);
-        if (!SWEET.test(file) || viteConfig?.oxc === false) return null;
+        if (!stripTypes || !SWEET.test(file) || viteConfig?.oxc === false) return null;
         // The app's vite, not one next to this package.
         const vitePath = createRequire(path.join(viteConfig.root, "package.json")).resolve("vite");
         const { transformWithOxc } = await import(pathToFileURL(vitePath).href);

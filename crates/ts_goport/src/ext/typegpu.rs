@@ -3419,12 +3419,17 @@ fn transpile_block(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
 }
 
 fn transpile_expr(node: Node, code: &str, ctx: &mut TinyCtx) -> String {
+    // Type-only wrappers (`x!`, `x as T`, `<T>x`, `x satisfies T`, `f<T>`)
+    // are erased: upstream sees the stripped JavaScript.
     let mut node = unwrap_parens(node);
-    if matches!(
+    while matches!(
         node.kind(),
         SyntaxKind::AsExpression
             | SyntaxKind::SatisfiesExpression
             | SyntaxKind::TypeAssertionExpression
+            | SyntaxKind::NonNullExpression
+            | SyntaxKind::ExpressionWithTypeArguments
+            | SyntaxKind::ParenthesizedExpression
     ) {
         node = node.expression();
     }
@@ -3854,6 +3859,22 @@ mod tests {
         let code = "\"use strict\";\nimport tgpu from 'typegpu';\nconst f = () => {\n    'use gpu';\n    return 1 + 2;\n};\n";
         let out = embed_metadata_js("a.js", code);
         assert!(out.starts_with("\"use strict\";"), "{out}");
+    }
+
+    #[test]
+    fn type_only_wrappers_are_erased_in_tgsl() {
+        let ts = "import tgpu from 'typegpu';\nconst f = (a: number[] | undefined) => {\n    'use gpu';\n    return (a! as number[])[0]! satisfies number;\n};\n";
+        let js = "import tgpu from 'typegpu';\nconst f = (a) => {\n    'use gpu';\n    return (a)[0];\n};\n";
+        let from_ts = embed_metadata_js("a.ts", ts);
+        let from_js = embed_metadata_js("a.js", js);
+        let ast = |out: &str| {
+            out[out.find("ast:").expect(out)..]
+                .split("externals")
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(ast(&from_ts), ast(&from_js), "{from_ts}");
     }
 
     #[test]

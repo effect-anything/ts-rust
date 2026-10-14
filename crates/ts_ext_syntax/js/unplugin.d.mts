@@ -4,6 +4,13 @@ import type { TransformOptions } from "./index.cjs";
 export interface PluginOptions extends TransformOptions {
   /** tsconfig.json of the project. Default: the nearest one at or above the bundler root. */
   tsconfig?: string;
+  /**
+   * Vite: strip `.sts`/`.stsx` to JavaScript with Vite's oxc options (vite:oxc
+   * itself skips unknown extensions). `false` when a later plugin compiles
+   * the TS/TSX itself (it gets the code with `moduleType` "ts"/"tsx").
+   * Default `true`.
+   */
+  stripTypes?: boolean;
 }
 
 /**
