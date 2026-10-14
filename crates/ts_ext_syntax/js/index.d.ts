@@ -117,6 +117,57 @@ export declare class Transformer {
   transformFile(path: string, options?: TransformerOptions): Result;
 }
 
+export interface ProjectOptions extends TransformOptions {
+  /** The tsconfig.json whose root files the project owns. */
+  tsconfig: string;
+}
+
+export interface FileResult {
+  path: string;
+  /** TypeScript/TSX (or JS/JSX) for the bundler's TS strip. */
+  code: string;
+  /** `code` → `path`, exact per token. Always present. */
+  map: SourceMapV3;
+  /** `.sts`/`.ts` → "ts", `.stsx`/`.tsx` → "tsx", `.js` → "js", `.jsx` → "jsx". */
+  moduleType: "ts" | "tsx" | "js" | "jsx";
+  hostPath: string;
+  changed: boolean;
+  /** Files the result depends on (macro modules). Watch them. */
+  dependencies: string[];
+  diagnostics: Diagnostic[];
+  errors: Diagnostic[];
+  warnings: Diagnostic[];
+}
+
+/**
+ * The program-level rewriter for one tsconfig: owns its root files (from
+ * `include`/`files`, without node_modules and declarations) and serves the
+ * rewritten text. Projects opened on the same tsconfig and options share one
+ * cache.
+ */
+export declare class Project {
+  static open(options: ProjectOptions): Project;
+  readonly tsconfig: string;
+  /** Content-mapper extensions the project owns (".sts", ".stsx"). */
+  readonly extensions: string[];
+  /** tsconfig diagnostics, as text. */
+  readonly configErrors: string[];
+  owns(path: string): boolean;
+  files(): string[];
+  /** `text` overrides the file on disk (an editor buffer). Cached by content. */
+  getFile(path: string, text?: string): FileResult;
+  /** As getFile, off the JS thread. */
+  getFileAsync(path: string, text?: string): Promise<FileResult>;
+  /**
+   * `path` changed, was created or deleted. Returns the owned files whose
+   * output may change (the file itself, its dependents; all files for a
+   * tsconfig change).
+   */
+  invalidate(path: string): string[];
+  dispose(): void;
+  [Symbol.dispose](): void;
+}
+
 /**
  * Diagnostics as text, one per line:
  * `file(line,column): category SWRcode: message`, related locations indented.

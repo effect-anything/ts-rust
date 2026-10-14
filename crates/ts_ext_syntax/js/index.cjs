@@ -83,6 +83,92 @@ function makeResult(raw, source, path) {
   };
 }
 
+/** Explicit options as JSON for the native side, or undefined. */
+function projectOptions(options) {
+  const { tsconfig, ...rest } = options ?? {};
+  for (const key of Object.keys(rest)) {
+    if (!CATEGORIES.includes(key)) throw new TypeError(`Project: unknown option '${key}'`);
+  }
+  return Object.keys(rest).length ? JSON.stringify(mergeOptions(undefined, rest)) : undefined;
+}
+
+function fileResult(raw, path) {
+  const { spans, ...fields } = raw;
+  return {
+    path,
+    code: fields.code,
+    map: fields.map,
+    moduleType: fields.moduleType,
+    hostPath: fields.hostPath,
+    changed: fields.changed,
+    dependencies: fields.dependencies,
+    diagnostics: fields.diagnostics,
+    errors: fields.diagnostics.filter((item) => item.category === "error"),
+    warnings: fields.diagnostics.filter((item) => item.category !== "error"),
+  };
+}
+
+class Project {
+  #id;
+  #info;
+
+  constructor(id, info) {
+    this.#id = id;
+    this.#info = info;
+  }
+
+  static open(options) {
+    if (typeof options?.tsconfig !== "string") throw new TypeError("Project.open: tsconfig must be a path");
+    const info = JSON.parse(binding().projectOpen(options.tsconfig, projectOptions(options)));
+    return new Project(info.id, info);
+  }
+
+  get tsconfig() {
+    return this.#info.tsconfig;
+  }
+  get extensions() {
+    return this.#info.extensions;
+  }
+  get configErrors() {
+    return this.#info.configErrors;
+  }
+
+  #handle() {
+    if (this.#id === undefined) throw new Error("Project is disposed");
+    return this.#id;
+  }
+
+  owns(path) {
+    return binding().projectOwns(this.#handle(), path);
+  }
+
+  files() {
+    return binding().projectFiles(this.#handle());
+  }
+
+  getFile(path, text) {
+    return fileResult(JSON.parse(binding().projectGetFile(this.#handle(), path, text)), path);
+  }
+
+  async getFileAsync(path, text) {
+    return fileResult(JSON.parse(await binding().projectGetFileAsync(this.#handle(), path, text)), path);
+  }
+
+  invalidate(path) {
+    return binding().projectInvalidate(this.#handle(), path);
+  }
+
+  dispose() {
+    if (this.#id === undefined) return;
+    binding().projectDispose(this.#id);
+    this.#id = undefined;
+  }
+
+  [Symbol.dispose]() {
+    this.dispose();
+  }
+}
+
 /** `file(line,column): category SWRcode: message`, related locations indented. */
 function formatDiagnostics(diagnostics) {
   const lines = [];
@@ -97,4 +183,5 @@ function formatDiagnostics(diagnostics) {
 }
 
 exports.Transformer = Transformer;
+exports.Project = Project;
 exports.formatDiagnostics = formatDiagnostics;

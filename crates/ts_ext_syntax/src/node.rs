@@ -8,8 +8,8 @@
 use napi_derive::napi;
 use serde_json::{Value, json};
 
+use crate::TransformSession;
 use crate::config::{self, Options};
-use crate::{SessionDiagnostic, TransformSession};
 
 fn error(message: impl Into<String>) -> napi::Error {
     napi::Error::from_reason(message.into())
@@ -49,100 +49,6 @@ fn options_for(
     ))
 }
 
-/// `a.sts` → `a.ts`, `a.stsx` → `a.tsx`; any other path is unchanged.
-#[must_use]
-pub fn host_path(path: &str, extension: &str) -> String {
-    for suffix in [".stsx", ".sts"] {
-        if let Some(stem) = path.strip_suffix(suffix) {
-            return format!("{stem}{extension}");
-        }
-    }
-    path.to_owned()
-}
-
-/// Line starts of `text`, for 1-based line and UTF-16 column lookups.
-pub(crate) struct Positions<'a> {
-    text: &'a str,
-    starts: Vec<usize>,
-}
-
-impl<'a> Positions<'a> {
-    pub(crate) fn new(text: &'a str) -> Self {
-        let mut starts = vec![0];
-        starts.extend(text.match_indices('\n').map(|(at, _)| at + 1));
-        Self { text, starts }
-    }
-
-    fn floor(&self, at: usize) -> usize {
-        let mut at = at.min(self.text.len());
-        while !self.text.is_char_boundary(at) {
-            at -= 1;
-        }
-        at
-    }
-
-    /// 1-based line and 1-based UTF-16 column of byte `at`.
-    pub(crate) fn line_column(&self, at: usize) -> (usize, usize) {
-        let at = self.floor(at);
-        let line = self.starts.partition_point(|&start| start <= at) - 1;
-        let column = self.text[self.starts[line]..at].encode_utf16().count();
-        (line + 1, column + 1)
-    }
-
-    /// UTF-16 offset of byte `at` (JavaScript string index).
-    fn utf16(&self, at: usize) -> usize {
-        self.text[..self.floor(at)].encode_utf16().count()
-    }
-}
-
-/// `SWR4025: text` → (4025, "text"). A message with no code is code 0.
-#[must_use]
-pub fn split_code(message: &str) -> (u32, &str) {
-    for prefix in ["SWR", "TS"] {
-        if let Some(rest) = message.strip_prefix(prefix) {
-            let digits = rest.chars().take_while(char::is_ascii_digit).count();
-            if digits > 0
-                && let Ok(code) = rest[..digits].parse()
-            {
-                let text = rest[digits..].strip_prefix(':').unwrap_or(&rest[digits..]);
-                return (code, text.trim_start());
-            }
-        }
-    }
-    (0, message)
-}
-
-fn diagnostic_json(path: &str, positions: &Positions<'_>, item: &SessionDiagnostic) -> Value {
-    let (code, message) = split_code(&item.message);
-    let (line, column) = positions.line_column(item.start as usize);
-    let related: Vec<Value> = item
-        .related
-        .iter()
-        .map(|related| {
-            let (line, column) = positions.line_column(related.start as usize);
-            json!({
-                "message": related.message,
-                "file": path,
-                "line": line,
-                "column": column,
-                "start": positions.utf16(related.start as usize),
-                "end": positions.utf16(related.end as usize),
-            })
-        })
-        .collect();
-    json!({
-        "code": code,
-        "category": item.severity.as_str(),
-        "message": message,
-        "file": path,
-        "line": line,
-        "column": column,
-        "start": positions.utf16(item.start as usize),
-        "end": positions.utf16(item.end as usize),
-        "related": related,
-    })
-}
-
 /// Transform one file. Answers a JSON object: `code`, `hostPath`,
 /// `dependencies`, `diagnostics`, `map` (v3; the identity map when
 /// unchanged), `changed`, `spans` (span-map tuples for `composeNative`; one
@@ -171,39 +77,169 @@ pub fn transform_native(
         options.as_deref(),
     )?;
     let result = TransformSession::from_options(&options).transform(&path, &code);
-    let positions = Positions::new(&code);
-    let diagnostics: Vec<Value> = result
-        .diagnostics
-        .iter()
-        .map(|item| diagnostic_json(&path, &positions, item))
-        .collect();
-    // Unchanged: one verbatim span, so `map` is the identity map and
-    // `composeMap` renames the later map's source to `path` like any other.
-    let (source_map, spans) = if result.changed {
-        (result.source_map.clone(), result.mappings.clone())
-    } else {
-        let len = i32::try_from(code.len()).map_err(|err| error(err.to_string()))?;
-        let identity = [(0, len, 0, len, 0)];
-        (
-            crate::v3_source_map(&path, &code, &code, &identity),
-            crate::session::mappings_json(&identity),
-        )
+    Ok(
+        crate::answer::result_json(&path, &code, &result, config.as_deref())
+            .map_err(error)?
+            .to_string(),
+    )
+}
+
+// ---- Project -------------------------------------------------------------
+
+type Handles = std::sync::Mutex<
+    std::collections::HashMap<u32, (std::sync::Arc<crate::project::Project>, String)>,
+>;
+
+fn handles() -> &'static Handles {
+    static HANDLES: std::sync::OnceLock<Handles> = std::sync::OnceLock::new();
+    HANDLES.get_or_init(Default::default)
+}
+
+fn handle(id: u32) -> napi::Result<std::sync::Arc<crate::project::Project>> {
+    handles()
+        .lock()
+        .map_err(|err| error(err.to_string()))?
+        .get(&id)
+        .map(|(project, _)| project.clone())
+        .ok_or_else(|| error(format!("Project {id} is disposed")))
+}
+
+/// Open (or join) the project of `tsconfig` under `options` (JSON). Answers
+/// `{ id, tsconfig, files, extensions, configErrors }`.
+///
+/// # Errors
+/// Invalid options, or a tsconfig that cannot be read.
+#[napi(js_name = "projectOpen")]
+#[allow(clippy::needless_pass_by_value)] // napi passes owned strings
+pub fn project_open(tsconfig: String, options: Option<String>) -> napi::Result<String> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    let key = options.clone().unwrap_or_else(|| "{}".to_owned());
+    let explicit = match options.as_deref() {
+        Some(text) => {
+            let value: Value = serde_json::from_str(text).map_err(|err| error(err.to_string()))?;
+            let (options, errors) = Options::from_json(&value);
+            if let Some(first) = errors.first() {
+                return Err(error(format!("Project {first}")));
+            }
+            options
+        }
+        None => Options::default(),
     };
-    let mut map: Value = serde_json::from_str(&source_map).map_err(|err| error(err.to_string()))?;
-    if let Some(object) = map.as_object_mut() {
-        object.remove("segments");
+    let project =
+        crate::project::open(std::path::Path::new(&tsconfig), explicit, &key).map_err(error)?;
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let answer = json!({
+        "id": id,
+        "tsconfig": project.tsconfig,
+        "files": project.files(),
+        "extensions": project.extensions(),
+        "configErrors": project.config_errors(),
+    });
+    handles()
+        .lock()
+        .map_err(|err| error(err.to_string()))?
+        .insert(id, (project, key));
+    Ok(answer.to_string())
+}
+
+/// Whether `path` is a root file of project `id`.
+///
+/// # Errors
+/// A disposed project.
+#[napi(js_name = "projectOwns")]
+#[allow(clippy::needless_pass_by_value)]
+pub fn project_owns(id: u32, path: String) -> napi::Result<bool> {
+    Ok(handle(id)?.owns(&path))
+}
+
+/// The owned files of project `id`.
+///
+/// # Errors
+/// A disposed project.
+#[napi(js_name = "projectFiles")]
+pub fn project_files(id: u32) -> napi::Result<Vec<String>> {
+    Ok(handle(id)?.files())
+}
+
+/// The rewrite of `path` (JSON; `transformNative`'s shape plus `moduleType`).
+///
+/// # Errors
+/// A disposed project, a file it does not own, or an unreadable file.
+#[napi(js_name = "projectGetFile")]
+#[allow(clippy::needless_pass_by_value)]
+pub fn project_get_file(id: u32, path: String, text: Option<String>) -> napi::Result<String> {
+    let project = handle(id)?;
+    project
+        .get_file(&path, text)
+        .map(|json| json.as_ref().clone())
+        .map_err(error)
+}
+
+/// [`project_get_file`] on a worker thread.
+pub struct GetFileTask {
+    project: std::sync::Arc<crate::project::Project>,
+    path: String,
+    text: Option<String>,
+}
+
+impl napi::Task for GetFileTask {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> napi::Result<String> {
+        self.project
+            .get_file(&self.path, self.text.take())
+            .map(|json| json.as_ref().clone())
+            .map_err(error)
     }
-    Ok(json!({
-        "code": result.code,
-        "hostPath": host_path(&path, result.extension),
-        "dependencies": result.dependencies,
-        "diagnostics": diagnostics,
-        "map": map,
-        "changed": result.changed,
-        "spans": spans,
-        "tsconfig": config,
-    })
-    .to_string())
+
+    fn resolve(&mut self, _env: napi::Env, output: String) -> napi::Result<String> {
+        Ok(output)
+    }
+}
+
+/// [`project_get_file`] off the main thread: a promise of the JSON answer.
+///
+/// # Errors
+/// A disposed project.
+#[napi(js_name = "projectGetFileAsync")]
+pub fn project_get_file_async(
+    id: u32,
+    path: String,
+    text: Option<String>,
+) -> napi::Result<napi::bindgen_prelude::AsyncTask<GetFileTask>> {
+    Ok(napi::bindgen_prelude::AsyncTask::new(GetFileTask {
+        project: handle(id)?,
+        path,
+        text,
+    }))
+}
+
+/// `path` changed: the owned files to load again.
+///
+/// # Errors
+/// A disposed project, or a tsconfig that can no longer be read.
+#[napi(js_name = "projectInvalidate")]
+#[allow(clippy::needless_pass_by_value)]
+pub fn project_invalidate(id: u32, path: String) -> napi::Result<Vec<String>> {
+    handle(id)?.invalidate(&path).map_err(error)
+}
+
+/// Drop handle `id`. The project closes with its last handle.
+///
+/// # Errors
+/// Never; a second dispose is a no-op.
+#[napi(js_name = "projectDispose")]
+pub fn project_dispose(id: u32) -> napi::Result<()> {
+    let removed = handles()
+        .lock()
+        .map_err(|err| error(err.to_string()))?
+        .remove(&id);
+    if let Some((project, key)) = removed {
+        crate::project::close(&project, &key);
+    }
+    Ok(())
 }
 
 /// `later` (a v3 map, JSON) of a transform of `code`, composed onto the
@@ -226,21 +262,4 @@ pub fn compose_native(
     let map = crate::compose::compose(&path, &host_path, &source, &code, &spans, &later)
         .map_err(error)?;
     Ok(map.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Positions, host_path, split_code};
-
-    #[test]
-    fn codes_paths_and_positions() {
-        assert_eq!(split_code("SWR4025: unread"), (4025, "unread"));
-        assert_eq!(split_code("plain"), (0, "plain"));
-        assert_eq!(host_path("/a/b.stsx", ".tsx"), "/a/b.tsx");
-        assert_eq!(host_path("/a/b.ts", ".ts"), "/a/b.ts");
-        let positions = Positions::new("é\nab😀c");
-        assert_eq!(positions.line_column(3), (2, 1));
-        assert_eq!(positions.line_column(9), (2, 5));
-        assert_eq!(positions.utf16(9), 6);
-    }
 }

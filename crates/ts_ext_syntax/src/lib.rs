@@ -21,6 +21,7 @@ pub use ts_ext_typegpu::structure;
 pub mod compose;
 pub mod config;
 pub mod prewarm;
+pub mod project;
 pub mod protocol;
 pub use session::{
     SessionDiagnostic, TransformSession, Transformed, unsupported_source, v3_source_map,
@@ -29,3 +30,4 @@ pub use session::{
 // napi-derive registers the exports outside `cfg(test)` only.
 #[cfg_attr(test, allow(dead_code))]
 mod node;
+pub mod answer;
