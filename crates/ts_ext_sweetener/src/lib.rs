@@ -4,6 +4,7 @@
 //! calls [`expand`], then `ts_ext_typegpu`. Cases, `cases.jsonl`, and the
 //! discover/sync tools live in this crate. One directory is one program.
 
+pub mod catalog;
 pub mod structure;
 
 mod sweetener;
