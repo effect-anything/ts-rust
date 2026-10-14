@@ -10,9 +10,11 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::fmt::Write as _;
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::ExitCode;
 
+use serde_json::Value;
 use ts_ext_syntax::cli;
 use ts_ext_syntax::config::{self, Options};
 use ts_ext_syntax::protocol::{self, TransformResponse};
@@ -56,22 +58,22 @@ fn serve() -> ExitCode {
 }
 
 fn handle(message: &str, projects: &mut Projects) -> String {
-    let method = json_string(message, "method").unwrap_or_default();
-    let id = json_raw(message, "id");
-    let params = json_object(message, "params");
-    let result = match method.as_str() {
+    let Ok(message) = serde_json::from_str::<Value>(message) else {
+        return error_response(None, -32700, "parse error: the message is not JSON");
+    };
+    let method = message["method"].as_str().unwrap_or_default();
+    let id = message.get("id").map(Value::to_string);
+    let params = &message["params"];
+    let text = |key: &str| params[key].as_str().unwrap_or_default();
+    let result = match method {
         "initialize" => r#"{"positionEncoding":"utf-8","diagnosticSource":"tsc-ext"}"#.to_owned(),
         "openProject" => {
             // Expand the project's files in the background so the first
             // transforms (and the first hover) find them in the memo.
-            let config = json_string(&params, "configFileName").unwrap_or_default();
-            let handle = json_string(&params, "projectHandle").unwrap_or_default();
-            let options = json_raw(&params, "options")
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                .unwrap_or(serde_json::Value::Null);
-            let (options, errors) = Options::from_json(&options);
-            projects.insert(handle, options);
-            let _ = ts_ext_syntax::prewarm::prewarm_in_background(&config);
+            let config = text("configFileName");
+            let (options, errors) = Options::from_json(&params["options"]);
+            projects.insert(text("projectHandle").to_owned(), options);
+            let _ = ts_ext_syntax::prewarm::prewarm_in_background(config);
             let diagnostics: Vec<String> = errors
                 .iter()
                 .map(|error| {
@@ -94,18 +96,15 @@ fn handle(message: &str, projects: &mut Projects) -> String {
             }
         }
         "closeProject" => {
-            if let Some(handle) = json_string(&params, "projectHandle") {
-                projects.remove(&handle);
-            }
+            projects.remove(text("projectHandle"));
             "{}".to_owned()
         }
         "transform" => {
-            let file_name = json_string(&params, "fileName").unwrap_or_default();
-            if let Some(message) = ts_ext_syntax::unsupported_source(&file_name) {
+            let file_name = text("fileName");
+            if let Some(message) = ts_ext_syntax::unsupported_source(file_name) {
                 return error_response(id.as_deref(), -32602, &message);
             }
-            let content = json_string(&params, "content").unwrap_or_default();
-            encode_transform(&protocol::transform_file(&file_name, &content))
+            encode_transform(&protocol::transform_file(file_name, text("content")))
         }
         _ => {
             return error_response(id.as_deref(), -32601, &format!("unknown method {method}"));
@@ -136,7 +135,8 @@ fn encode_transform(response: &TransformResponse) -> String {
                 )
             })
             .collect();
-        diagnostics.push_str(&format!(
+        let _ = write!(
+            diagnostics,
             r#"{{"messageText":{},"start":{},"length":{},"code":{},"category":{},"relatedInformation":[{}]}}"#,
             json_encode(&diagnostic.message_text),
             diagnostic.start,
@@ -144,7 +144,7 @@ fn encode_transform(response: &TransformResponse) -> String {
             diagnostic.code,
             diagnostic.category,
             related.join(","),
-        ));
+        );
     }
     diagnostics.push(']');
     let mappings = if response.mappings == "[]" {
@@ -226,125 +226,7 @@ fn write_message(output: &mut impl Write, body: &str) -> io::Result<()> {
     output.flush()
 }
 
-fn json_string(object: &str, key: &str) -> Option<String> {
-    let raw = json_raw(object, key)?;
-    if raw.starts_with('"') {
-        Some(json_decode(&raw))
-    } else {
-        None
-    }
-}
-
-fn json_object(object: &str, key: &str) -> String {
-    json_raw(object, key).unwrap_or_else(|| "{}".to_owned())
-}
-
-fn json_raw(object: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let start = object.find(&needle)? + needle.len();
-    let rest = object[start..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    Some(take_value(rest))
-}
-
-fn take_value(input: &str) -> String {
-    let bytes = input.as_bytes();
-    if bytes.first() == Some(&b'"') {
-        let mut escaped = false;
-        for (index, byte) in bytes.iter().enumerate().skip(1) {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if *byte == b'\\' {
-                escaped = true;
-                continue;
-            }
-            if *byte == b'"' {
-                return input[..=index].to_owned();
-            }
-        }
-        return input.to_owned();
-    }
-    if bytes.first() == Some(&b'{') || bytes.first() == Some(&b'[') {
-        let open = bytes[0];
-        let close = if open == b'{' { b'}' } else { b']' };
-        let mut depth = 0i32;
-        let mut in_string = false;
-        let mut escaped = false;
-        for (index, byte) in bytes.iter().enumerate() {
-            if in_string {
-                if escaped {
-                    escaped = false;
-                } else if *byte == b'\\' {
-                    escaped = true;
-                } else if *byte == b'"' {
-                    in_string = false;
-                }
-                continue;
-            }
-            match *byte {
-                b'"' => in_string = true,
-                value if value == open => depth += 1,
-                value if value == close => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return input[..=index].to_owned();
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    input
-        .split([',', '}'])
-        .next()
-        .unwrap_or(input)
-        .trim()
-        .to_owned()
-}
-
-fn json_decode(quoted: &str) -> String {
-    let inner = quoted.trim().trim_matches('"');
-    let mut out = String::new();
-    let mut chars = inner.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('u') => {
-                let hex = chars.by_ref().take(4).collect::<String>();
-                if let Ok(value) = u32::from_str_radix(&hex, 16)
-                    && let Some(decoded) = char::from_u32(value)
-                {
-                    out.push(decoded);
-                }
-            }
-            Some(other) => out.push(other),
-            None => {}
-        }
-    }
-    out
-}
-
+/// `value` as a JSON string literal.
 fn json_encode(value: &str) -> String {
-    let mut out = String::from("\"");
-    for ch in value.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ch if ch.is_control() => out.push_str(&format!("\\u{:04x}", u32::from(ch))),
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
+    Value::from(value).to_string()
 }
