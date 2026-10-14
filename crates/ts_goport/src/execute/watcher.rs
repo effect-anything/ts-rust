@@ -992,6 +992,9 @@ impl Watcher {
             });
         });
 
+        tfs.seen_files // PORT: ext: macro modules of mapped files
+            .borrow_mut()
+            .extend(crate::ext::mapper_deps::program_dependencies());
         let case_sensitive = self.sys.fs().use_case_sensitive_file_names();
         let cwd = self.sys.get_current_directory();
         let seen_slice: Vec<String> = tfs.seen_files.borrow().iter().cloned().collect();

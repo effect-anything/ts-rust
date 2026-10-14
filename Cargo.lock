@@ -874,6 +874,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "rustc-hash",
  "serde_json",
  "ts_ext_sweetener",
  "ts_ext_typegpu",

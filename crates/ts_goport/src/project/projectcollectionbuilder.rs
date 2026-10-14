@@ -2719,6 +2719,8 @@ impl ProjectCollectionBuilder {
                 }
 
                 *dirty_file_path.borrow_mut() = p.dirty_file_path.clone();
+                // PORT: ext: a changed macro module changes the files that import it.
+                let paths = &*crate::ext::mapper_deps::with_dependents(paths, p.program.as_deref(), &|name| (self.to_path)(name));
                 for path in paths {
                     if p.contains_file(path) {
                         dirty.set(true);

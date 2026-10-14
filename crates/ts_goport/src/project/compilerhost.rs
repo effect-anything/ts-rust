@@ -364,7 +364,8 @@ impl compiler::CompilerHost for CompilerHost {
                 .to_go_error());
             }
         };
-        let transform_identity = xxh3_128(identity.as_bytes());
+        let transform_identity = xxh3_128(identity.as_bytes())
+            ^ crate::ext::mapper_deps::salt(&parse_options.path.0); // PORT: ext
         let key = content_mapped_parse_cache_key(
             parse_options,
             fh.hash(),
@@ -392,6 +393,7 @@ impl compiler::CompilerHost for CompilerHost {
                 }
                 Ok(files)
             })?;
+        crate::ext::mapper_deps::record(&parse_options.path.0, &files); // PORT: ext
         let fs = compiler::CompilerHost::fs(self);
         if let Err(err) =
             contentmapper::check_supplemental_file_name_collisions(&files, &|name: &str| {
