@@ -82,10 +82,62 @@ import { shade } from "./view.sts";                  // ordinary import
 | `#trim($x)` | the capture without surrounding whitespace |
 | `#metavar(...)` | the capture's metavariable |
 | `#core { ... }` | template text not expanded again |
+| `#let`, `#parameterize`, `#fold` | see `tsc-ext cheatsheet scoping` |
 | `#callsite($n)`, `#definition($n)`, `#capture($n)` | the identifier in the call site's, definition's, or no scope |
 
 Identifiers a template introduces are hygienic: they do not capture or
 shadow the user's names unless made with `#callsite`.
+
+## scoping: `#let`, `#parameterize`, `#fold`
+
+`#let(name = value) { body }` evaluates `value` once. `name` is hygienic
+(renamed if it would clash):
+
+```ts
+export syntax twice:expr { rule { twice($x:expr) } => { #let(v = $x) { v + v } } }
+const a = twice(f());              // => const a = ((v) => v + v)(f());
+```
+
+When the body holds an `await` or `yield` of the enclosing function, the
+value is assigned to a variable declared at the top of that function
+instead: `let topic; return (topic = id, ...)`.
+
+`#parameterize(p = value) { body }` gives a syntax parameter (declared with
+`syntax parameter`) a meaning inside `body`, including in captures the body
+splices. `required` makes the body use it:
+
+```ts
+export syntax parameter (%):expr;
+export operator (|>):expr {
+  fixity infix; associativity right; precedence 20;
+  rule { $value:expr |> $body:expr } => {
+    #let(topic = $value) { #parameterize(required % = topic) { $body } }
+  }
+}
+const a = xs |> %.map(f) |> %.join(" ");
+// => ((topic) => ((topic_1) => topic_1.join(" "))(topic.map(f)))(xs)
+```
+
+`#fold($items, init: { initial }) { ($acc, $item, $index) => { next } }`
+threads an accumulator through a repeated capture; no elements gives
+`initial`. `init` must be a `{ ... }` group (else SWR2017):
+
+```ts
+export syntax sum:expr {
+  rule { sum($($x:expr),*) } => {
+    #fold($x, init: { 0 }) { ($acc, $item, $index) => { $acc + $item * $index } }
+  }
+}
+const a = sum(1, 2, 3);            // => ((0 + 1 * 0) + 2 * 1) + 3 * 2
+const e = sum();                   // => 0
+```
+
+Errors: SWR4019 (`#parameterize` names something that is not a syntax
+parameter), SWR4022 (`required` parameter unused), SWR4018 (a parameter used
+outside any `#parameterize`), SWR2017 (malformed `#fold`).
+
+Caveat: a spliced capture is not parenthesized. Write `($x)` in a template
+when its precedence matters (`$acc && ($item)`).
 
 ## gpu: `"use gpu"` functions (TypeGPU)
 

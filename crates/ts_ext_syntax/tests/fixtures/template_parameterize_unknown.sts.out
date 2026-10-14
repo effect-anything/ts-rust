@@ -1,0 +1,11 @@
+exit: 1
+--- stdout
+// tsc-ext: expand
+
+const a = 1;
+
+--- stderr
+template_parameterize_unknown.sts:3:11: error SWR4019: #parameterize names bar, which is not a syntax parameter in scope here. Declare it with `syntax parameter`, and import it for syntax where the template is defined.
+  3 | const a = foo(1);
+    |           ^^^
+  help: tsc-ext explain SWR4019

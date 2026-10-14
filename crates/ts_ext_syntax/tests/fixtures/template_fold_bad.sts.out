@@ -1,0 +1,11 @@
+exit: 1
+--- stdout
+// tsc-ext: expand
+
+const a = ;
+
+--- stderr
+template_fold_bad.sts:3:35: error SWR2017: Invalid argument for template operation #fold.
+  3 |   rule { sum($($x:expr),*) } => { #fold($x, init: 0) { ($acc, $item, $index) => { $acc + $item } } }
+    |                                   ^^^^^
+  help: tsc-ext explain SWR2017
