@@ -21,14 +21,13 @@ permissions:
 
 concurrency:
   group: bench-apps-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 env:
   RUSTUP_TOOLCHAIN: 1.95.0
   CARGO_INCREMENTAL: 0
   TS_CARGO_CGROUP_ACTIVE: 1
-  # Free GitHub-hosted runners (4 vCPU) in the fork.
-  TS_CARGO_JOBS: 4
+  TS_CARGO_JOBS: 16
   TS_CARGO_SLOTS: 1
   TS_CARGO_NIGHTLY: 0
   TS_CARGO_INCREMENTAL: 0
@@ -64,9 +63,8 @@ jobs:
 
   compiler:
     needs: plan
-    runs-on: ubuntu-latest
-    # PGO (three fat-LTO builds) on 4 vCPU.
-    timeout-minutes: 300
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
         with:
@@ -89,8 +87,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.compiler.outputs.cache-hit != 'true'
         with:
-          shared-key: bench-apps-musl
-          cache-on-failure: true
+          key: bench-apps-musl
           save-if: ${{ github.event_name == 'workflow_dispatch' }}
       - name: Build release reference
         if: steps.compiler.outputs.cache-hit != 'true'
@@ -145,7 +142,7 @@ jobs:
 
   prepare:
     needs: plan
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -181,7 +178,7 @@ jobs:
 
   benchmark:
     needs: [plan, compiler, prepare]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 60
     strategy:
       fail-fast: false

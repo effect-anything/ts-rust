@@ -1,7 +1,6 @@
-# Builds, packs and tests the @effect-x/tsc release: the npm packages @effect-x/tsc,
-# @effect-x/tsc-linux-x64, @effect-x/tsc-linux-arm64, @effect-x/tsc-darwin-arm64,
-# @effect-x/tsc-darwin-x64, @effect-x/tsc-win32-x64 and @effect-x/tsc-win32-arm64, and one
-# standalone archive per platform (tsc and the lib files; a .zip with
+# Builds, packs and tests the tsc-rs release: the npm packages tsc-rs, @tsc-rs/linux-x64,
+# @tsc-rs/linux-arm64, @tsc-rs/darwin-arm64, @tsc-rs/darwin-x64, @tsc-rs/win32-x64 and
+# @tsc-rs/win32-arm64, and one standalone archive per platform (tsc and the lib files; a .zip with
 # tsc.exe for Windows).
 #
 # A tag v<version> also publishes the npm packages and creates a GitHub release. A stable version
@@ -18,32 +17,19 @@
 # (build-release.sh has it): BOLT refuses the static Linux bin (build-bolt.sh), its Mach-O support
 # is experimental, macOS has no perf branch sampling for its profile, and BOLT has no PE support.
 # Linux is static musl and non-PIE, so it starts on any x86-64 or arm64 Linux, Alpine too
-# (npm/README.md, "Linux libc"). Each Linux tsc builds natively on a runner of its arch.
+# (npm/README.md, "Linux libc"). Each Linux tsc builds natively on a Blacksmith runner of its arch.
 # Windows (x86_64-pc-windows-msvc, aarch64-pc-windows-msvc) builds in Git Bash, with the C runtime
 # linked in (+crt-static), so tsc.exe needs no Visual C++ redistributable. jemalloc does not build
 # there: it uses the system allocator. Each tsc builds natively, so the PGO training runs on its
 # own platform: Blacksmith has no Intel Mac and no arm64 Windows runner, so darwin-x64 builds on
 # GitHub's macos-15-intel (4 vCPU) and
 # win32-arm64 on GitHub's windows-11-arm (4 vCPU).
-#
-# Fork setup (effect-anything/ts-rust): free GitHub-hosted runners only (linux-arm64 on
-# ubuntu-24.04-arm, win32-arm64 on windows-11-arm, darwin-x64 on macos-15-intel: free for public
-# repos). PGO (three fat-LTO builds) runs on tags and on a manual run with `pgo` set; pull requests
-# and other runs ship the plain fat-LTO tsc, so they fit the free runners' time. The publish runs
-# only for a tag, and only when the repo has the secret NPM_TOKEN or the variable
-# NPM_TRUSTED_PUBLISHING=true; without either the run still builds, packs, verifies and uploads the
-# artifact `release` (the .tgz packages and archives), and the publish step is skipped.
 name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      pgo:
-        type: boolean
-        description: PGO-train the tsc (three fat-LTO builds per platform; slow on free runners)
-        default: false
   pull_request:
     paths:
       - ".github/workflows/release.yml"
@@ -61,7 +47,7 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -100,20 +86,20 @@ jobs:
         include:
           - platform: linux-x64
             target: x86_64-unknown-linux-musl
-            runner: ubuntu-latest
+            runner: blacksmith-16vcpu-ubuntu-2404
           - platform: linux-arm64
             target: aarch64-unknown-linux-musl
-            runner: ubuntu-24.04-arm
+            runner: blacksmith-16vcpu-ubuntu-2404-arm
           # jemalloc does not cross-build for macOS with zig, so this builds on a Mac.
           - platform: darwin-arm64
             target: aarch64-apple-darwin
-            runner: macos-latest
+            runner: blacksmith-12vcpu-macos-26
           - platform: darwin-x64
             target: x86_64-apple-darwin
             runner: macos-15-intel
           - platform: win32-x64
             target: x86_64-pc-windows-msvc
-            runner: windows-latest
+            runner: blacksmith-16vcpu-windows-2025
             exe: .exe
           - platform: win32-arm64
             target: aarch64-pc-windows-msvc
@@ -121,10 +107,8 @@ jobs:
             exe: .exe
             linker: rust-lld
     runs-on: ${{ matrix.runner }}
-    # Free runners have 3 to 4 vCPU; a PGO run is three fat-LTO builds. GitHub's limit is 360.
-    timeout-minutes: 340
-    env:
-      PGO: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.pgo) }}
+    # The 4 vCPU GitHub-hosted runners (darwin-x64, win32-arm64) build slower.
+    timeout-minutes: 180
     # Git Bash on Windows.
     defaults:
       run:
@@ -133,13 +117,6 @@ jobs:
       # LF in the working tree, as on the other hosts (README.md, "Develop on Windows").
       - if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
-      # GitHub-hosted Linux runners have about 14 GB free; a release build of the workspace needs
-      # more. Drop preinstalled SDKs this workflow never uses (about 25 GB).
-      - name: Free disk space
-        if: runner.os == 'Linux'
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
-          df -h /
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
@@ -166,13 +143,12 @@ jobs:
           node-version: 24
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-${{ matrix.target }}
-          cache-on-failure: true
+          key: release-${{ matrix.target }}
           save-if: ${{ github.event_name != 'pull_request' }}
       # As build-release.sh: the musl build compiles jemalloc with musl-gcc, links static with no PIE,
       # and has bin/tsgo.rs JEMALLOC_CONF built in, so the tsc does not exec itself at start. No
       # GOPORT_BUILD_VERSION: the tsc reports the TypeScript version, which typesVersions matching
-      # reads (npm/README.md, "@effect-x/tsc releases"). Both builds below use this environment.
+      # reads (npm/README.md, "tsc-rs releases"). Both builds below use this environment.
       - name: Build environment
         if: runner.os == 'Linux'
         run: |
@@ -197,12 +173,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/plain"
           cp "target/${{ matrix.target }}/goport/tsgo${{ matrix.exe }}" "$RUNNER_TEMP/plain/tsc${{ matrix.exe }}"
       - name: PGO training set
-        if: env.PGO == 'true'
         run: scripts/goport/pgo-train.sh setup "$RUNNER_TEMP/train"
       # The same build with -Cprofile-generate, the training set, then -Cprofile-use. PGO_LINK (from
       # the Build step) gives the RUSTFLAGS of the plain build. Separate target dirs (not cached).
       - name: PGO build
-        if: env.PGO == 'true'
         env:
           PGO_TARGET: ${{ matrix.target }}
           PGO_BINS: tsgo
@@ -213,13 +187,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/out"
           cp "$RUNNER_TEMP/pgo/target-use/goport/tsgo${{ matrix.exe }}" "$RUNNER_TEMP/out/tsc${{ matrix.exe }}"
       - name: Check the PGO tsc against the plain tsc
-        if: env.PGO == 'true'
         run: scripts/goport/pgo-train.sh compare "$RUNNER_TEMP/train" "$RUNNER_TEMP/plain/tsc${{ matrix.exe }}" "$RUNNER_TEMP/out/tsc${{ matrix.exe }}"
-      - name: Ship the plain tsc (no PGO)
-        if: env.PGO != 'true'
-        run: |
-          mkdir -p "$RUNNER_TEMP/out"
-          cp "$RUNNER_TEMP/plain/tsc${{ matrix.exe }}" "$RUNNER_TEMP/out/tsc${{ matrix.exe }}"
       - name: Check the tsc
         env:
           EXE: ${{ matrix.exe }}
@@ -256,49 +224,10 @@ jobs:
           name: tsc-${{ matrix.platform }}
           path: ${{ runner.temp }}/out/tsc${{ matrix.exe }}
           if-no-files-found: error
-      # tsc-ext (crates/ts_ext_syntax): the content mapper and Sweetener CLI (the tsc-ext bin of
-      # @effect-x/tsc), and the Node addon of the package's API. Same platforms as the tsc; no PGO.
-      # The binary links like the tsc (static on Linux, crt-static on Windows). The addon is loaded
-      # by Node, a glibc process on Linux, so it builds for the -gnu target, and a cdylib is not
-      # linked static anywhere.
-      - name: Build tsc-ext
-        env:
-          EXE: ${{ matrix.exe }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          out="$RUNNER_TEMP/ext"
-          mkdir -p "$out"
-          (
-            case $RUNNER_OS in
-              Linux) export RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" ;;
-              Windows) export RUSTFLAGS="-C target-feature=+crt-static" ;;
-            esac
-            cargo build --release --locked -p ts_ext_syntax --bin tsc-ext --target "$TARGET"
-          )
-          cp "target/$TARGET/release/tsc-ext$EXE" "$out/"
-          addon_target=$TARGET
-          if [[ $RUNNER_OS == Linux ]]; then
-            addon_target=${TARGET/-musl/-gnu}
-            rustup target add "$addon_target"
-          fi
-          cargo build --release --locked -p ts_ext_syntax --lib --target "$addon_target"
-          case $RUNNER_OS in
-            Linux) lib=libts_ext_syntax.so ;;
-            macOS) lib=libts_ext_syntax.dylib ;;
-            Windows) lib=ts_ext_syntax.dll ;;
-          esac
-          cp "target/$addon_target/release/$lib" "$out/tsc-ext.node"
-          "$out/tsc-ext$EXE" help
-          node -e 'const m = { exports: {} }; process.dlopen(m, process.argv[1]); if (typeof m.exports.transformNative !== "function") process.exit(1)' "$out/tsc-ext.node"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tsc-ext-${{ matrix.platform }}
-          path: ${{ runner.temp }}/ext
-          if-no-files-found: error
 
   package:
     needs: [version, build]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -328,8 +257,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: go-pin/package-lock.json
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: go-pin
       - uses: actions/download-artifact@v5
@@ -342,17 +269,12 @@ jobs:
           NPM_PACK_GO_DIR: ${{ github.workspace }}/go-pin/${{ steps.pin.outputs.subdir }}
         run: |
           bins="$RUNNER_TEMP/bins"
-          chmod +x "$bins"/tsc-*/tsc "$bins"/tsc-*/tsc.exe "$bins"/tsc-ext-*/tsc-ext "$bins"/tsc-ext-*/tsc-ext.exe
-          # tsc-ext (bins/tsc-ext-<platform>: tsc-ext and tsc-ext.node) for every tsc platform.
-          ext=()
-          for platform in linux-x64 linux-arm64 darwin-arm64 darwin-x64 win32-x64 win32-arm64; do
-            ext+=(--ext "$platform=$bins/tsc-ext-$platform")
-          done
-          scripts/goport/npm-pack.sh --name @effect-x/tsc --package-version "$VERSION" \
+          chmod +x "$bins"/tsc-*/tsc "$bins"/tsc-*/tsc.exe
+          scripts/goport/npm-pack.sh --name tsc-rs --package-version "$VERSION" \
             --also "linux-arm64=$bins/tsc-linux-arm64/tsc" --also "darwin-arm64=$bins/tsc-darwin-arm64/tsc" \
             --also "darwin-x64=$bins/tsc-darwin-x64/tsc" \
             --also "win32-x64=$bins/tsc-win32-x64/tsc.exe" --also "win32-arm64=$bins/tsc-win32-arm64/tsc.exe" \
-            "${ext[@]}" "$RUNNER_TEMP/pkg" "$bins/tsc-linux-x64/tsc"
+            "$RUNNER_TEMP/pkg" "$bins/tsc-linux-x64/tsc"
       # One archive per platform: the platform package's lib dir (tsc and the lib files, which a
       # noembed tsc reads next to it), LICENSE and NOTICE.txt. A .tar.gz, and a .zip for Windows.
       - name: Archives
@@ -360,9 +282,9 @@ jobs:
           pkg="$RUNNER_TEMP/pkg" dist="$RUNNER_TEMP/dist"
           mkdir -p "$dist"
           for platform in linux-x64 linux-arm64 darwin-arm64 darwin-x64 win32-x64 win32-arm64; do
-            name="tsc-$VERSION-$platform"
+            name="tsc-rs-$VERSION-$platform"
             mkdir -p "$RUNNER_TEMP/archive/$name"
-            cp -r "$pkg/tsc-$platform/lib/." "$pkg/tsc-$platform/LICENSE" "$pkg/tsc-$platform/NOTICE.txt" "$RUNNER_TEMP/archive/$name/"
+            cp -r "$pkg/tsc-rs-$platform/lib/." "$pkg/tsc-rs-$platform/LICENSE" "$pkg/tsc-rs-$platform/NOTICE.txt" "$RUNNER_TEMP/archive/$name/"
             if [[ $platform == win32-* ]]; then
               (cd "$RUNNER_TEMP/archive" && python3 -m zipfile -c "$dist/$name.zip" "$name")
             else
@@ -428,41 +350,32 @@ jobs:
           mkdir proj && cd proj
           echo '{"name":"smoke","private":true}' > package.json
           # The other platform's package is not on npm yet: --offline skips that optional dependency.
-          npm install --offline --no-audit --no-fund "$dist/effect-x-tsc-${{ matrix.platform }}-$VERSION.tgz" "$dist/effect-x-tsc-$VERSION.tgz"
-          # The package bin, not a bare `npx tsc` (that can resolve the typescript package).
-          tsc="npx --no-install --package @effect-x/tsc tsc"
-          $tsc --version
+          npm install --offline --no-audit --no-fund "$dist/tsc-rs-${{ matrix.platform }}-$VERSION.tgz" "$dist/tsc-rs-$VERSION.tgz"
+          npx tsc-rs --version
           echo 'export const x: number = 1;' > ok.ts
-          $tsc --noEmit --strict ok.ts
+          npx tsc-rs --noEmit --strict ok.ts
           echo 'const x: number = "a";' > bad.ts
           set +e
-          $tsc --noEmit bad.ts > check.txt
+          npx tsc-rs --noEmit bad.ts > check.txt
           rc=$?
           set -e
           cat check.txt
           [[ $rc == 2 ]] && grep -q "error TS2322" check.txt
           # Emit.
-          $tsc --outDir out --declaration ok.ts
+          npx tsc-rs --outDir out --declaration ok.ts
           cat out/ok.js out/ok.d.ts
           grep -q "export const x = 1;" out/ok.js
-          # tsc-ext: the bin, the Node API, and tsc through the contentMappers entry.
-          npx --no-install --package @effect-x/tsc tsc-ext help
-          printf 'export syntax twice:expr {\n  rule { twice($x:expr) } => { [$x, $x] }\n}\nexport const a = twice(1);\n' > m.sts
-          npx --no-install --package @effect-x/tsc tsc-ext sweetener --expand m.sts | grep -q "\[1, 1\]"
-          node --input-type=module -e 'import { Transformer } from "@effect-x/tsc/ext"; const r = new Transformer({ tsconfig: false }).transformFile("m.sts"); if (!r.code.includes("[1, 1]") || r.hostPath !== "m.ts") process.exit(1)'
-          echo '{"compilerOptions":{"strict":true,"noEmit":true,"allowArbitraryExtensions":true},"include":["m.sts"],"contentMappers":[{"package":"@effect-x/tsc","extensions":[".sts"]}]}' > tsconfig.json
-          $tsc -p tsconfig.json
       - name: Archive check
         if: runner.os != 'Windows'
         run: |
           dist="$RUNNER_TEMP/dist"
-          tar -xzf "$dist/tsc-$VERSION-${{ matrix.platform }}.tar.gz" -C "$RUNNER_TEMP"
-          "$RUNNER_TEMP/tsc-$VERSION-${{ matrix.platform }}/tsc" --version
+          tar -xzf "$dist/tsc-rs-$VERSION-${{ matrix.platform }}.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/tsc-rs-$VERSION-${{ matrix.platform }}/tsc" --version
       - name: Archive check (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $name = "tsc-$env:VERSION-${{ matrix.platform }}"
+          $name = "tsc-rs-$env:VERSION-${{ matrix.platform }}"
           Expand-Archive "$env:RUNNER_TEMP\dist\$name.zip" $env:RUNNER_TEMP
           & "$env:RUNNER_TEMP\$name\tsc.exe" --version
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -480,26 +393,12 @@ jobs:
       id-token: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
-      # Publish gate: a token, or trusted publishing set up on npm (npm/README.md).
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-      NPM_TRUSTED_PUBLISHING: ${{ vars.NPM_TRUSTED_PUBLISHING }}
     steps:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
-      - name: Publish gate
-        id: gate
-        run: |
-          if [[ -n $NPM_TOKEN || $NPM_TRUSTED_PUBLISHING == true ]]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::npm publish skipped: no NPM_TOKEN secret and NPM_TRUSTED_PUBLISHING is not true. The packages are in the artifact 'release'."
-          fi
       # Trusted publishing needs npm 11.5.1 or later.
-      - if: steps.gate.outputs.publish == 'true'
-        run: npm install -g npm@11 && npm --version
+      - run: npm install -g npm@11 && npm --version
       - uses: actions/download-artifact@v5
         with:
           name: release
@@ -509,18 +408,13 @@ jobs:
       # makes no provenance; from a public repo it adds it by itself.
       # A version with a prerelease part (a "-") is a prerelease: dist-tag `next`. Else `latest`.
       - name: Publish to npm
-        if: steps.gate.outputs.publish == 'true'
-        env:
-          # Empty with trusted publishing: npm then authenticates with OIDC.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           tag=latest
           [[ $VERSION != *-* ]] || tag=next
           echo "dist-tag $tag"
-          for pkg in @effect-x/tsc-linux-x64:effect-x-tsc-linux-x64 @effect-x/tsc-linux-arm64:effect-x-tsc-linux-arm64 \
-            @effect-x/tsc-darwin-arm64:effect-x-tsc-darwin-arm64 @effect-x/tsc-darwin-x64:effect-x-tsc-darwin-x64 \
-            @effect-x/tsc-win32-x64:effect-x-tsc-win32-x64 @effect-x/tsc-win32-arm64:effect-x-tsc-win32-arm64 \
-            @effect-x/tsc:effect-x-tsc; do
+          for pkg in @tsc-rs/linux-x64:tsc-rs-linux-x64 @tsc-rs/linux-arm64:tsc-rs-linux-arm64 \
+            @tsc-rs/darwin-arm64:tsc-rs-darwin-arm64 @tsc-rs/darwin-x64:tsc-rs-darwin-x64 \
+            @tsc-rs/win32-x64:tsc-rs-win32-x64 @tsc-rs/win32-arm64:tsc-rs-win32-arm64 tsc-rs:tsc-rs; do
             name=${pkg%%:*} file=./dist/${pkg#*:}-$VERSION.tgz
             [[ -f $file ]] || { echo "::error::missing package $file"; exit 1; }
             if npm view "$name@$VERSION" version > /dev/null 2>&1; then
@@ -533,8 +427,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          pre=() install="npm install -D @effect-x/tsc"
-          [[ $VERSION != *-* ]] || pre=(--prerelease) install="npm install -D @effect-x/tsc@next"
+          pre=() install="npm install -D tsc-rs"
+          [[ $VERSION != *-* ]] || pre=(--prerelease) install="npm install -D tsc-rs@next"
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" "${pre[@]}" \
-            --title "@effect-x/tsc $VERSION" --generate-notes \
+            --title "tsc-rs $VERSION" --generate-notes \
             --notes "Install with \`$install\`, or download the archive for your platform."

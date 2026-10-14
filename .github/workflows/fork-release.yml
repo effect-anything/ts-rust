@@ -1,0 +1,540 @@
+# Builds, packs and tests the @effect-x/tsc release: the npm packages @effect-x/tsc,
+# @effect-x/tsc-linux-x64, @effect-x/tsc-linux-arm64, @effect-x/tsc-darwin-arm64,
+# @effect-x/tsc-darwin-x64, @effect-x/tsc-win32-x64 and @effect-x/tsc-win32-arm64, and one
+# standalone archive per platform (tsc and the lib files; a .zip with
+# tsc.exe for Windows).
+#
+# A tag v<version> also publishes the npm packages and creates a GitHub release. A stable version
+# (v0.1.0) goes to the dist-tag `latest` and a normal release. A prerelease version (v0.2.0-beta.1)
+# goes to `next` and a GitHub prerelease. npm trusted publishing (OIDC) authenticates the
+# publish: no npm token. Each of the 7 packages trusts this workflow file and the environment `npm`
+# (npm/README.md, "Trusted publishing"). Pull requests that change the release files, and a manual
+# run, do everything but the release and the publish.
+#
+# The tsc is a PGO build of the shipped profile (fat LTO), trained on each platform:
+# crates/ts_goport/scripts/build-pgo.sh with the training set of scripts/goport/pgo-train.sh (7
+# projects at fixed commits). The job also builds the plain tsc, and fails unless the PGO tsc gives
+# the same stdout, stderr, exit code and emitted files as the plain tsc on that set. No BOLT
+# (build-release.sh has it): BOLT refuses the static Linux bin (build-bolt.sh), its Mach-O support
+# is experimental, macOS has no perf branch sampling for its profile, and BOLT has no PE support.
+# Linux is static musl and non-PIE, so it starts on any x86-64 or arm64 Linux, Alpine too
+# (npm/README.md, "Linux libc"). Each Linux tsc builds natively on a runner of its arch.
+# Windows (x86_64-pc-windows-msvc, aarch64-pc-windows-msvc) builds in Git Bash, with the C runtime
+# linked in (+crt-static), so tsc.exe needs no Visual C++ redistributable. jemalloc does not build
+# there: it uses the system allocator. Each tsc builds natively, so the PGO training runs on its
+# own platform: Blacksmith has no Intel Mac and no arm64 Windows runner, so darwin-x64 builds on
+# GitHub's macos-15-intel (4 vCPU) and
+# win32-arm64 on GitHub's windows-11-arm (4 vCPU).
+#
+# Fork setup (effect-anything/ts-rust): free GitHub-hosted runners only (linux-arm64 on
+# ubuntu-24.04-arm, win32-arm64 on windows-11-arm, darwin-x64 on macos-15-intel: free for public
+# repos). PGO (three fat-LTO builds) runs on tags and on a manual run with `pgo` set; pull requests
+# and other runs ship the plain fat-LTO tsc, so they fit the free runners' time. The publish runs
+# only for a tag, and only when the repo has the secret NPM_TOKEN or the variable
+# NPM_TRUSTED_PUBLISHING=true; without either the run still builds, packs, verifies and uploads the
+# artifact `release` (the .tgz packages and archives), and the publish step is skipped.
+name: Fork Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      pgo:
+        type: boolean
+        description: PGO-train the tsc (three fat-LTO builds per platform; slow on free runners)
+        default: false
+  pull_request:
+    paths:
+      - ".github/workflows/fork-release.yml"
+      - "npm/**"
+      - "scripts/goport/npm-pack.sh"
+      - "scripts/goport/pgo-train.sh"
+      - "crates/ts_goport/scripts/copy-libs.sh"
+      - "crates/ts_goport/scripts/build-pgo.sh"
+      - "LICENSE"
+      - "NOTICE.md"
+      - "licenses/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The toolchain of crates/ts_goport/scripts/build-release.sh.
+  RUSTUP_TOOLCHAIN: 1.95.0
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - id: v
+        run: |
+          if [[ $GITHUB_REF_TYPE == tag ]]; then
+            v=${GITHUB_REF_NAME#v}
+            [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] || { echo "::error::tag $GITHUB_REF_NAME is not v<semver>"; exit 1; }
+            # 0.0.x are the npm placeholders (npm/trust-setup.sh); the publish would skip them.
+            [[ $v != 0.0.* ]] || { echo "::error::0.0.x versions are the npm placeholders"; exit 1; }
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            v=0.0.0-ci.$GITHUB_RUN_NUMBER
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "version $v"
+
+  build:
+    name: build (${{ matrix.platform }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - platform: linux-arm64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          # jemalloc does not cross-build for macOS with zig, so this builds on a Mac.
+          - platform: darwin-arm64
+            target: aarch64-apple-darwin
+            runner: macos-latest
+          - platform: darwin-x64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - platform: win32-x64
+            target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            exe: .exe
+          - platform: win32-arm64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            exe: .exe
+            linker: rust-lld
+    runs-on: ${{ matrix.runner }}
+    # Free runners have 3 to 4 vCPU; a PGO run is three fat-LTO builds. GitHub's limit is 360.
+    timeout-minutes: 340
+    env:
+      PGO: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.pgo) }}
+    # Git Bash on Windows.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # LF in the working tree, as on the other hosts (README.md, "Develop on Windows").
+      - if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      # GitHub-hosted Linux runners have about 14 GB free; a release build of the workspace needs
+      # more. Drop preinstalled SDKs this workflow never uses (about 25 GB).
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
+          df -h /
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      # llvm-tools: the llvm-profdata of this rustc's LLVM (build-pgo.sh checks it).
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target ${{ matrix.target }} --component llvm-tools
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -yq musl-tools
+      # win32-arm64 links with rust-lld (lld-link), all three builds. On arm64, link.exe aligns each
+      # section contribution to 4 bytes, also the 1-byte start markers of the LLVM profile sections
+      # (IMAGE_SCN_ALIGN_1BYTES). The instrumented tsc then wrote 3 zero bytes before the names, and
+      # llvm-profdata rejected each profile ("symbol name is empty"). lld-link keeps the 1-byte
+      # alignment, as link.exe does on x64.
+      - name: Linker
+        if: matrix.linker == 'rust-lld'
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          lld="$(cygpath -u "$(rustc --print sysroot)")/lib/rustlib/$host/bin/rust-lld.exe"
+          [[ -x $lld ]] || { echo "::error::no $lld"; exit 1; }
+          target=${{ matrix.target }}
+          target=${target^^}
+          echo "CARGO_TARGET_${target//-/_}_LINKER=$(cygpath -m "$lld")" | tee -a "$GITHUB_ENV"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
+      # As build-release.sh: the musl build compiles jemalloc with musl-gcc, links static with no PIE,
+      # and has bin/tsgo.rs JEMALLOC_CONF built in, so the tsc does not exec itself at start. No
+      # GOPORT_BUILD_VERSION: the tsc reports the TypeScript version, which typesVersions matching
+      # reads (npm/README.md, "@effect-x/tsc releases"). Both builds below use this environment.
+      - name: Build environment
+        if: runner.os == 'Linux'
+        run: |
+          conf=$(sed -n 's/^const JEMALLOC_CONF: &str = "\([^"]*\)";$/\1/p' crates/ts_goport/src/bin/tsgo.rs | head -1)
+          [[ -n $conf ]] || { echo "::error::no JEMALLOC_CONF in bin/tsgo.rs"; exit 1; }
+          echo "JEMALLOC_SYS_WITH_MALLOC_CONF=$conf" >> "$GITHUB_ENV"
+          target=${{ matrix.target }}
+          echo "CC_${target//-/_}=musl-gcc" >> "$GITHUB_ENV"
+          # jemalloc stops at start when the kernel page is bigger than its build page. arm64 kernels
+          # use 4, 16 or 64 KiB pages; 2^16 covers all three.
+          [[ $target != aarch64-* ]] || echo "JEMALLOC_SYS_WITH_LG_PAGE=16" >> "$GITHUB_ENV"
+      # The plain tsc: the reference of the PGO check below. PGO_LINK is the link mode of both builds
+      # (build-pgo.sh): static on Linux, crt-static on Windows.
+      - name: Build
+        run: |
+          case $RUNNER_OS in
+            Linux) export RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" PGO_LINK=static ;;
+            Windows) export RUSTFLAGS="-C target-feature=+crt-static" PGO_LINK=crt-static ;;
+          esac
+          echo "PGO_LINK=${PGO_LINK:-}" >> "$GITHUB_ENV"
+          cargo build --profile goport --locked -p ts_goport --bin tsgo --features noembed --target ${{ matrix.target }}
+          mkdir -p "$RUNNER_TEMP/plain"
+          cp "target/${{ matrix.target }}/goport/tsgo${{ matrix.exe }}" "$RUNNER_TEMP/plain/tsc${{ matrix.exe }}"
+      - name: PGO training set
+        if: env.PGO == 'true'
+        run: scripts/goport/pgo-train.sh setup "$RUNNER_TEMP/train"
+      # The same build with -Cprofile-generate, the training set, then -Cprofile-use. PGO_LINK (from
+      # the Build step) gives the RUSTFLAGS of the plain build. Separate target dirs (not cached).
+      - name: PGO build
+        if: env.PGO == 'true'
+        env:
+          PGO_TARGET: ${{ matrix.target }}
+          PGO_BINS: tsgo
+          PGO_CARGO: cargo
+          CARGO_FEATURES: --features noembed
+        run: |
+          PGO_TRAIN="scripts/goport/pgo-train.sh run $RUNNER_TEMP/train" crates/ts_goport/scripts/build-pgo.sh "$RUNNER_TEMP/pgo"
+          mkdir -p "$RUNNER_TEMP/out"
+          cp "$RUNNER_TEMP/pgo/target-use/goport/tsgo${{ matrix.exe }}" "$RUNNER_TEMP/out/tsc${{ matrix.exe }}"
+      - name: Check the PGO tsc against the plain tsc
+        if: env.PGO == 'true'
+        run: scripts/goport/pgo-train.sh compare "$RUNNER_TEMP/train" "$RUNNER_TEMP/plain/tsc${{ matrix.exe }}" "$RUNNER_TEMP/out/tsc${{ matrix.exe }}"
+      - name: Ship the plain tsc (no PGO)
+        if: env.PGO != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          cp "$RUNNER_TEMP/plain/tsc${{ matrix.exe }}" "$RUNNER_TEMP/out/tsc${{ matrix.exe }}"
+      - name: Check the tsc
+        env:
+          EXE: ${{ matrix.exe }}
+        run: |
+          out="$RUNNER_TEMP/out"
+          dir="$RUNNER_TEMP/check"
+          crates/ts_goport/scripts/copy-libs.sh "$dir"
+          cp "$out/tsc$EXE" "$dir/tsc$EXE"
+          [[ $("$dir/tsc$EXE" --version) == "Version 7."* ]]
+          # The tsc prints C:/... paths on Windows.
+          listed=$dir/lib.es5.d.ts
+          [[ $RUNNER_OS != Windows ]] || listed=$(cygpath -m "$listed")
+          cd "$RUNNER_TEMP"
+          echo 'const x: number = "a";' > a.ts
+          "$dir/tsc$EXE" --listFilesOnly --lib es5 a.ts | grep -qx "$listed"
+          set +e
+          "$dir/tsc$EXE" --noEmit a.ts > check.txt
+          rc=$?
+          set -e
+          cat check.txt
+          [[ $rc == 2 ]] && grep -q "error TS2322" check.txt
+          if [[ $RUNNER_OS == Linux ]]; then
+            file "$dir/tsc" | tee /dev/stderr | grep -q "statically linked"
+            # Static: it starts on musl (Alpine) too.
+            docker run --rm -v "$dir:/t:ro" alpine:3 /t/tsc --version
+          fi
+          # +crt-static: no import of the Visual C++ runtime DLL.
+          if [[ $RUNNER_OS == Windows ]] && grep -qai 'vcruntime140' "$dir/tsc.exe"; then
+            echo "::error::tsc.exe imports the Visual C++ runtime (vcruntime140.dll)"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tsc-${{ matrix.platform }}
+          path: ${{ runner.temp }}/out/tsc${{ matrix.exe }}
+          if-no-files-found: error
+      # tsc-ext (crates/ts_ext_syntax): the content mapper and Sweetener CLI (the tsc-ext bin of
+      # @effect-x/tsc), and the Node addon of the package's API. Same platforms as the tsc; no PGO.
+      # The binary links like the tsc (static on Linux, crt-static on Windows). The addon is loaded
+      # by Node, a glibc process on Linux, so it builds for the -gnu target, and a cdylib is not
+      # linked static anywhere.
+      - name: Build tsc-ext
+        env:
+          EXE: ${{ matrix.exe }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          out="$RUNNER_TEMP/ext"
+          mkdir -p "$out"
+          (
+            case $RUNNER_OS in
+              Linux) export RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" ;;
+              Windows) export RUSTFLAGS="-C target-feature=+crt-static" ;;
+            esac
+            cargo build --release --locked -p ts_ext_syntax --bin tsc-ext --target "$TARGET"
+          )
+          cp "target/$TARGET/release/tsc-ext$EXE" "$out/"
+          addon_target=$TARGET
+          if [[ $RUNNER_OS == Linux ]]; then
+            addon_target=${TARGET/-musl/-gnu}
+            rustup target add "$addon_target"
+          fi
+          cargo build --release --locked -p ts_ext_syntax --lib --target "$addon_target"
+          case $RUNNER_OS in
+            Linux) lib=libts_ext_syntax.so ;;
+            macOS) lib=libts_ext_syntax.dylib ;;
+            Windows) lib=ts_ext_syntax.dll ;;
+          esac
+          cp "target/$addon_target/release/$lib" "$out/tsc-ext.node"
+          "$out/tsc-ext$EXE" help
+          node -e 'const m = { exports: {} }; process.dlopen(m, process.argv[1]); if (typeof m.exports.transformNative !== "function") process.exit(1)' "$out/tsc-ext.node"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tsc-ext-${{ matrix.platform }}
+          path: ${{ runner.temp }}/ext
+          if-no-files-found: error
+
+  package:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      # main's Go pin, as ci.yml resolves it.
+      - name: Resolve the Go pin
+        id: pin
+        run: |
+          key=$(jq -r '.batch.upstreamPin.to // empty' docs/typechecker-state/current.json)
+          python3 scripts/upstream/pin.py show ${key:+"$key"} > "$RUNNER_TEMP/pin.json"
+          jq -r '"key=\(.key)", "repo=\(.repo)", "commit=\(.commit)", "subdir=\(.subdir // "")"' "$RUNNER_TEMP/pin.json" >> "$GITHUB_OUTPUT"
+      # npm-pack.sh reads the pin's package input (packages/), its lib files, its LICENSE.txt and
+      # NOTICE.txt, and builds the JS API with the repo's own tsc (npm workspaces at the root).
+      - name: Check out the pinned Go source
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.pin.outputs.repo }}
+          ref: ${{ steps.pin.outputs.commit }}
+          path: go-pin
+          sparse-checkout: |
+            packages
+            ${{ steps.pin.outputs.subdir }}/internal/bundled/libs
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: go-pin/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: go-pin
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: tsc-*
+          path: ${{ runner.temp }}/bins
+      - name: Pack
+        env:
+          GOPORT_PIN: ${{ steps.pin.outputs.key }}
+          NPM_PACK_GO_DIR: ${{ github.workspace }}/go-pin/${{ steps.pin.outputs.subdir }}
+        run: |
+          bins="$RUNNER_TEMP/bins"
+          chmod +x "$bins"/tsc-*/tsc "$bins"/tsc-*/tsc.exe "$bins"/tsc-ext-*/tsc-ext "$bins"/tsc-ext-*/tsc-ext.exe
+          # tsc-ext (bins/tsc-ext-<platform>: tsc-ext and tsc-ext.node) for every tsc platform.
+          ext=()
+          for platform in linux-x64 linux-arm64 darwin-arm64 darwin-x64 win32-x64 win32-arm64; do
+            ext+=(--ext "$platform=$bins/tsc-ext-$platform")
+          done
+          scripts/goport/npm-pack.sh --name @effect-x/tsc --package-version "$VERSION" \
+            --also "linux-arm64=$bins/tsc-linux-arm64/tsc" --also "darwin-arm64=$bins/tsc-darwin-arm64/tsc" \
+            --also "darwin-x64=$bins/tsc-darwin-x64/tsc" \
+            --also "win32-x64=$bins/tsc-win32-x64/tsc.exe" --also "win32-arm64=$bins/tsc-win32-arm64/tsc.exe" \
+            "${ext[@]}" "$RUNNER_TEMP/pkg" "$bins/tsc-linux-x64/tsc"
+      # One archive per platform: the platform package's lib dir (tsc and the lib files, which a
+      # noembed tsc reads next to it), LICENSE and NOTICE.txt. A .tar.gz, and a .zip for Windows.
+      - name: Archives
+        run: |
+          pkg="$RUNNER_TEMP/pkg" dist="$RUNNER_TEMP/dist"
+          mkdir -p "$dist"
+          for platform in linux-x64 linux-arm64 darwin-arm64 darwin-x64 win32-x64 win32-arm64; do
+            name="tsc-$VERSION-$platform"
+            mkdir -p "$RUNNER_TEMP/archive/$name"
+            cp -r "$pkg/tsc-$platform/lib/." "$pkg/tsc-$platform/LICENSE" "$pkg/tsc-$platform/NOTICE.txt" "$RUNNER_TEMP/archive/$name/"
+            if [[ $platform == win32-* ]]; then
+              (cd "$RUNNER_TEMP/archive" && python3 -m zipfile -c "$dist/$name.zip" "$name")
+            else
+              tar -C "$RUNNER_TEMP/archive" -czf "$dist/$name.tar.gz" "$name"
+            fi
+          done
+          cp "$pkg"/*.tgz "$dist/"
+          (cd "$dist" && sha256sum -- *.tgz *.tar.gz *.zip > SHA256SUMS)
+          cat "$dist/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+
+  # Installs the npm packages in a fresh project on each platform, as a user would. These are
+  # GitHub-hosted runners, so the check runs on another host than the build (for darwin-x64 and
+  # win32-arm64, another VM of the build's runner image). ubuntu-24.04-arm is GitHub's arm64
+  # standard runner (2 vCPU in a private repo, 4 in a public one).
+  verify:
+    name: verify (${{ matrix.platform }})
+    needs: [version, package]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-latest
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+          - platform: darwin-arm64
+            runner: macos-latest
+          - platform: darwin-x64
+            runner: macos-15-intel
+          - platform: win32-x64
+            runner: windows-latest
+          - platform: win32-arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    # Git Bash on Windows.
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v5
+        with:
+          name: release
+          path: ${{ runner.temp }}/dist
+      - name: npm install and check
+        run: |
+          dist="$RUNNER_TEMP/dist"
+          [[ $RUNNER_OS != Windows ]] || dist=$(cygpath -m "$dist")
+          # Node of the runner's own arch: getExePath.js picks the package of process.arch.
+          node_platform=$(node -p 'process.platform + "-" + process.arch')
+          echo "node $node_platform"
+          [[ $node_platform == "${{ matrix.platform }}" ]]
+          mkdir proj && cd proj
+          echo '{"name":"smoke","private":true}' > package.json
+          # The other platform's package is not on npm yet: --offline skips that optional dependency.
+          npm install --offline --no-audit --no-fund "$dist/effect-x-tsc-${{ matrix.platform }}-$VERSION.tgz" "$dist/effect-x-tsc-$VERSION.tgz"
+          # The package bin, not a bare `npx tsc` (that can resolve the typescript package).
+          tsc="npx --no-install --package @effect-x/tsc tsc"
+          $tsc --version
+          echo 'export const x: number = 1;' > ok.ts
+          $tsc --noEmit --strict ok.ts
+          echo 'const x: number = "a";' > bad.ts
+          set +e
+          $tsc --noEmit bad.ts > check.txt
+          rc=$?
+          set -e
+          cat check.txt
+          [[ $rc == 2 ]] && grep -q "error TS2322" check.txt
+          # Emit.
+          $tsc --outDir out --declaration ok.ts
+          cat out/ok.js out/ok.d.ts
+          grep -q "export const x = 1;" out/ok.js
+          # tsc-ext: the bin, the Node API, and tsc through the contentMappers entry.
+          npx --no-install --package @effect-x/tsc tsc-ext help
+          printf 'export syntax twice:expr {\n  rule { twice($x:expr) } => { [$x, $x] }\n}\nexport const a = twice(1);\n' > m.sts
+          npx --no-install --package @effect-x/tsc tsc-ext sweetener --expand m.sts | grep -q "\[1, 1\]"
+          node --input-type=module -e 'import { Transformer } from "@effect-x/tsc/ext"; const r = new Transformer({ tsconfig: false }).transformFile("m.sts"); if (!r.code.includes("[1, 1]") || r.hostPath !== "m.ts") process.exit(1)'
+          echo '{"compilerOptions":{"strict":true,"noEmit":true,"allowArbitraryExtensions":true},"include":["m.sts"],"contentMappers":[{"package":"@effect-x/tsc","extensions":[".sts"]}]}' > tsconfig.json
+          $tsc -p tsconfig.json
+      - name: Archive check
+        if: runner.os != 'Windows'
+        run: |
+          dist="$RUNNER_TEMP/dist"
+          tar -xzf "$dist/tsc-$VERSION-${{ matrix.platform }}.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/tsc-$VERSION-${{ matrix.platform }}/tsc" --version
+      - name: Archive check (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "tsc-$env:VERSION-${{ matrix.platform }}"
+          Expand-Archive "$env:RUNNER_TEMP\dist\$name.zip" $env:RUNNER_TEMP
+          & "$env:RUNNER_TEMP\$name\tsc.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  release:
+    if: needs.version.outputs.release == 'true'
+    needs: [version, verify]
+    # Trusted publishing needs a GitHub-hosted runner. The environment is part of the trust: add
+    # required reviewers to it in the repo settings to approve each publish.
+    runs-on: ubuntu-latest
+    environment: npm
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # Publish gate: a token, or trusted publishing set up on npm (npm/README.md).
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      NPM_TRUSTED_PUBLISHING: ${{ vars.NPM_TRUSTED_PUBLISHING }}
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Publish gate
+        id: gate
+        run: |
+          if [[ -n $NPM_TOKEN || $NPM_TRUSTED_PUBLISHING == true ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::npm publish skipped: no NPM_TOKEN secret and NPM_TRUSTED_PUBLISHING is not true. The packages are in the artifact 'release'."
+          fi
+      # Trusted publishing needs npm 11.5.1 or later.
+      - if: steps.gate.outputs.publish == 'true'
+        run: npm install -g npm@11 && npm --version
+      - uses: actions/download-artifact@v5
+        with:
+          name: release
+          path: dist
+      # Platform packages first, then the main package that depends on them. A version that is
+      # already on npm is skipped, so a failed run can run again. While the repo is private, npm
+      # makes no provenance; from a public repo it adds it by itself.
+      # A version with a prerelease part (a "-") is a prerelease: dist-tag `next`. Else `latest`.
+      - name: Publish to npm
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          # Empty with trusted publishing: npm then authenticates with OIDC.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          tag=latest
+          [[ $VERSION != *-* ]] || tag=next
+          echo "dist-tag $tag"
+          for pkg in @effect-x/tsc-linux-x64:effect-x-tsc-linux-x64 @effect-x/tsc-linux-arm64:effect-x-tsc-linux-arm64 \
+            @effect-x/tsc-darwin-arm64:effect-x-tsc-darwin-arm64 @effect-x/tsc-darwin-x64:effect-x-tsc-darwin-x64 \
+            @effect-x/tsc-win32-x64:effect-x-tsc-win32-x64 @effect-x/tsc-win32-arm64:effect-x-tsc-win32-arm64 \
+            @effect-x/tsc:effect-x-tsc; do
+            name=${pkg%%:*} file=./dist/${pkg#*:}-$VERSION.tgz
+            [[ -f $file ]] || { echo "::error::missing package $file"; exit 1; }
+            if npm view "$name@$VERSION" version > /dev/null 2>&1; then
+              echo "$name@$VERSION is already published"
+            else
+              npm publish "$file" --tag "$tag" --access public
+            fi
+          done
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=() install="npm install -D @effect-x/tsc"
+          [[ $VERSION != *-* ]] || pre=(--prerelease) install="npm install -D @effect-x/tsc@next"
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" "${pre[@]}" \
+            --title "@effect-x/tsc $VERSION" --generate-notes \
+            --notes "Install with \`$install\`, or download the archive for your platform."
