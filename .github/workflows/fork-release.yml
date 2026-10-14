@@ -48,7 +48,7 @@ on:
     paths:
       - ".github/workflows/fork-release.yml"
       - "npm/**"
-      - "scripts/goport/npm-pack.sh"
+      - "scripts/fork/npm-pack.sh"
       - "scripts/goport/pgo-train.sh"
       - "crates/ts_goport/scripts/copy-libs.sh"
       - "crates/ts_goport/scripts/build-pgo.sh"
@@ -81,7 +81,7 @@ jobs:
           if [[ $GITHUB_REF_TYPE == tag ]]; then
             v=${GITHUB_REF_NAME#v}
             [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] || { echo "::error::tag $GITHUB_REF_NAME is not v<semver>"; exit 1; }
-            # 0.0.x are the npm placeholders (npm/trust-setup.sh); the publish would skip them.
+            # 0.0.x are the npm placeholders (npm/fork/trust-setup.sh); the publish would skip them.
             [[ $v != 0.0.* ]] || { echo "::error::0.0.x versions are the npm placeholders"; exit 1; }
             echo "release=true" >> "$GITHUB_OUTPUT"
           else
@@ -348,7 +348,7 @@ jobs:
           for platform in linux-x64 linux-arm64 darwin-arm64 darwin-x64 win32-x64 win32-arm64; do
             ext+=(--ext "$platform=$bins/tsc-ext-$platform")
           done
-          scripts/goport/npm-pack.sh --name @effect-x/tsc --package-version "$VERSION" \
+          scripts/fork/npm-pack.sh --name @effect-x/tsc --package-version "$VERSION" \
             --also "linux-arm64=$bins/tsc-linux-arm64/tsc" --also "darwin-arm64=$bins/tsc-darwin-arm64/tsc" \
             --also "darwin-x64=$bins/tsc-darwin-x64/tsc" \
             --also "win32-x64=$bins/tsc-win32-x64/tsc.exe" --also "win32-arm64=$bins/tsc-win32-arm64/tsc.exe" \

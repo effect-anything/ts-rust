@@ -2,9 +2,9 @@
 # Installs an npm-pack.sh package set into a fresh project and checks that tsc through npm gives
 # the same output as the native tsc run directly.
 #
-# usage: npm-test.sh [--name @effect-x/tsc] <pkg-dir> <work-dir>
-#   --name      the package set of npm-pack.sh --name (default typescript). @effect-x/tsc: the main
-#               package @effect-x/tsc, bin tsc, platform package @effect-x/tsc-linux-x64.
+# usage: npm-test.sh [--name tsc-rs] <pkg-dir> <work-dir>
+#   --name      the package set of npm-pack.sh --name (default typescript). tsc-rs: the main package
+#               tsc-rs, bin tsc-rs, platform package @tsc-rs/linux-x64.
 #   <pkg-dir>   npm-pack.sh output (the main and the linux-x64 .tgz files)
 #   <work-dir>  made fresh: <work-dir>/proj (the npm project) and <work-dir>/out (tsc output)
 # Checks:
@@ -28,7 +28,7 @@ name=typescript
 if [[ ${1:-} == --name ]]; then [[ $# -ge 2 ]] || usage; name=$2; shift 2; fi
 case $name in
   typescript) plat=@typescript/typescript-linux-x64 bin=tsc ;;
-  @effect-x/tsc) plat=@effect-x/tsc-linux-x64 bin=tsc ;;
+  tsc-rs) plat=@tsc-rs/linux-x64 bin=tsc-rs ;;
   *) usage ;;
 esac
 [[ $# == 2 ]] || usage

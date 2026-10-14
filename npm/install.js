@@ -1,7 +1,7 @@
-// Postinstall of the goport `typescript` and `@effect-x/tsc` packages: lib/install.js. Go's package has
+// Postinstall of the goport `typescript` and `tsc-rs` packages: lib/install.js. Go's package has
 // no install script; this is the only file the port adds to Go's layout.
 //
-// The bin (bin/tsc) is Go's JS launcher (packages/typescript/bin/tsc): it starts
+// The bin (bin/tsc, or bin/tsc-rs) is Go's JS launcher (packages/typescript/bin/tsc): it starts
 // Node, finds the platform package and execs its native tsc. The Node start costs about 22 ms on
 // every run. On POSIX this script rewrites the bin as a sh and JS polyglot:
 //
@@ -53,7 +53,7 @@ function useNativeBin() {
     if (keepLauncherReason()) return;
     const exe = getExePath();
     const out = execFileSync(exe, ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-    // @effect-x/tsc records the version its tsc reports as tscVersion (npm/pack.mjs).
+    // tsc-rs records the version its tsc reports as tscVersion (npm/pack.mjs).
     const want = `Version ${pkg.tscVersion ?? pkg.version}`;
     if (out !== want) {
         throw new Error(`${exe} reports "${out}", not "${want}"`);

@@ -1,11 +1,11 @@
 # npm packages
 
 Local npm packages for the port, in the layout of the Go packages at the pin, and the port's own
-published set `@effect-x/tsc` (see "@effect-x/tsc releases" below).
+published set `tsc-rs` (see "tsc-rs releases" below).
 
 - `typescript`: Go's JS launcher (`bin/tsc`, `lib/tsc.js`, `lib/getExePath.js`) and JS API (`dist`).
 - `@typescript/typescript-linux-x64`: `lib/tsc` (a noembed build) and the lib files next to it.
-- `wasm` (`@effect-x/tsc-wasm` in this tree; the package name is still `ts-rust-wasm`): the WebAssembly build for Node, Deno, Bun and browsers. See
+- `wasm` (`ts-rust-wasm`): the WebAssembly build for Node, Deno, Bun and browsers. See
   [wasm/README.md](wasm/README.md).
 
 The port adds one file to Go's layout: `install.js`, the postinstall (`lib/install.js`). On POSIX it
@@ -25,7 +25,7 @@ Files:
 - `pack.mjs` writes the package dirs. It follows the Go checkout's `Herebyfile.mjs`
   (`buildNativePreviewPackages`, release profile `typescript`).
 - `install.js` is the postinstall.
-- `getExePath.js` and `tsc-readme.md` replace Go's launcher lookup and README in `@effect-x/tsc`.
+- `getExePath.js` and `tsc-rs-readme.md` replace Go's launcher lookup and README in `tsc-rs`.
 
 Build, test and time (see the header of each script):
 
@@ -53,13 +53,13 @@ too. `RELEASE_LIBC=musl RELEASE_PIE=0` in front of the build-release.sh line bui
 that the release ships. It is 0.5 to 1.9% slower (see the build-release.sh header), which is why
 build-release.sh does not default to it.
 
-## @effect-x/tsc releases
+## tsc-rs releases
 
-`@effect-x/tsc` is the same set under the port's own names: the main package `@effect-x/tsc` (bin `tsc`, so it
-does not clash with the `typescript` package name) and one platform package per platform,
-`@effect-x/tsc-linux-x64`, `@effect-x/tsc-linux-arm64`, `@effect-x/tsc-darwin-arm64`, `@effect-x/tsc-darwin-x64`,
-`@effect-x/tsc-win32-x64` and `@effect-x/tsc-win32-arm64` (the Windows tsc is `lib/tsc.exe`). Its
-`lib/getExePath.js` finds `@effect-x/tsc-<platform>-<arch>`.
+`tsc-rs` is the same set under the port's own names: the main package `tsc-rs` (bin `tsc-rs`, so it
+does not clash with the `tsc` of a `typescript` install) and one platform package per platform,
+`@tsc-rs/linux-x64`, `@tsc-rs/linux-arm64`, `@tsc-rs/darwin-arm64`, `@tsc-rs/darwin-x64`,
+`@tsc-rs/win32-x64` and `@tsc-rs/win32-arm64` (the Windows tsc is `lib/tsc.exe`). Its
+`lib/getExePath.js` finds `@tsc-rs/<platform>-<arch>`.
 
 The npm version (`--package-version`) is the port's own. The tsc is not stamped with it: it reports
 the TypeScript version of the source (`7.1.0-dev`), because the compiler matches `typesVersions`
@@ -78,20 +78,20 @@ The release workflow (`.github/workflows/release.yml`) makes a release:
    build trained on its own platform (see below). Blacksmith has no Intel Mac and no arm64
    Windows runner: darwin-x64 builds on GitHub's `macos-15-intel` and win32-arm64 on GitHub's
    `windows-11-arm`.
-3. It packs the set with `npm-pack.sh --name @effect-x/tsc --package-version <v> --also linux-arm64=<tsc> --also darwin-arm64=<tsc> --also darwin-x64=<tsc> --also win32-x64=<tsc.exe> --also win32-arm64=<tsc.exe>`,
+3. It packs the set with `npm-pack.sh --name tsc-rs --package-version <v> --also linux-arm64=<tsc> --also darwin-arm64=<tsc> --also darwin-x64=<tsc> --also win32-x64=<tsc.exe> --also win32-arm64=<tsc.exe>`,
    makes one archive per platform (the tsc, the lib files, LICENSE and NOTICE.txt; a .tar.gz, and
    a .zip for Windows) and installs the packages in a fresh project on each platform
    (GitHub-hosted `ubuntu-latest`, `ubuntu-24.04-arm`, `macos-latest`, `macos-15-intel`,
    `windows-latest` and `windows-11-arm`).
-4. It publishes the platform packages, then `@effect-x/tsc`, and creates a GitHub release with the
+4. It publishes the platform packages, then `tsc-rs`, and creates a GitHub release with the
    archives, the .tgz files and `SHA256SUMS`. A stable version goes to the dist-tag `latest` and a
    normal release. A version with a prerelease part (`0.2.0-beta.1`) goes to `next` and a GitHub
    prerelease. The publish uses npm
    trusted publishing (see below), so there is no npm token in the repo.
 
 Pull requests that change the release files run steps 2 and 3 with the version `0.0.0-ci.<run>`.
-To make a prerelease the default after a check of `npx --package=@effect-x/tsc@next tsc` on each platform, run
-`npm dist-tag add @effect-x/tsc@<v> latest`, and the same for each platform package.
+To make a prerelease the default after a check of `npx tsc-rs@next` on each platform, run
+`npm dist-tag add tsc-rs@<v> latest`, and the same for each platform package.
 
 The CI builds are PGO builds of the shipped profile (fat LTO): `build-pgo.sh` trains each
 platform's tsc on the set of `scripts/goport/pgo-train.sh`, and the job fails unless the PGO tsc
@@ -103,18 +103,18 @@ hand on zbook, use
 and pack and test it:
 
 ```sh
-GOPORT_PIN=<pin> scripts/goport/npm-pack.sh --name @effect-x/tsc --package-version <v> \
+GOPORT_PIN=<pin> scripts/goport/npm-pack.sh --name tsc-rs --package-version <v> \
   --also linux-arm64=<linux-arm64 tsc from the release workflow> \
   --also darwin-arm64=<darwin-arm64 tsc from the release workflow> \
   --also darwin-x64=<darwin-x64 tsc from the release workflow> \
   --also win32-x64=<win32-x64 tsc.exe from the release workflow> \
   --also win32-arm64=<win32-arm64 tsc.exe from the release workflow> <out>/pkg <out>/linux-x64/bin/tsgo
-scripts/goport/npm-test.sh --name @effect-x/tsc <out>/pkg <out>/test
+scripts/goport/npm-test.sh --name tsc-rs <out>/pkg <out>/test
 ```
 
 ### Trusted publishing
 
-npm trusts the workflow file `release.yml` of `effect-anything/tsc`, in the GitHub environment
+npm trusts the workflow file `release.yml` of `pingdotgg/ts-rust`, in the GitHub environment
 `npm`, to publish each of the 7 packages (OIDC, no token). Set it up once with
 `npm/trust-setup.sh`, logged in to npm with 2FA and npm 11.15.0 or later. It publishes a
 `0.0.0-placeholder` version of a package that is not on npm yet, because npm can only trust a
