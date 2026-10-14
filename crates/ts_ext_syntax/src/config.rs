@@ -66,7 +66,8 @@ impl SweetenerOptions {
 pub struct TypegpuOptions {
     /// `autoNaming`, default `true`: name `TypeGPU` resources after their binding.
     pub auto_naming: Option<bool>,
-    /// `earlyPruning`, default `false`: skip files that do not import `TypeGPU`.
+    /// `earlyPruning`, default `true` (unplugin-typegpu and the `tsc` emit hook
+    /// prune too): skip a file that mentions none of `"use gpu"`, `tgpu`, `typegpu`.
     pub early_pruning: Option<bool>,
     /// `forceTgpuAlias`, default none: the name `tgpu` is imported as.
     pub force_tgpu_alias: Option<String>,
@@ -80,7 +81,7 @@ impl TypegpuOptions {
 
     #[must_use]
     pub fn early_pruning(&self) -> bool {
-        self.early_pruning.unwrap_or(false)
+        self.early_pruning.unwrap_or(true)
     }
 }
 
@@ -248,6 +249,56 @@ pub fn read_tsconfig_options(tsconfig: &Path) -> Result<Options, String> {
         cache.insert(tsconfig.to_path_buf(), (modified, result.clone()));
     }
     result
+}
+
+/// The extensions `tsconfig` (or a relative config it extends) registers
+/// for this package's content mapper.
+pub fn own_extensions(tsconfig: &Path) -> Vec<String> {
+    own_extensions_at(tsconfig, 0)
+}
+
+fn own_extensions_at(tsconfig: &Path, depth: usize) -> Vec<String> {
+    let Some(value) = (depth <= 16)
+        .then(|| std::fs::read_to_string(tsconfig).ok())
+        .flatten()
+        .and_then(|text| serde_json::from_str::<Value>(&strip_jsonc(&text)).ok())
+    else {
+        return Vec::new();
+    };
+    if let Some(mappers) = value.get("contentMappers") {
+        return mappers
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.get("package").and_then(Value::as_str) == Some(PACKAGE))
+            .flat_map(|entry| {
+                entry
+                    .get("extensions")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter_map(|ext| ext.as_str().map(str::to_owned))
+            .collect();
+    }
+    let parents: Vec<&str> = match value.get("extends") {
+        Some(Value::String(parent)) => vec![parent.as_str()],
+        Some(Value::Array(parents)) => parents.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    for parent in parents.iter().rev() {
+        if !(parent.starts_with("./") || parent.starts_with("../") || parent.starts_with('/')) {
+            continue;
+        }
+        let mut path = tsconfig.parent().unwrap_or(Path::new(".")).join(parent);
+        if path.extension().is_none() {
+            path.set_extension("json");
+        }
+        if path.is_file() {
+            return own_extensions_at(&path, depth + 1);
+        }
+    }
+    Vec::new()
 }
 
 fn read_uncached(tsconfig: &Path, depth: usize) -> Result<Options, String> {

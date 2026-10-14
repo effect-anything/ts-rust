@@ -16,7 +16,9 @@ declares `Symbol.operatorPlus` on its types can use the same path.
 
 The runtime is `tsover-runtime`. It installs `globalThis.__tsover_add` and
 the other five calls, then looks up the symbol on either operand. This
-compiler does not inject that import.
+compiler does not inject that import, matching upstream and `tsc` emit:
+`typegpu` imports it itself (`data/assignInfixOperators.js`), and an app
+that uses tsover without typegpu imports `tsover-runtime` once at its entry.
 
 ## Opt-in
 

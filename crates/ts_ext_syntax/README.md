@@ -20,7 +20,7 @@ entry for `@effect-x/tsc`.
       "extensions": [".sts", ".stsx"],
       "options": {
         "sweetener": { "rewriteImports": false },
-        "typegpu": { "autoNaming": true, "earlyPruning": false, "forceTgpuAlias": "tgpu" }
+        "typegpu": { "autoNaming": true, "earlyPruning": true, "forceTgpuAlias": "tgpu" }
       }
     }
   ]
@@ -31,7 +31,7 @@ entry for `@effect-x/tsc`.
 | --- | --- | --- |
 | `sweetener.rewriteImports` | `false` | Drop `.sts`/`.stsx` from module specifiers in the Node API output. |
 | `typegpu.autoNaming` | `true` | Name TypeGPU resources after their binding. |
-| `typegpu.earlyPruning` | `false` | Skip files that do not import TypeGPU. |
+| `typegpu.earlyPruning` | `true` | Skip a file that mentions none of `"use gpu"`, `tgpu`, `typegpu` (as unplugin-typegpu and the `tsc` emit hook do). |
 | `typegpu.forceTgpuAlias` | none | The name `tgpu` is imported as. |
 
 Unknown keys and wrong types are errors. `src/config.rs` reads the nearest `tsconfig.json`

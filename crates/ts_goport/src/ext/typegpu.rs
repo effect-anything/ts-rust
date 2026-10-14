@@ -796,11 +796,30 @@ fn scope_top(node: Node, code: &str) -> Option<usize> {
     if is_named_export(scope) || scope.kind() == SyntaxKind::ExportAssignment {
         scope = scope.parent();
     }
+    // Hoisted consts go after the prologue (`"use strict"`, `"use client"`),
+    // as Babel's `unshiftContainer('body')` puts them: above it, the
+    // directive is an ordinary expression and strict mode is lost.
+    let after_prologue = |scope: Node| -> Option<usize> {
+        let mut end = None;
+        for statement in scope.statements().iter() {
+            if !is_prologue_directive(statement) {
+                break;
+            }
+            end = usize::try_from(statement.end().max(0)).ok();
+        }
+        let end = end?.min(code.len());
+        let line = code[end..].find('\n').map_or(code.len(), |at| end + at + 1);
+        Some(line)
+    };
     if scope.kind() == SyntaxKind::SourceFile {
-        return Some(0);
+        return Some(after_prologue(scope).unwrap_or(0));
     }
     if !matches!(scope.kind(), SyntaxKind::Block | SyntaxKind::ModuleBlock) {
         return None;
+    }
+    if let Some(at) = after_prologue(scope) {
+        let at = at + code[at..].len() - code[at..].trim_start_matches([' ', '\t']).len();
+        return Some(at);
     }
     let open = usize::try_from(scope.pos().max(0)).ok()?;
     let brace = code.get(open..)?.find('{')? + open + 1;
@@ -3824,4 +3843,24 @@ fn slice_node(code: &str, node: Node) -> String {
     let end = end.min(code.len());
     let start = start.min(end);
     code[start..end].to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::embed_metadata_js;
+
+    #[test]
+    fn hoists_stay_below_the_prologue() {
+        let code = "\"use strict\";\nimport tgpu from 'typegpu';\nconst f = () => {\n    'use gpu';\n    return 1 + 2;\n};\n";
+        let out = embed_metadata_js("a.js", code);
+        assert!(out.starts_with("\"use strict\";"), "{out}");
+    }
+
+    #[test]
+    fn shells_are_wrapped_without_a_directive() {
+        let code = "import tgpu from 'typegpu';\nexport const main = tgpu.fn([])(() => {\n    return;\n});\n";
+        let out = embed_metadata_js("a.js", code);
+        assert_ne!(out, code, "{out}");
+        assert!(out.contains("main"), "{out}");
+    }
 }

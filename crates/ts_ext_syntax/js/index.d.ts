@@ -24,7 +24,7 @@ export interface SweetenerOptions {
 export interface TypegpuOptions {
   /** Name TypeGPU resources after their binding. Default `true`. */
   autoNaming?: boolean;
-  /** Skip files that do not import TypeGPU. Default `false`. */
+  /** Skip a file that mentions none of `"use gpu"`, `tgpu`, `typegpu`. Default `true`. */
   earlyPruning?: boolean;
   /** The name `tgpu` is imported as. Default: detected from imports. */
   forceTgpuAlias?: string;

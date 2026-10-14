@@ -245,7 +245,10 @@ fn apply_typegpu(
     .transform(path, code);
     if phase == TransformPhase::Build {
         let output = rewrite_specifiers(session.rewrite_imports, source, &gpu.code);
-        let segments = crate::retarget_segments(code, &gpu.code, &first.span_map_segments());
+        // The operator rewrite and the wrap insert text, collapse
+        // whitespace and hoist marked functions: token alignment carries
+        // every kept token, a hoisted one too, so the map stays exact.
+        let segments = ts_goport::ext::align::retarget(code, &gpu.code, &first.span_map_segments());
         let segments = crate::retarget_segments(&gpu.code, &output, &segments);
         let mappings = mappings_json(&segments);
         let source_map = v3_source_map(path, source, &output, &segments);
