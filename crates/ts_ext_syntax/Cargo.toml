@@ -21,6 +21,9 @@ napi = { version = "3", default-features = false, features = ["napi4"] }
 napi-derive = "3"
 serde_json = "1"
 
+[dev-dependencies]
+rustc-hash = "=2.1.2"
+
 [build-dependencies]
 napi-build = "2"
 
