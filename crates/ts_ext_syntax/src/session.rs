@@ -10,6 +10,7 @@
 //!   Build rewrites them to `__tsover_*` and then wraps marked functions.
 
 use crate::{ExpandRequest, Phase, expand, sweetener_matches};
+use std::fmt::Write as _;
 
 /// What the caller will do with the text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -290,8 +291,7 @@ fn apply_typegpu(
     let shift = gpu
         .code
         .strip_suffix(&rewritten.code)
-        .map(|prefix| i32::try_from(prefix.len()).unwrap_or(0))
-        .unwrap_or(0);
+        .map_or(0, |prefix| i32::try_from(prefix.len()).unwrap_or(0));
     for segment in &mut segments {
         segment.0 = segment.0.wrapping_add(shift);
         segment.1 = segment.1.wrapping_add(shift);
@@ -363,7 +363,7 @@ fn keep_specifiers(source: &str, code: &str) -> String {
             if quote != b'"' && quote != b'\'' {
                 continue;
             }
-            let Some(open) = source[..at].rfind(|ch| ch == quote as char || ch == '\n') else {
+            let Some(open) = source[..at].rfind([quote as char, '\n']) else {
                 continue;
             };
             if bytes[open] != quote {
@@ -390,12 +390,12 @@ fn apply_specifier_spans(code: &str) -> String {
     let code = rewrite_from_clauses(code);
     let spans = sts_specifier_spans(&code);
     if spans.is_empty() {
-        return code.to_owned();
+        return code;
     }
     let mut out = String::with_capacity(code.len());
     let mut cursor = 0usize;
     for (start, end, rewritten) in spans {
-        if start < cursor || end > code.len() || &code[start..end] == rewritten {
+        if start < cursor || end > code.len() || code[start..end] == rewritten {
             continue;
         }
         out.push_str(&code[cursor..start]);
@@ -513,6 +513,7 @@ fn rewrite_from_clauses(code: &str) -> String {
     out
 }
 
+#[allow(clippy::match_same_arms, reason = "one arm per scanner state and byte")]
 fn sts_specifier_spans(code: &str) -> Vec<(usize, usize, String)> {
     let bytes = code.as_bytes();
     let mut spans = Vec::new();
@@ -664,6 +665,7 @@ fn scan_template(
 }
 
 /// Tokens inside `${ ... }`, stopped at the `}` that closes this hole.
+#[allow(clippy::match_same_arms, reason = "one arm per scanner state and byte")]
 fn scan_nested(
     code: &str,
     bytes: &[u8],
@@ -902,8 +904,8 @@ fn compose(
             split_verbatim(first, segment, &mut out);
         } else if let Some(mapped) = map_through(
             first,
-            segment.original_start as u32,
-            segment.original_end as u32,
+            segment.original_start.cast_unsigned(),
+            segment.original_end.cast_unsigned(),
         ) {
             out.push((
                 segment.virtual_start,
@@ -922,8 +924,8 @@ fn split_verbatim(
     segment: &ts_goport::spanmap::Segment,
     out: &mut Vec<(i32, i32, i32, i32, i32)>,
 ) {
-    let origin = segment.original_start as u32;
-    let end = segment.original_end as u32;
+    let origin = segment.original_start.cast_unsigned();
+    let end = segment.original_end.cast_unsigned();
     let mut cursor = origin;
     for prev in &first.segments {
         if prev.virtual_end <= cursor {
@@ -976,8 +978,7 @@ fn author_diagnostics(
         .into_iter()
         .map(|item| {
             let (start, end) = map_through(first, item.start, item.end)
-                .map(|range| (range.start, range.end))
-                .unwrap_or((item.start, item.end));
+                .map_or((item.start, item.end), |range| (range.start, range.end));
             SessionDiagnostic {
                 message: item.message,
                 start,
@@ -1085,6 +1086,7 @@ pub fn unsupported_source(path: &str) -> Option<String> {
         })
 }
 
+#[must_use]
 pub fn virtual_extension(path: &str) -> &'static str {
     let path = path.split(['?', '#']).next().unwrap_or(path);
     let ext = path.rsplit_once('.').map_or("", |(_, ext)| ext);
@@ -1096,6 +1098,7 @@ pub fn virtual_extension(path: &str) -> &'static str {
 
 /// A source map whose segments are the spanmap tuples. The next tool
 /// reads `segments` and composes them; it does not replace them.
+#[must_use]
 pub fn source_map_json(file: &str, mappings: &str) -> String {
     format!(
         r#"{{"version":3,"file":{},"sources":[{}],"segments":{mappings}}}"#,
@@ -1183,12 +1186,12 @@ pub fn v3_source_map(
         let (src_line, _) = position(&source_lines, original);
         let col = utf16_column(output, output_lines[out_line], out_at);
         let src_col_utf16 = utf16_column(source, source_lines[src_line], original);
-        vlq(&mut mappings, col - prev_col);
-        vlq(&mut mappings, 0);
-        vlq(&mut mappings, src_line as i64 - prev_src_line);
-        vlq(&mut mappings, src_col_utf16 - prev_src_col);
+        crate::compose::vlq(&mut mappings, col - prev_col);
+        crate::compose::vlq(&mut mappings, 0);
+        crate::compose::vlq(&mut mappings, to_i64(src_line) - prev_src_line);
+        crate::compose::vlq(&mut mappings, src_col_utf16 - prev_src_col);
         prev_col = col;
-        prev_src_line = src_line as i64;
+        prev_src_line = to_i64(src_line);
         prev_src_col = src_col_utf16;
     }
     format!(
@@ -1211,27 +1214,11 @@ fn utf16_column(text: &str, line_start: usize, at: usize) -> i64 {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    text[line_start..end].encode_utf16().count() as i64
+    to_i64(text[line_start..end].encode_utf16().count())
 }
 
-fn vlq(out: &mut String, value: i64) {
-    const DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut rest = if value < 0 {
-        ((-value) << 1) | 1
-    } else {
-        value << 1
-    };
-    loop {
-        let mut digit = rest & 31;
-        rest >>= 5;
-        if rest > 0 {
-            digit |= 32;
-        }
-        out.push(DIGITS[digit as usize] as char);
-        if rest == 0 {
-            break;
-        }
-    }
+fn to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn json_string(value: &str) -> String {
@@ -1243,7 +1230,9 @@ fn json_string(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            ch if (ch as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch if u32::from(ch) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", u32::from(ch));
+            }
             ch => out.push(ch),
         }
     }
@@ -1251,23 +1240,31 @@ fn json_string(value: &str) -> String {
     out
 }
 
+#[must_use]
 pub fn mappings_json(segments: &[(i32, i32, i32, i32, i32)]) -> String {
     let mut out = String::from("[");
     for (index, (v0, v1, o0, o1, kind)) in segments.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "[{v0},{},{o0},{},{kind}]",
             v1.wrapping_sub(*v0),
-            o1.wrapping_sub(*o0),
-        ));
+            o1.wrapping_sub(*o0)
+        );
     }
     out.push(']');
     out
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "test fixtures are a few hundred bytes"
+)]
 mod tests {
     use super::{TransformSession, compose, map_through};
 
@@ -1390,7 +1387,7 @@ mod tests {
                 },
                 Segment {
                     virtual_start: head_len,
-                    virtual_end: virtual_end,
+                    virtual_end,
                     original_start: head_len,
                     original_end: author_end,
                     kind: SegmentKind::Atom,
@@ -1461,7 +1458,7 @@ mod tests {
                 out.code.contains(needle),
                 "{needle} missing in {}",
                 out.code
-            )
+            );
         };
         has("from \"./logic\"");
         has("from './types'");
@@ -1485,8 +1482,7 @@ mod tests {
         let obj = out.code.find("const obj").expect("obj");
         let line = &out.code[obj..out.code[obj..]
             .find('\n')
-            .map(|n| obj + n)
-            .unwrap_or(out.code.len())];
+            .map_or(out.code.len(), |n| obj + n)];
         assert_eq!(
             line, "const obj = { from: \"./obj.sts\", note: \"./note.sts\" };",
             "{line:?}"

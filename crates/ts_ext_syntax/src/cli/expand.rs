@@ -36,12 +36,22 @@ pub enum Pass {
     Tsover,
 }
 
+/// `--map`: where the source map goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MapOut {
+    None,
+    /// `--map`: an inline `sourceMappingURL` comment.
+    Inline,
+    /// `--map=<file>`.
+    File(String),
+}
+
 /// Settings shared by `expand` and `eval`.
 pub struct Settings {
     stage: Stage,
     only: Option<Pass>,
     tsconfig: Option<PathBuf>,
-    map: Option<Option<String>>,
+    map: MapOut,
     json: bool,
     diff: bool,
     trace: bool,
@@ -80,9 +90,11 @@ pub fn settings(parsed: &Parsed) -> Result<Settings, String> {
         Some("tsc") => Format::Tsc,
         Some(other) => return Err(format!("--format takes pretty or tsc, not {other}")),
     };
-    let map = parsed
-        .has("map")
-        .then(|| parsed.value("map").map(str::to_owned));
+    let map = match (parsed.has("map"), parsed.value("map")) {
+        (false, _) => MapOut::None,
+        (true, None) => MapOut::Inline,
+        (true, Some(file)) => MapOut::File(file.to_owned()),
+    };
     if parsed.has("json") && parsed.has("diff") {
         return Err("--json and --diff cannot be combined".to_owned());
     }
@@ -131,7 +143,7 @@ pub fn expand(parsed: &Parsed) -> u8 {
     if parsed.positionals.is_empty() {
         return super::usage_error("expand", "name at least one file: tsc-ext expand <file>...");
     }
-    if parsed.positionals.len() > 1 && matches!(settings.map, Some(Some(_))) {
+    if parsed.positionals.len() > 1 && matches!(settings.map, MapOut::File(_)) {
         return super::usage_error(
             "expand",
             "--map=<file> takes one input file; use --map to inline a map per file",
@@ -204,17 +216,16 @@ pub fn eval(parsed: &Parsed) -> u8 {
         Some(code) => code.to_owned(),
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let (shown, path) = match parsed.value("as") {
-        Some(name) => (name.to_owned(), cwd.join(name)),
-        None => {
-            let ext = match (parsed.has("jsx"), lang) {
-                (true, _) => "stsx",
-                (false, Some(lang)) => lang,
-                (false, None) => "sts",
-            };
-            let name = format!("eval.{ext}");
-            (format!("<eval>.{ext}"), cwd.join(name))
-        }
+    let (shown, path) = if let Some(name) = parsed.value("as") {
+        (name.to_owned(), cwd.join(name))
+    } else {
+        let ext = match (parsed.has("jsx"), lang) {
+            (true, _) => "stsx",
+            (false, Some(lang)) => lang,
+            (false, None) => "sts",
+        };
+        let name = format!("eval.{ext}");
+        (format!("<eval>.{ext}"), cwd.join(name))
     };
     if let Some(message) = crate::unsupported_source(&shown) {
         return super::usage_error("eval", &message);
@@ -223,7 +234,6 @@ pub fn eval(parsed: &Parsed) -> u8 {
 }
 
 fn run(settings: &Settings, inputs: &[Input]) -> u8 {
-    let out_style = settings.color.stdout();
     let err_style = settings.color.stderr();
     let mut exit = EXIT_OK;
     let mut json_items = Vec::new();
@@ -246,86 +256,16 @@ fn run(settings: &Settings, inputs: &[Input]) -> u8 {
         {
             exit = exit.max(EXIT_ERRORS);
         }
-        let shown = if output.against_before {
-            format!("{} (after Sweetener)", input.shown)
-        } else {
-            input.shown.clone()
-        };
-        let source = if output.against_before {
-            output.before.as_str()
-        } else {
-            input.text.as_str()
-        };
         if settings.json {
-            json_items.push(json(settings, input, &output, source));
-            continue;
-        }
-        for note in &output.notes {
-            eprintln!("{} {note}", err_style.cyan("note:"));
-        }
-        if settings.trace {
-            eprint!(
-                "{}",
-                trace_text(
-                    &input.shown,
-                    &input.text,
-                    &output.trace,
-                    settings.stage,
-                    err_style
-                )
-            );
-        }
-        eprint!(
-            "{}",
-            render::diagnostics(
-                &shown,
-                source,
-                &output.diagnostics,
-                settings.format,
-                err_style
-            )
-        );
-        if inputs.len() > 1 {
-            let _ = writeln!(
-                stdout,
-                "{}",
-                out_style.dim(&format!("// ==> {} <==", input.shown))
-            );
-        }
-        if settings.diff {
-            stdout.push_str(&render::diff(
-                &input.shown,
-                &output.before,
-                &output.code,
-                out_style,
+            json_items.push(json(settings, input, &output));
+        } else {
+            exit = exit.max(print_output(
+                settings,
+                input,
+                &output,
+                inputs.len() > 1,
+                &mut stdout,
             ));
-            continue;
-        }
-        stdout.push_str(&output.code);
-        match (&settings.map, &output.map) {
-            (Some(Some(file)), Some(map)) => {
-                if let Err(error) = std::fs::write(file, map) {
-                    eprintln!("{}: cannot write {file}: {error}", err_style.red("error"));
-                    exit = exit.max(EXIT_CONFIG);
-                } else if !stdout.ends_with('\n') {
-                    stdout.push('\n');
-                }
-            }
-            (Some(None), Some(map)) => {
-                if !stdout.ends_with('\n') {
-                    stdout.push('\n');
-                }
-                let _ = writeln!(
-                    stdout,
-                    "//# sourceMappingURL=data:application/json;base64,{}",
-                    base64(map.as_bytes())
-                );
-            }
-            (Some(_), None) => eprintln!(
-                "{} no source map for this pass (--only typegpu / --only tsover)",
-                err_style.cyan("note:")
-            ),
-            (None, _) => {}
         }
     }
     if settings.json {
@@ -346,6 +286,100 @@ fn run(settings: &Settings, inputs: &[Input]) -> u8 {
         return exit.max(EXIT_CONFIG);
     }
     exit
+}
+
+/// The text diagnostics are positioned in, and the name it is shown under.
+fn diagnostic_source<'a>(input: &'a Input, output: &'a Output) -> (String, &'a str) {
+    if output.against_before {
+        (format!("{} (after Sweetener)", input.shown), &output.before)
+    } else {
+        (input.shown.clone(), &input.text)
+    }
+}
+
+/// Notes, trace and diagnostics to stderr; the code (or diff) and map to
+/// `stdout`. Returns an exit code for a map that could not be written.
+fn print_output(
+    settings: &Settings,
+    input: &Input,
+    output: &Output,
+    several: bool,
+    stdout: &mut String,
+) -> u8 {
+    let out_style = settings.color.stdout();
+    let err_style = settings.color.stderr();
+    let (shown, source) = diagnostic_source(input, output);
+    for note in &output.notes {
+        eprintln!("{} {note}", err_style.cyan("note:"));
+    }
+    if settings.trace {
+        eprint!(
+            "{}",
+            trace_text(
+                &input.shown,
+                &input.text,
+                &output.trace,
+                settings.stage,
+                err_style
+            )
+        );
+    }
+    eprint!(
+        "{}",
+        render::diagnostics(
+            &shown,
+            source,
+            &output.diagnostics,
+            settings.format,
+            err_style
+        )
+    );
+    if several {
+        let _ = writeln!(
+            stdout,
+            "{}",
+            out_style.dim(&format!("// ==> {} <==", input.shown))
+        );
+    }
+    if settings.diff {
+        stdout.push_str(&render::diff(
+            &input.shown,
+            &output.before,
+            &output.code,
+            out_style,
+        ));
+        return EXIT_OK;
+    }
+    stdout.push_str(&output.code);
+    match (&settings.map, &output.map) {
+        (MapOut::File(file), Some(map)) => {
+            if let Err(error) = std::fs::write(file, map) {
+                eprintln!("{}: cannot write {file}: {error}", err_style.red("error"));
+                return EXIT_CONFIG;
+            }
+            end_line(stdout);
+        }
+        (MapOut::Inline, Some(map)) => {
+            end_line(stdout);
+            let _ = writeln!(
+                stdout,
+                "//# sourceMappingURL=data:application/json;base64,{}",
+                base64(map.as_bytes())
+            );
+        }
+        (MapOut::File(_) | MapOut::Inline, None) => eprintln!(
+            "{} no source map for this pass (--only typegpu / --only tsover)",
+            err_style.cyan("note:")
+        ),
+        (MapOut::None, _) => {}
+    }
+    EXIT_OK
+}
+
+fn end_line(text: &mut String) {
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
 }
 
 fn options_for(settings: &Settings, path: &Path) -> Result<Options, String> {
@@ -370,7 +404,10 @@ fn transform(settings: &Settings, path: &str, text: &str, options: &Options) -> 
         Stage::Tsc => crate::Phase::Check,
         Stage::Bundle => crate::Phase::Build,
     };
-    let trace = if settings.trace && sweetener_file {
+    let mut notes = Vec::new();
+    let trace = if !settings.trace {
+        Vec::new()
+    } else if sweetener_file {
         ts_ext_sweetener::expand_traced(crate::ExpandRequest {
             filename: path,
             code: text,
@@ -378,152 +415,163 @@ fn transform(settings: &Settings, path: &str, text: &str, options: &Options) -> 
         })
         .1
     } else {
-        Vec::new()
-    };
-    let mut notes = Vec::new();
-    if settings.trace && !sweetener_file {
         notes.push(
             "--trace shows Sweetener macro expansion; this is not a .sts/.stsx file".to_owned(),
         );
-    }
-    let sweetener = |phase| {
-        let expanded = crate::expand(crate::ExpandRequest {
-            filename: path,
-            code: text,
-            phase,
-        });
-        let map = crate::v3_source_map(path, text, &expanded.code, &expanded.span_map_segments());
-        let diagnostics = expanded
-            .diagnostics
-            .iter()
-            .map(|diagnostic| {
-                Diag::new(
-                    severity(diagnostic.severity),
-                    &diagnostic.message,
-                    diagnostic.start,
-                    diagnostic.end,
-                    diagnostic
-                        .related
-                        .iter()
-                        .map(|related| (related.message.clone(), related.start, related.end))
-                        .collect(),
-                )
-            })
-            .collect();
-        (expanded.code, strip_segments(&map), diagnostics)
+        Vec::new()
     };
-    match (settings.stage, settings.only) {
+    let mut output = match (settings.stage, settings.only) {
         (Stage::Tsc, _) | (Stage::Bundle, Some(Pass::Sweetener)) => {
             if !sweetener_file && settings.stage == Stage::Tsc {
                 notes.push("tsc reads this file as written: only .sts/.stsx files are content-mapped. --stage bundle shows the TypeGPU and tsover rewrites".to_owned());
             }
-            let (code, map, diagnostics) = sweetener(phase);
+            let (code, map, diagnostics) = sweetener(path, text, phase);
             Output {
                 code,
                 before: text.to_owned(),
                 map: Some(map),
                 diagnostics,
                 against_before: false,
-                trace,
-                notes,
+                trace: Vec::new(),
+                notes: Vec::new(),
             }
         }
         (Stage::Bundle, None) => {
             let built = crate::TransformSession::from_options(options).transform(path, text);
-            let diagnostics = built
-                .diagnostics
-                .iter()
-                .map(|diagnostic| {
-                    Diag::new(
-                        severity(diagnostic.severity),
-                        &diagnostic.message,
-                        diagnostic.start,
-                        diagnostic.end,
-                        diagnostic
-                            .related
-                            .iter()
-                            .map(|related| (related.message.clone(), related.start, related.end))
-                            .collect(),
-                    )
-                })
-                .collect();
             Output {
                 map: Some(strip_segments(&built.source_map)),
+                diagnostics: built
+                    .diagnostics
+                    .iter()
+                    .map(|item| {
+                        diag(
+                            item.severity,
+                            &item.message,
+                            item.start,
+                            item.end,
+                            &item.related,
+                        )
+                    })
+                    .collect(),
                 code: built.code,
                 before: text.to_owned(),
-                diagnostics,
                 against_before: false,
-                trace,
-                notes,
+                trace: Vec::new(),
+                notes: Vec::new(),
             }
         }
-        (Stage::Bundle, Some(pass)) => {
-            // The pass runs on its input in the pipeline: after Sweetener for
-            // a `.sts` file.
-            let (input, mut diagnostics, after) = if sweetener_file {
-                let (code, _, diagnostics) = sweetener(crate::Phase::Build);
-                (code, diagnostics, true)
+        (Stage::Bundle, Some(pass)) => one_pass(pass, path, text, sweetener_file, options),
+    };
+    notes.append(&mut output.notes);
+    output.notes = notes;
+    output.trace = trace;
+    output
+}
+
+/// Sweetener alone: the code, its v3 map and its diagnostics.
+fn sweetener(path: &str, text: &str, phase: crate::Phase) -> (String, String, Vec<Diag>) {
+    let expanded = crate::expand(crate::ExpandRequest {
+        filename: path,
+        code: text,
+        phase,
+    });
+    let map = crate::v3_source_map(path, text, &expanded.code, &expanded.span_map_segments());
+    let diagnostics = expanded
+        .diagnostics
+        .iter()
+        .map(|item| {
+            diag(
+                item.severity,
+                &item.message,
+                item.start,
+                item.end,
+                &item.related,
+            )
+        })
+        .collect();
+    (expanded.code, strip_segments(&map), diagnostics)
+}
+
+/// `--stage bundle --only typegpu|tsover`: the pass on its pipeline input
+/// (the Sweetener expansion for a `.sts` file).
+fn one_pass(pass: Pass, path: &str, text: &str, sweetener_file: bool, options: &Options) -> Output {
+    let mut notes = Vec::new();
+    let mut diagnostics = Vec::new();
+    let input = if sweetener_file {
+        notes.push("this pass runs on the Sweetener expansion; the diff and positions are against that text".to_owned());
+        // Sweetener's diagnostics are in the author's file; keep only the pass's.
+        sweetener(path, text, crate::Phase::Build).0
+    } else {
+        text.to_owned()
+    };
+    let code = match pass {
+        Pass::Tsover => {
+            if let Some(rewrite) = ts_goport::ext::tsover::rewrite_text(path, &input) {
+                diagnostics.extend(rewrite.diagnostics.iter().map(|item| {
+                    Diag::new(
+                        Severity::Error,
+                        &item.message,
+                        item.start,
+                        item.end,
+                        Vec::new(),
+                    )
+                }));
+                rewrite.code
             } else {
-                (text.to_owned(), Vec::new(), false)
-            };
-            if after {
-                notes.push("this pass runs on the Sweetener expansion; the diff and positions are against that text".to_owned());
-                // Sweetener diagnostics are in the author's file; keep only the pass's.
-                diagnostics.clear();
-            }
-            let code = match pass {
-                Pass::Tsover => match ts_goport::ext::tsover::rewrite_text(path, &input) {
-                    Some(rewrite) => {
-                        diagnostics.extend(rewrite.diagnostics.iter().map(|item| {
-                            Diag::new(
-                                Severity::Error,
-                                &item.message,
-                                item.start,
-                                item.end,
-                                Vec::new(),
-                            )
-                        }));
-                        rewrite.code
-                    }
-                    None => {
-                        notes.push(
-                            "no \"use gpu\" function here, so tsover rewrites nothing".to_owned(),
-                        );
-                        input.clone()
-                    }
-                },
-                Pass::Typegpu => {
-                    let (code, refusals) = ts_goport::ext::typegpu::embed_metadata_reports(
-                        path,
-                        &input,
-                        options.typegpu.auto_naming(),
-                    );
-                    notes.extend(
-                        refusals
-                            .into_iter()
-                            .map(|refusal| format!("typegpu: {refusal}")),
-                    );
-                    code
-                }
-                Pass::Sweetener => unreachable!("handled above"),
-            };
-            Output {
-                code,
-                before: input,
-                map: None,
-                diagnostics,
-                against_before: after,
-                trace,
-                notes,
+                notes.push("no \"use gpu\" function here, so tsover rewrites nothing".to_owned());
+                input.clone()
             }
         }
+        Pass::Typegpu => {
+            let (code, refusals) = ts_goport::ext::typegpu::embed_metadata_reports(
+                path,
+                &input,
+                options.typegpu.auto_naming(),
+            );
+            notes.extend(
+                refusals
+                    .into_iter()
+                    .map(|refusal| format!("typegpu: {refusal}")),
+            );
+            code
+        }
+        Pass::Sweetener => unreachable!("--only sweetener is the Sweetener stage"),
+    };
+    Output {
+        code,
+        before: input,
+        map: None,
+        diagnostics,
+        against_before: sweetener_file,
+        trace: Vec::new(),
+        notes,
     }
+}
+
+/// A Sweetener or session diagnostic for the renderer.
+fn diag(
+    level: crate::Severity,
+    message: &str,
+    start: u32,
+    end: u32,
+    related: &[crate::RelatedLocation],
+) -> Diag {
+    Diag::new(
+        severity(level),
+        message,
+        start,
+        end,
+        related
+            .iter()
+            .map(|related| (related.message.clone(), related.start, related.end))
+            .collect(),
+    )
 }
 
 fn severity(severity: crate::Severity) -> Severity {
     match severity {
         crate::Severity::Error => Severity::Error,
-        _ => Severity::Warning,
+        crate::Severity::Warning => Severity::Warning,
     }
 }
 
@@ -536,7 +584,6 @@ fn strip_segments(map: &str) -> String {
 }
 
 fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let n = chunk
@@ -545,7 +592,8 @@ fn base64(bytes: &[u8]) -> String {
             .fold(0u32, |n, (i, &b)| n | (u32::from(b) << (16 - 8 * i)));
         for i in 0..4 {
             if i <= chunk.len() {
-                out.push(TABLE[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                let digit = usize::try_from((n >> (18 - 6 * i)) & 63).unwrap_or_default();
+                out.push(char::from(crate::compose::DIGITS[digit]));
             } else {
                 out.push('=');
             }
@@ -559,7 +607,8 @@ fn position(text: &str, offset: u32) -> serde_json::Value {
     serde_json::json!({ "line": line, "column": column, "offset": offset })
 }
 
-fn json(settings: &Settings, input: &Input, output: &Output, source: &str) -> serde_json::Value {
+fn json(settings: &Settings, input: &Input, output: &Output) -> serde_json::Value {
+    let (_, source) = diagnostic_source(input, output);
     let diagnostics: Vec<serde_json::Value> = output
         .diagnostics
         .iter()
@@ -585,7 +634,7 @@ fn json(settings: &Settings, input: &Input, output: &Output, source: &str) -> se
         "diagnostics": diagnostics,
     });
     if let Some(map) = &output.map
-        && settings.map.is_some()
+        && settings.map != MapOut::None
     {
         value["map"] = serde_json::from_str(map).unwrap_or(serde_json::Value::Null);
     }
@@ -604,6 +653,15 @@ fn json(settings: &Settings, input: &Input, output: &Output, source: &str) -> se
     value
 }
 
+/// A position in the file at depth 0; inside an expansion, only the offset.
+fn located(source: &str, depth: u32, at: u32) -> serde_json::Value {
+    if depth == 0 {
+        position(source, at)
+    } else {
+        serde_json::json!({ "offset": at })
+    }
+}
+
 fn trace_json(source: &str, step: &crate::TraceStep) -> serde_json::Value {
     match step {
         crate::TraceStep::Try {
@@ -620,7 +678,7 @@ fn trace_json(source: &str, step: &crate::TraceStep) -> serde_json::Value {
             let result = match result {
                 crate::TryResult::Matched { text, .. } => serde_json::json!({ "matched": text }),
                 crate::TryResult::Failed { at, near, expected } => serde_json::json!({
-                    "failed": { "near": near, "expected": expected, "at": if *depth == 0 { position(source, *at) } else { serde_json::json!({ "offset": at }) } }
+                    "failed": { "near": near, "expected": expected, "at": located(source, *depth, *at) }
                 }),
                 crate::TryResult::Refused => {
                     serde_json::json!({ "refused": "a refine clause or written prefix refused the match" })
@@ -629,7 +687,7 @@ fn trace_json(source: &str, step: &crate::TraceStep) -> serde_json::Value {
             serde_json::json!({
                 "step": "try", "macro": macro_name, "rule": rule + 1, "rules": rules, "module": module,
                 "ruleAt": rule_start.map(|at| position(source, at)), "depth": depth,
-                "at": if *depth == 0 { position(source, *at) } else { serde_json::json!({ "offset": at }) },
+                "at": located(source, *depth, *at),
                 "input": input, "result": result,
             })
         }
@@ -642,7 +700,7 @@ fn trace_json(source: &str, step: &crate::TraceStep) -> serde_json::Value {
             ..
         } => serde_json::json!({
             "step": "expand", "macro": macro_name, "depth": depth,
-            "at": if *depth == 0 { position(source, *start) } else { serde_json::json!({ "offset": start }) },
+            "at": located(source, *depth, *start),
             "original": original, "replacement": replacement,
         }),
     }
@@ -664,7 +722,7 @@ fn trace_text(
         out.push_str("  no macro use was matched in this file\n");
         return out;
     }
-    let mut step_no = 0;
+    let mut use_no = 0;
     for step in steps {
         match step {
             crate::TraceStep::Try {
@@ -679,13 +737,11 @@ fn trace_text(
                 result,
             } => {
                 if *rule == 0 {
-                    step_no += 1;
-                    let place = place(source, *depth, *at);
+                    use_no += 1;
                     let _ = writeln!(
                         out,
-                        "{:>3}. {} {} {}",
-                        step_no,
-                        style.dim(&place),
+                        "{use_no:>3}. {} {} {}",
+                        style.dim(&place(source, *depth, *at)),
                         style.bold(macro_name),
                         style.dim(&format!("`{input}`"))
                     );
@@ -698,41 +754,7 @@ fn trace_text(
                     (None, None) => String::new(),
                 };
                 let label = format!("rule {}/{rules}{from}", rule + 1);
-                let indent = "       ";
-                match result {
-                    crate::TryResult::Matched { text, .. } => {
-                        let _ = writeln!(
-                            out,
-                            "{indent}{} {label} matched {}",
-                            style.green("✓"),
-                            style.dim(&format!("`{text}`"))
-                        );
-                    }
-                    crate::TryResult::Failed { at, near, expected } => {
-                        let near = if near.is_empty() {
-                            "the end of the input".to_owned()
-                        } else {
-                            format!("`{near}`")
-                        };
-                        let place = place(source, *depth, *at);
-                        let expected = expected
-                            .as_ref()
-                            .map(|text| format!(", expected {text}"))
-                            .unwrap_or_default();
-                        let _ = writeln!(
-                            out,
-                            "{indent}{} {label} stopped at {place} {near}{expected}",
-                            style.red("✗")
-                        );
-                    }
-                    crate::TryResult::Refused => {
-                        let _ = writeln!(
-                            out,
-                            "{indent}{} {label} matched, but a refine clause (or the written prefix) refused it",
-                            style.yellow("✗")
-                        );
-                    }
-                }
+                trace_attempt(&mut out, source, *depth, &label, result, style);
             }
             crate::TraceStep::Expand {
                 macro_name,
@@ -743,20 +765,69 @@ fn trace_text(
                 ..
             } => {
                 let place = place(source, *depth, *start);
-                let original = one_line(original);
-                let replacement = one_line(replacement);
                 let _ = writeln!(
                     out,
                     "       {} {} {} →",
                     style.cyan("⇒"),
                     style.dim(&format!("{macro_name} at {place}:")),
-                    style.dim(&format!("`{original}`")),
+                    style.dim(&format!("`{}`", one_line(original))),
                 );
-                let _ = writeln!(out, "         {}", style.green(&format!("`{replacement}`")));
+                let _ = writeln!(
+                    out,
+                    "         {}",
+                    style.green(&format!("`{}`", one_line(replacement)))
+                );
             }
         }
     }
     out
+}
+
+/// One rule attempt: matched, stopped (where, near what, expecting what),
+/// or refused.
+fn trace_attempt(
+    out: &mut String,
+    source: &str,
+    depth: u32,
+    label: &str,
+    result: &crate::TryResult,
+    style: Style,
+) {
+    const INDENT: &str = "       ";
+    match result {
+        crate::TryResult::Matched { text, .. } => {
+            let _ = writeln!(
+                out,
+                "{INDENT}{} {label} matched {}",
+                style.green("✓"),
+                style.dim(&format!("`{text}`"))
+            );
+        }
+        crate::TryResult::Failed { at, near, expected } => {
+            let near = if near.is_empty() {
+                "the end of the input".to_owned()
+            } else {
+                format!("`{near}`")
+            };
+            let expected = expected
+                .as_ref()
+                .map(|text| format!(", expected {text}"))
+                .unwrap_or_default();
+            let _ = writeln!(
+                out,
+                "{INDENT}{} {label} stopped at {} {near}{expected}",
+                style.red("✗"),
+                place(source, depth, *at)
+            );
+        }
+        crate::TryResult::Refused => {
+            let _ = writeln!(
+                out,
+                "{INDENT}{} {label} matched, but a refine clause (or the written prefix) refused it",
+                style.yellow("✗")
+            );
+        }
+    }
 }
 
 fn place(source: &str, depth: u32, at: u32) -> String {

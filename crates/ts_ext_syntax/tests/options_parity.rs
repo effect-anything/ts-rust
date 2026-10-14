@@ -4,7 +4,7 @@
 //! `get_file`), and `tsc-ext expand --stage bundle` must print the same
 //! text, and flipping `typegpu.autoNaming` must change it. What tsc checks:
 //! the mapper's `transform` (after `openProject` with those options) and
-//! `tsc-ext expand` (stage tsc) must agree, with no TypeGPU rewrite.
+//! `tsc-ext expand` (stage tsc) must agree, with no `TypeGPU` rewrite.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;

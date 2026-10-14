@@ -60,6 +60,7 @@ pub fn project_files(root: &Path) -> Vec<PathBuf> {
 
 /// Expand every file of `files` (check phase) on up to `threads` workers.
 /// Returns how many were expanded.
+#[must_use]
 pub fn prewarm(files: Vec<PathBuf>, threads: usize) -> usize {
     let queue = Mutex::new(files.into_iter());
     let done = AtomicUsize::new(0);
@@ -99,6 +100,7 @@ pub fn default_threads() -> usize {
 
 /// Start [`prewarm`] of the project whose config is `config_file` (or the
 /// directory itself) on a background thread.
+#[must_use]
 pub fn prewarm_in_background(config_file: &str) -> Option<std::thread::JoinHandle<usize>> {
     if std::env::var_os("TSC_EXT_NO_PREWARM").is_some() || config_file.is_empty() {
         return None;

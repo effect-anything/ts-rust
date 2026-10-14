@@ -108,7 +108,9 @@ impl<'a> Lines<'a> {
     }
 }
 
-const DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+/// The base64 alphabet of VLQ fields and inline maps.
+pub(crate) const DIGITS: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn decode(mappings: &str) -> Result<Vec<Vec<Vec<i64>>>, String> {
     let mut lines = Vec::new();
@@ -143,7 +145,8 @@ fn decode(mappings: &str) -> Result<Vec<Vec<Vec<i64>>>, String> {
     Ok(lines)
 }
 
-fn vlq(out: &mut String, value: i64) {
+/// Append `value` as one base64 VLQ field of a v3 source map.
+pub(crate) fn vlq(out: &mut String, value: i64) {
     let mut rest = if value < 0 {
         ((-value) << 1) | 1
     } else {
@@ -155,7 +158,9 @@ fn vlq(out: &mut String, value: i64) {
         if rest > 0 {
             digit |= 32;
         }
-        out.push(DIGITS[usize::try_from(digit).unwrap_or(0)] as char);
+        out.push(char::from(
+            DIGITS[usize::try_from(digit).unwrap_or_default()],
+        ));
         if rest == 0 {
             break;
         }

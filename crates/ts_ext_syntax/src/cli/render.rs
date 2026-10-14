@@ -1,5 +1,6 @@
 //! Terminal output: colors, diagnostics with code frames, unified diffs.
 
+use std::fmt::Write as _;
 use std::io::IsTerminal;
 
 /// `--color auto|always|never`. `auto` colors a terminal unless `NO_COLOR` is set.
@@ -194,36 +195,40 @@ pub fn diagnostics(
         };
         match format {
             Format::Tsc => {
-                out.push_str(&format!(
-                    "{path}({line},{col}): {severity}{code}: {}\n",
+                let _ = writeln!(
+                    out,
+                    "{path}({line},{col}): {severity}{code}: {}",
                     diag.message
-                ));
+                );
                 for (message, start, _) in &diag.related {
                     let (line, col) = line_col(source, *start);
-                    out.push_str(&format!("  {path}({line},{col}): {message}\n"));
+                    let _ = writeln!(out, "  {path}({line},{col}): {message}");
                 }
             }
             Format::Pretty => {
-                out.push_str(&format!(
-                    "{}: {severity}{code}: {}\n",
+                let _ = writeln!(
+                    out,
+                    "{}: {severity}{code}: {}",
                     style.bold(&format!("{path}:{line}:{col}")),
                     style.bold(&diag.message)
-                ));
+                );
                 out.push_str(&frame(source, diag.start, diag.end, style, diag.severity));
                 for (message, start, end) in &diag.related {
                     let (line, col) = line_col(source, *start);
-                    out.push_str(&format!(
-                        "  {} {path}:{line}:{col}: {message}\n",
+                    let _ = writeln!(
+                        out,
+                        "  {} {path}:{line}:{col}: {message}",
                         style.cyan("note:")
-                    ));
+                    );
                     out.push_str(&frame(source, *start, *end, style, Severity::Warning));
                 }
                 if !diag.code.is_empty() && diag.code.starts_with("SWR") {
-                    out.push_str(&format!(
-                        "  {} tsc-ext explain {}\n",
+                    let _ = writeln!(
+                        out,
+                        "  {} tsc-ext explain {}",
                         style.dim("help:"),
                         diag.code
-                    ));
+                    );
                 }
             }
         }
@@ -265,6 +270,7 @@ fn frame(source: &str, start: u32, end: u32, style: Style, severity: Severity) -
 pub fn diff(path: &str, before: &str, after: &str, style: Style) -> String {
     let old: Vec<&str> = before.lines().collect();
     let new: Vec<&str> = after.lines().collect();
+    const CONTEXT: usize = 3;
     let ops = line_ops(&old, &new);
     let mut out = format!(
         "{}\n{}\n",
@@ -274,7 +280,6 @@ pub fn diff(path: &str, before: &str, after: &str, style: Style) -> String {
     if ops.iter().all(|op| matches!(op, Op::Same(..))) {
         return out;
     }
-    const CONTEXT: usize = 3;
     let mut index = 0;
     while index < ops.len() {
         if matches!(ops[index], Op::Same(..)) {
@@ -311,9 +316,15 @@ pub fn diff(path: &str, before: &str, after: &str, style: Style) -> String {
         out.push('\n');
         for op in &ops[start..end] {
             match op {
-                Op::Same(i) => out.push_str(&format!(" {}\n", old[*i])),
-                Op::Del(i) => out.push_str(&format!("{}\n", style.red(&format!("-{}", old[*i])))),
-                Op::Add(j) => out.push_str(&format!("{}\n", style.green(&format!("+{}", new[*j])))),
+                Op::Same(i) => {
+                    let _ = writeln!(out, " {}", old[*i]);
+                }
+                Op::Del(i) => {
+                    let _ = writeln!(out, "{}", style.red(&format!("-{}", old[*i])));
+                }
+                Op::Add(j) => {
+                    let _ = writeln!(out, "{}", style.green(&format!("+{}", new[*j])));
+                }
             }
         }
         index = end;

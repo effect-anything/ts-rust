@@ -6,7 +6,7 @@
 //! expand (cold, caches cleared), span-map segments, mappings JSON,
 //! expansion regions; then the whole call again with the expansion cached.
 //! Plugin path (`TransformSession::transform`, what vite calls): build-phase
-//! expand plus TypeGPU, specifier rewrite, retarget and the v3 source map.
+//! expand plus `TypeGPU`, specifier rewrite, retarget and the v3 source map.
 
 use std::time::{Duration, Instant};
 

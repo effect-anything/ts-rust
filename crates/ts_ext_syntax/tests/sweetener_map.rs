@@ -2,6 +2,13 @@
 //! output positions to the author's positions and text through the
 //! session's spanmap tuples and its v3 source map.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "test fixtures are a few hundred bytes"
+)]
+
 use ts_ext_syntax::TransformSession;
 
 const SOURCE: &str = "import { helper } from \"./helper.sts\";\nexport syntax pair:expr {\n  rule { pair($a:expr, $b:expr) } => { [$b, $a, $b] }\n}\nexport syntax all:expr {\n  rule { all($($x:expr),*) } => { [$($x + 1),*] }\n}\nconst ünï = \"é\";\nconst a = pair(left, right);\nconst d = all(p, q,\n  r);\nexport const e = helper(a, d, ünï);\n";

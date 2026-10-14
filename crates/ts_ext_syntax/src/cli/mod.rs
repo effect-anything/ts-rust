@@ -229,6 +229,7 @@ fn help_for(command: &str) -> Option<&'static str> {
 }
 
 /// A usage error: the message, then where to read more. Exit 2.
+#[must_use]
 pub fn usage_error(command: &str, message: &str) -> u8 {
     eprintln!("tsc-ext {command}: {message}\nRun `tsc-ext {command} --help` for usage.");
     EXIT_USAGE
@@ -326,18 +327,17 @@ fn cheatsheet(parsed: &args::Parsed) -> u8 {
     if parsed.positionals.len() > 1 {
         return usage_error("cheatsheet", "name at most one topic");
     }
-    match docs::topic(parsed.positionals.first().map(String::as_str)) {
-        Some(markdown) => print_doc(parsed, &markdown),
-        None => {
-            let names: Vec<String> = docs::topics().into_iter().map(|(name, _)| name).collect();
-            usage_error(
-                "cheatsheet",
-                &format!(
-                    "no topic {}; topics are {}",
-                    parsed.positionals[0],
-                    names.join(", ")
-                ),
-            )
-        }
+    if let Some(markdown) = docs::topic(parsed.positionals.first().map(String::as_str)) {
+        print_doc(parsed, &markdown)
+    } else {
+        let names: Vec<String> = docs::topics().into_iter().map(|(name, _)| name).collect();
+        usage_error(
+            "cheatsheet",
+            &format!(
+                "no topic {}; topics are {}",
+                parsed.positionals[0],
+                names.join(", ")
+            ),
+        )
     }
 }

@@ -1,6 +1,7 @@
 //! `cheatsheet` and `explain`: the docs embedded in the binary, and a light
 //! Markdown renderer for the terminal.
 
+use std::fmt::Write as _;
 use ts_ext_sweetener::catalog::{CATALOG, Entry, lookup};
 
 use super::render::Style;
@@ -80,11 +81,11 @@ pub fn entry_markdown(entry: &Entry) -> String {
     );
     if !entry.bad.is_empty() {
         for (name, text) in entry.files {
-            out.push_str(&format!("\n`{name}`:\n\n```ts\n{text}```\n"));
+            let _ = write!(out, "\n`{name}`:\n\n```ts\n{text}```\n");
         }
-        out.push_str(&format!("\nTriggers it:\n\n```ts\n{}```\n", entry.bad));
+        let _ = write!(out, "\nTriggers it:\n\n```ts\n{}```\n", entry.bad);
     }
-    out.push_str(&format!("\nFix:\n\n{}\n", entry.fix));
+    let _ = write!(out, "\nFix:\n\n{}\n", entry.fix);
     out
 }
 
@@ -118,17 +119,16 @@ pub fn explain(code: &str) -> Result<String, String> {
 /// Every code with its title, one per line.
 #[must_use]
 pub fn list() -> String {
-    CATALOG
-        .iter()
-        .map(|entry| {
-            format!(
-                "{}  {:<7}  {}\n",
-                entry.code,
-                entry.level.as_str(),
-                entry.title
-            )
-        })
-        .collect()
+    CATALOG.iter().fold(String::new(), |mut out, entry| {
+        let _ = writeln!(
+            out,
+            "{}  {:<7}  {}",
+            entry.code,
+            entry.level.as_str(),
+            entry.title
+        );
+        out
+    })
 }
 
 /// Markdown for a terminal: headings bold, code blocks indented, inline
@@ -147,7 +147,7 @@ pub fn render(markdown: &str, style: Style) -> String {
             continue;
         }
         if fence {
-            out.push_str(&format!("    {}\n", style.cyan(line)));
+            let _ = writeln!(out, "    {}", style.cyan(line));
             continue;
         }
         if line.starts_with("<!--") {
@@ -155,9 +155,9 @@ pub fn render(markdown: &str, style: Style) -> String {
         }
         if let Some(heading) = line.strip_prefix("# ") {
             let text = inline(heading, style);
-            out.push_str(&format!("{}\n", style.bold(&text)));
+            let _ = writeln!(out, "{}", style.bold(&text));
             if !style.on {
-                out.push_str(&format!("{}\n", "=".repeat(heading.chars().count())));
+                let _ = writeln!(out, "{}", "=".repeat(heading.chars().count()));
             }
             continue;
         }
@@ -166,14 +166,14 @@ pub fn render(markdown: &str, style: Style) -> String {
             .or_else(|| line.strip_prefix("### "))
         {
             let text = inline(heading, style);
-            out.push_str(&format!("{}\n", style.blue(&text)));
+            let _ = writeln!(out, "{}", style.blue(&text));
             if !style.on {
-                out.push_str(&format!("{}\n", "-".repeat(heading.chars().count())));
+                let _ = writeln!(out, "{}", "-".repeat(heading.chars().count()));
             }
             continue;
         }
         if let Some(item) = line.strip_prefix("- ") {
-            out.push_str(&format!("  • {}\n", inline(item, style)));
+            let _ = writeln!(out, "  • {}", inline(item, style));
             continue;
         }
         if line.starts_with('|') {

@@ -184,6 +184,10 @@ fn read_project(tsconfig: &str) -> (Vec<String>, Vec<String>, Vec<String>, Vec<S
     (files, extensions, configs, messages)
 }
 
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "tsc matches extensions case-sensitively"
+)]
 fn is_declaration(path: &str) -> bool {
     [".d.ts", ".d.mts", ".d.cts"]
         .iter()
@@ -193,6 +197,10 @@ fn is_declaration(path: &str) -> bool {
 
 /// `ts`, `tsx`, `js` or `jsx`: how a bundler parses the rewritten text.
 #[must_use]
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "tsc matches extensions case-sensitively"
+)]
 pub fn module_type(path: &str) -> &'static str {
     let path = normalize(path);
     if path.ends_with(".stsx") || path.ends_with(".tsx") {
@@ -353,8 +361,7 @@ impl Project {
         let is_config = self
             .state
             .lock()
-            .map(|state| state.configs.contains(&path))
-            .unwrap_or(false);
+            .is_ok_and(|state| state.configs.contains(&path));
         if is_config {
             self.reload()?;
             return Ok(self.files());

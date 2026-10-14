@@ -253,6 +253,7 @@ pub fn read_tsconfig_options(tsconfig: &Path) -> Result<Options, String> {
 
 /// The extensions `tsconfig` (or a relative config it extends) registers
 /// for this package's content mapper.
+#[must_use]
 pub fn own_extensions(tsconfig: &Path) -> Vec<String> {
     own_extensions_at(tsconfig, 0)
 }

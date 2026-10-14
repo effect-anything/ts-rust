@@ -4,6 +4,7 @@
 //! one `{fileName, content}` into the `transform` result: virtual text,
 //! virtual extension, span-map tuples, and original-file diagnostics.
 
+use std::fmt::Write as _;
 /// One `transform` response. `mappings` is spanmap JSON:
 /// `[virtualStart, virtualLength, originalStart, originalLength, kind]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,7 +70,7 @@ pub fn expansion_regions(expansion: &crate::Expansion) -> Vec<ExpansionRegion> {
         }
         let mut label = format!("macro `{}`", trace.macro_name);
         if let Some(module) = &trace.module {
-            label.push_str(&format!(" from \"{module}\""));
+            let _ = write!(label, " from \"{module}\"");
         }
         let region = ExpansionRegion {
             virtual_start: i32::try_from(low).unwrap_or(0),
@@ -106,13 +107,13 @@ fn diagnostic_code(message: &str) -> i32 {
     let Some(rest) = rest else {
         return 0;
     };
-    let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().unwrap_or(0)
 }
 
 /// Run the transform the file asks for.
 ///
-/// Content mapper path: Sweetener only. `tsc` runs TypeGPU itself after
+/// Content mapper path: Sweetener only. `tsc` runs `TypeGPU` itself after
 /// this, so a mapper must not also rewrite `"use gpu"`.
 #[must_use]
 pub fn transform_file(file_name: &str, content: &str) -> TransformResponse {
@@ -162,7 +163,15 @@ pub fn transform_file(file_name: &str, content: &str) -> TransformResponse {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "test fixtures are a few hundred bytes"
+)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::{ExpansionRegion, expansion_regions, transform_file};
 
     /// The scan `expansion_regions` replaced: every segment per invocation.
@@ -184,7 +193,7 @@ mod tests {
             }
             let mut label = format!("macro `{}`", trace.macro_name);
             if let Some(module) = &trace.module {
-                label.push_str(&format!(" from \"{module}\""));
+                let _ = write!(label, " from \"{module}\"");
             }
             let region = ExpansionRegion {
                 virtual_start: i32::try_from(low).unwrap(),

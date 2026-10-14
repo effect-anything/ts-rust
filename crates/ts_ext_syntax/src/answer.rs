@@ -101,6 +101,10 @@ fn diagnostic_json(path: &str, positions: &Positions<'_>, item: &SessionDiagnost
 
 /// The JSON answer for `result`, the transform of `code` at `path` (see
 /// [`transform_native`]). The `Project` answer adds `moduleType`.
+///
+/// # Errors
+/// The file is longer than `i32::MAX` bytes, or the session's source map is
+/// not JSON.
 pub fn result_json(
     path: &str,
     code: &str,
