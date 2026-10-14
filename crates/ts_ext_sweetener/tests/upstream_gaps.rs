@@ -93,9 +93,8 @@ fn an_unused_required_parameter_is_reported_at_the_body() {
 }
 
 /// `$item` of a `#fold` is not a capture `#text` takes upstream (SWR2011,
-/// SWR2017); this expander quotes it.
+/// SWR2017).
 #[test]
-#[ignore = "known gap: #text($item) inside #fold is accepted"]
 fn a_fold_item_is_not_a_text_capture() {
     let (_, diagnostics) = run(
         "export syntax pairs:expr { rule { pairs($($k:ident = $v:expr),*) } => { #fold($k, init: { {} }) { ($acc, $item, $index) => { ({ ...$acc, [#text($item)]: $index }) } } } }\nconst o = pairs(a = 1, b = 2);\n",

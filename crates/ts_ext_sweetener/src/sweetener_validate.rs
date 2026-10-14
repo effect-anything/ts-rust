@@ -708,6 +708,32 @@ impl Validator<'_> {
             } else {
                 None
             };
+            // `#text($item)` inside `#fold`: a fold binder is not a capture
+            // `#text` can quote (upstream SWR2011, then SWR2017).
+            let text_args = if is(Some(node), "#") && is(nodes.get(index + 1), "text") {
+                Some(index + 2)
+            } else if is(Some(node), "#text") {
+                Some(index + 1)
+            } else {
+                None
+            };
+            if let Some(args) = text_args
+                && let Some([dollar, name]) = group(nodes.get(args), Delimiter::Paren)
+                && is(Some(dollar), "$")
+                && raw(Some(name)).is_some_and(|name| locals.contains(name))
+            {
+                let name = raw(Some(name)).unwrap_or_default();
+                self.out.push(error(
+                    format!("SWR2011: Template refers to unknown capture ${name}."),
+                    span(dollar),
+                ));
+                self.out.push(error(
+                    "SWR2017: Invalid argument for template operation #text.".to_owned(),
+                    span(node),
+                ));
+                index = args + 1;
+                continue;
+            }
             if let Some(args) = sequence_args
                 && let Some(children) = group(nodes.get(args), Delimiter::Paren)
             {
