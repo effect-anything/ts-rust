@@ -3,7 +3,7 @@
 use crate::contentmapper::Manifest;
 use crate::frontend::prelude::*;
 
-// Go: tsoptions/contentmappers.go:17 resolveContentMapperManifest
+// Go: tsoptions/contentmappers.go:31 resolveContentMapperManifest
 // resolveContentMapperManifest locates packageName in node_modules (walking up from the directory of
 // containingFile via node module resolution) and reads its package.json to produce the mapper's manifest
 // and package directory. It never executes the package. On failure it returns a diagnostic describing why
@@ -106,6 +106,8 @@ pub fn resolve_content_mapper_manifest(
             )),
         );
     }
+    // PORT: not in tsgo. A native mapper in a platform package (ext/native_mapper.rs).
+    let exec = crate::ext::native_mapper::exec(host, &resolver, &package_directory, &name, exec);
     let (compiler_options, _) = cm.compiler_options.get_value();
     let (dynamic_config, _) = cm.dynamic_config.get_value();
     (

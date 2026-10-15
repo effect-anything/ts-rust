@@ -1,0 +1,8 @@
+upstream expand did not produce TypeScript.
+The diagnostic is the reference. Do not treat this case as an expansion pass.
+
+/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/debug/malformed/input.sts:4:10 TS4001: No rule for macro assert accepted this input: 3 rule attempt(s).
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/debug/malformed/input.sts:4:3 In this use of assert
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/debug/malformed/macros.sts:13:17 The closest rule was still expecting syntax here
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/debug/malformed/macros.sts:27:17 The closest rule was still expecting syntax here
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/debug/malformed/macros.sts:41:17 The closest rule was still expecting syntax here

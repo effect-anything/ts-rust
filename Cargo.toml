@@ -1,8 +1,12 @@
 [workspace]
 members = [
     "crates/ts_goport",
+    "crates/ts_goport/parts/goport_core",
     "crates/ts_goport/parts/goport_lsproto",
     "crates/ts_goport/parts/goport_util",
+    "crates/ts_ext_syntax",
+    "crates/ts_ext_typegpu",
+    "crates/ts_ext_sweetener",
     "crates/ts_wasm",
     "tools/ts_ast_codegen",
     "tools/ts_diagnostics_codegen",

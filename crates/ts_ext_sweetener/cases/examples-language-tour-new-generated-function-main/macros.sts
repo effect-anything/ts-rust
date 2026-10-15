@@ -1,0 +1,7 @@
+export syntax getter:item {
+  rule { getter $name:binding($value:expr); }
+  bind $name in following as recursive value;
+  => {
+    function $name() { return $value; }
+  }
+}

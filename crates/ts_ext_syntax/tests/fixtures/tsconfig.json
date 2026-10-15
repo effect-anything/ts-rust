@@ -1,0 +1,3 @@
+{
+  "contentMappers": [{ "package": "@effect-x/tsc", "extensions": [".sts", ".stsx"], "options": {} }]
+}

@@ -1,0 +1,3 @@
+import { state } from "./macros.sts" for syntax;
+
+state = 1;

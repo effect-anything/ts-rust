@@ -1,0 +1,5 @@
+export operator (#):expr {
+  fixity prefix;
+  precedence 90;
+  rule { #[$($element:expr),*] } => { [$($element),*] }
+}

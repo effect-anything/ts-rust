@@ -1,0 +1,17 @@
+exit: 1
+--- stdout
+// tsc-ext: expand
+
+
+const a = ;
+const b = ;
+
+--- stderr
+template_scoped_malformed.sts:2:49: error SWR2016: Malformed template: #let is written #let(name = value) { body }, naming one identifier and giving a value and a body that are not empty.
+  2 | export syntax f:expr { rule { f($x:expr) } => { #let(v = $x) } }
+    |                                                 ^
+  help: tsc-ext explain SWR2016
+template_scoped_malformed.sts:3:49: error SWR2016: Malformed template: #parameterize is written #parameterize(name = replacement) { body }, naming one syntax parameter and giving a replacement that is not empty.
+  3 | export syntax g:expr { rule { g($x:expr) } => { #parameterize(v = $x) } }
+    |                                                 ^
+  help: tsc-ext explain SWR2016

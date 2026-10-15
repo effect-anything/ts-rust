@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    { "macro": "doSteps", "rule": "Bind", "parent": null },
+    { "macro": "doSteps", "rule": "Bind", "parent": 0 },
+    { "macro": "doSteps", "rule": "return", "parent": 1 }
+  ],
+  "order": "parent-first"
+}

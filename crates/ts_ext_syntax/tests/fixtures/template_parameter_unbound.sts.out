@@ -1,0 +1,11 @@
+exit: 1
+--- stdout
+// tsc-ext: expand
+export syntax parameter (%):expr;
+const c = %;
+
+--- stderr
+template_parameter_unbound.sts:3:11: error SWR4018: Syntax parameter % is used outside any #parameterize that gives it a meaning. It is declared without rules, so it means nothing here.
+  3 | const c = %;
+    |           ^
+  help: tsc-ext explain SWR4018

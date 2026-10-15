@@ -79,6 +79,7 @@ impl MapperHandler for Handler {
                         extension: mapped_extension(&p.content),
                         mappings,
                         diagnostic_directives,
+                        ext: Default::default(),
                     },
                     diagnostics,
                     ..TransformResult::default()
@@ -186,6 +187,7 @@ fn transform(
                 start: token_start as i32,
                 length: (line_end - token_start) as i32,
                 code: UNCLOSED_INTERPOLATION_CODE,
+                ext: Default::default(),
             });
             pos = line_end;
             continue;

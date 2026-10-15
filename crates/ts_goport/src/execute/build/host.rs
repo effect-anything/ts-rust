@@ -22,7 +22,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-// Go: tsc/extendedconfigcache.go:15 ExtendedConfigCache
+// Go: tsc/extendedconfigcache.go:16 ExtendedConfigCache
 // PORT: the Go type is `tsc.ExtendedConfigCache`; the Rust name adds `Tsc`
 // because the `tsoptions.ExtendedConfigCache` interface already has the
 // plain name. The per-entry mutex is dropped (one thread, see
@@ -34,7 +34,7 @@ pub struct TscExtendedConfigCache {
 }
 
 impl ExtendedConfigCache for TscExtendedConfigCache {
-    // Go: tsc/extendedconfigcache.go:27 (*ExtendedConfigCache).GetExtendedConfig
+    // Go: tsc/extendedconfigcache.go:28 (*ExtendedConfigCache).GetExtendedConfig
     fn get_extended_config(
         &self,
         file_name: &str,
@@ -93,7 +93,7 @@ pub struct WatchSource {
 /// the detection kind, and with `auto` only, whether `jsx` is react-jsx or
 /// react-jsxdev and whether the module resolution is in Node16..NodeNext,
 /// which reads the package.json `type` (`loadSourceFileMetaData`,
-/// fileloader.go:384). `module` has an effect only through the two
+/// fileloader.go:382). `module` has an effect only through the two
 /// default kinds here: with no `moduleDetection`, a module kind in
 /// Node16..NodeNext gives `force` (`GetEmitModuleDetectionKind`,
 /// compileroptions.go:243), and with no `moduleResolution` (or classic or
@@ -132,7 +132,7 @@ impl ModuleIndicatorInputs {
     /// (Go `GetExternalModuleIndicatorOptions`), or `None` when they take
     /// the package.json `type`, which is not read here: with `auto`, for a
     /// file that is not .mts, .cts, .mjs or .cjs, under a Node16..NodeNext
-    /// resolution or in node_modules (fileloader.go:384).
+    /// resolution or in node_modules (fileloader.go:382).
     #[must_use]
     pub fn options_of(self, file_name: &str) -> Option<ExternalModuleIndicatorOptions> {
         if is_declaration_file_name(file_name) {
@@ -172,14 +172,14 @@ impl Hash for SourceFileCacheKey {
 }
 
 // Go: vfs/cachedvfs/cachedvfs.go FS, the file system of the build host
-// (`cachedvfs.From(sys.FS())`, orchestrator.go:1004).
+// (`cachedvfs.From(sys.FS())`, orchestrator.go:996).
 // PORT: the same cache as `CachedFs` (always enabled: the build host
 // never disables it), but the `FileExists`, `DirectoryExists`,
 // `Realpath` and `GetAccessibleEntries` lookups live in a
 // `BuildStatCache` that the parse workers of each program load read too
 // (`CompilerHost::stat_cache`), as Go parse tasks share the host's
 // cachedvfs. This cache lasts for the whole build, and a write does not
-// update it (cachedvfs.go:144), so a later program can find a lookup here
+// update it (cachedvfs.go:145), so a later program can find a lookup here
 // that an earlier program made before the build wrote that path. It holds
 // only the lookups that Go makes: the workers' own lookups stay out of it
 // unless the loader uses them (see `BuildStatCache`).
@@ -190,7 +190,7 @@ pub struct BuildCachedFs {
 }
 
 impl BuildCachedFs {
-    // Go: cachedvfs.go:24 From
+    // Go: cachedvfs.go:25 From
     fn new(fs: Rc<dyn Fs>) -> BuildCachedFs {
         BuildCachedFs {
             fs,
@@ -199,7 +199,7 @@ impl BuildCachedFs {
         }
     }
 
-    // Go: cachedvfs.go:40 ClearCache
+    // Go: cachedvfs.go:41 ClearCache
     pub fn clear_cache(&self) {
         self.stats.clear();
         self.stat_cache.borrow_mut().clear();
@@ -319,7 +319,9 @@ pub struct BuildHost {
     // (the task `writeFile`) or touched (`set_m_time`). A check reads such
     // a file again, as Go does, in place of what the build info prefetch
     // read before the write (orchestrator.rs `BuildInfoPrefetch`). The
-    // orchestrator clears it at the start and the end of each build.
+    // orchestrator clears it at the start and the end of each build; at the
+    // end, the kept watch parses of its paths go first
+    // (`drop_written_watch_sources`).
     pub written: Arc<WrittenPaths>,
 }
 
@@ -361,7 +363,7 @@ impl WrittenPaths {
 
 impl BuildHost {
     // PORT: Go builds the host inline in `NewOrchestrator`
-    // (orchestrator.go:1004): `compiler.NewCachedFSCompilerHost(cwd, sys.FS(),
+    // (orchestrator.go:996): `compiler.NewCachedFSCompilerHost(cwd, sys.FS(),
     // sys.DefaultLibraryPath(), nil, nil, nil)` and an empty mTimes map.
     // `NewCachedFSCompilerHost` is written out (compiler/host.go:44) to keep
     // the cached file system.
@@ -403,8 +405,9 @@ impl BuildHost {
 
     /// PORT: not in Go (memory and time). In `tsc -b --watch` a file keeps
     /// its parse while its modification time does not change, no watch
-    /// event names it and no build of this cycle wrote it, as Go
-    /// `tsc --watch` keeps its files (execute/watcher.go `sourceFileCache`).
+    /// event names it and no build wrote it since the parse (`written`,
+    /// `drop_written_watch_sources`), as Go `tsc --watch` keeps its files
+    /// (execute/watcher.go `sourceFileCache`).
     /// Go parses every file of each project that it builds again in each
     /// cycle (`resetCaches`, and `sourceFiles` keeps the `.d.ts` and `.json`
     /// files of one cycle). Here each such parse is a new file version, and
@@ -490,6 +493,35 @@ impl BuildHost {
                 None => sources.clear(),
             }
         }
+    }
+
+    /// PORT: not in Go (`watch_source_file`). At the end of a build, drops
+    /// the kept parses of the files that the build wrote or touched
+    /// (`written`). Go keeps no parse from one cycle to the next
+    /// (`resetCaches`), so the next cycle parses each written file again.
+    /// A kept parse is checked only by its modification time: a parse that
+    /// a project with no reference to the writer made before the write
+    /// would stay when the write keeps that time (a coarse clock) and no
+    /// watch event names the file (an output directory that is not
+    /// watched). In the cycle that writes a file, `source_files` keeps
+    /// giving the first parse of the cycle, as Go does.
+    pub fn drop_written_watch_sources(&self) {
+        let written = self
+            .written
+            .paths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if written.is_empty() {
+            return;
+        }
+        let unwritten =
+            |key: &SourceFileCacheKey, _: &mut WatchSource| !written.contains(&key.0.path);
+        if let Some(sources) = self.watch_sources.borrow_mut().as_mut() {
+            sources.retain(unwritten);
+        }
+        self.watch_sources_before_config_change
+            .borrow_mut()
+            .retain(unwritten);
     }
 
     /// PORT: not in Go (`watch_source_file`). A cycle with a config change
@@ -647,7 +679,8 @@ impl BuildHost {
         }
     }
 
-    // Go: orchestrator.go:97 (*Orchestrator).toPath, as the host reaches it.
+    // Go: orchestrator.go:97 (*Orchestrator).toPath, as the host reaches it (at
+    // 673a5f17d713; removed by ts#64159: Go N' calls caseSensitivity.PathKey).
     pub fn to_path(&self, file_name: &str) -> Path {
         to_path(
             file_name,
@@ -656,7 +689,7 @@ impl BuildHost {
         )
     }
 
-    // Go: build/host.go:94 (*host).GetMTime
+    // Go: build/host.go:90 (*host).GetMTime
     pub fn get_m_time(&self, file: &str) -> Option<SystemTime> {
         self.load_or_store_m_time(file, None, true)
     }
@@ -683,14 +716,14 @@ impl BuildHost {
         self.written.contains(path)
     }
 
-    // Go: build/host.go:98 (*host).SetMTime
+    // Go: build/host.go:94 (*host).SetMTime
     // PORT: it also notes the file in `written`.
     pub fn set_m_time(&self, file: &str, m_time: Option<SystemTime>) -> Result<(), FsError> {
         self.written.insert(self.to_path(file));
         CompilerHost::fs(self).chtimes(file, None, m_time)
     }
 
-    // Go: build/host.go:102 (*host).loadOrStoreMTime
+    // Go: build/host.go:98 (*host).loadOrStoreMTime
     pub fn load_or_store_m_time(
         &self,
         file: &str,
@@ -700,7 +733,7 @@ impl BuildHost {
         self.load_or_store_m_time_of_path(file, self.to_path(file), old_cache, store, None)
     }
 
-    // Go: build/host.go:102 (*host).loadOrStoreMTime, with
+    // Go: build/host.go:98 (*host).loadOrStoreMTime, with
     // `h.orchestrator.toPath(file)` computed by the caller, and the mtime
     // that a prefetch thread read (`prefetched`) in place of `GetMTime`.
     fn load_or_store_m_time_of_path(
@@ -744,7 +777,7 @@ impl BuildHost {
         m_time
     }
 
-    // Go: build/host.go:121 (*host).storeMTime
+    // Go: build/host.go:117 (*host).storeMTime
     pub fn store_m_time(&self, file: &str, m_time: Option<SystemTime>) {
         let path = self.to_path(file);
         self.m_times
@@ -753,7 +786,7 @@ impl BuildHost {
             .insert(path, m_time);
     }
 
-    // Go: build/host.go:126 (*host).storeMTimeFromOldCache
+    // Go: build/host.go:122 (*host).storeMTimeFromOldCache
     pub fn store_m_time_from_old_cache(
         &self,
         file: &str,
@@ -787,12 +820,12 @@ impl CompilerHost for BuildHost {
         self.host.default_library_path()
     }
 
-    // Go: build/host.go:46 (*host).GetCurrentDirectory
+    // Go: build/host.go:46 (*host).GetCurrentDirectory (at 673a5f17d713; removed by ts#64159)
     fn get_current_directory(&self) -> String {
         self.host.get_current_directory()
     }
 
-    // Go: build/host.go:50 (*host).Trace
+    // Go: build/host.go:46 (*host).Trace
     fn trace(&self, _msg: &'static Message, _args: Vec<String>) {
         panic!(
             "build.Orchestrator.host does not support tracing; use a different host for tracing"
@@ -804,7 +837,7 @@ impl CompilerHost for BuildHost {
         self.prefetch.get()
     }
 
-    // Go: build/host.go:54 (*host).GetSourceFile
+    // Go: build/host.go:50 (*host).GetSourceFile
     fn get_source_file(&self, opts: &SourceFileParseOptions) -> Option<Rc<ParsedSourceFile>> {
         let watch = self.watch_sources.borrow().is_some();
         if is_declaration_file_name(&opts.file_name)
@@ -846,7 +879,7 @@ impl CompilerHost for BuildHost {
         self.host.get_source_file(opts)
     }
 
-    // Go: build/host.go:62 (*host).GetContentMappedSourceFiles (tsgo#4712)
+    // Go: build/host.go:58 (*host).GetContentMappedSourceFiles (tsgo#4712)
     fn get_content_mapped_source_files(
         &self,
         _parse_options: &SourceFileParseOptions,
@@ -855,7 +888,7 @@ impl CompilerHost for BuildHost {
         Err(contentmapper::ERR_PROJECT_UNAVAILABLE.clone())
     }
 
-    // Go: build/host.go:66 (*host).ContentMapperProject (tsgo#4712)
+    // Go: build/host.go:62 (*host).ContentMapperProject (tsgo#4712)
     fn content_mapper_project(&self) -> Option<Rc<dyn Project>> {
         panic!(
             "build.Orchestrator.host does not support content mapper project; use an individual project's compiler host instead"
@@ -909,7 +942,7 @@ impl CompilerHost for BuildHost {
         self.watch_sources.borrow().is_some()
     }
 
-    // Go: build/host.go:70 (*host).GetResolvedProjectReference
+    // Go: build/host.go:66 (*host).GetResolvedProjectReference
     fn get_resolved_project_reference(
         &self,
         file_name: &str,
@@ -1023,17 +1056,18 @@ impl CompilerHost for BuildCompilerHost {
         self.host.default_library_path()
     }
 
-    // Go: build/compilerHost.go:29 (*compilerHost).GetCurrentDirectory
+    // Go: build/compilerHost.go:29 (*compilerHost).GetCurrentDirectory (at 673a5f17d713;
+    // removed by ts#64159)
     fn get_current_directory(&self) -> String {
         CompilerHost::get_current_directory(&*self.host)
     }
 
-    // Go: build/compilerHost.go:33 (*compilerHost).Trace
+    // Go: build/compilerHost.go:29 (*compilerHost).Trace
     fn trace(&self, msg: &'static Message, args: Vec<String>) {
         (self.trace)(msg, args);
     }
 
-    // Go: build/compilerHost.go:37 (*compilerHost).GetSourceFile
+    // Go: build/compilerHost.go:33 (*compilerHost).GetSourceFile
     fn get_source_file(&self, opts: &SourceFileParseOptions) -> Option<Rc<ParsedSourceFile>> {
         self.host.get_source_file(opts)
     }
@@ -1043,7 +1077,7 @@ impl CompilerHost for BuildCompilerHost {
         self.host.prefetch_parses()
     }
 
-    // Go: build/compilerHost.go:41 (*compilerHost).GetContentMappedSourceFiles (tsgo#4712)
+    // Go: build/compilerHost.go:37 (*compilerHost).GetContentMappedSourceFiles (tsgo#4712)
     // PORT: Go returns `(files, err)`; a file that cannot be read is `Ok`
     // with no canonical file, as in the compiler host.
     fn get_content_mapped_source_files(
@@ -1067,12 +1101,12 @@ impl CompilerHost for BuildCompilerHost {
         true
     }
 
-    // Go: build/compilerHost.go:56 (*compilerHost).ContentMapperProject (tsgo#4712)
+    // Go: build/compilerHost.go:52 (*compilerHost).ContentMapperProject (tsgo#4712)
     fn content_mapper_project(&self) -> Option<Rc<dyn Project>> {
         self.content_mapper_project.clone()
     }
 
-    // Go: build/compilerHost.go:60 (*compilerHost).GetResolvedProjectReference
+    // Go: build/compilerHost.go:56 (*compilerHost).GetResolvedProjectReference
     fn get_resolved_project_reference(
         &self,
         file_name: &str,
@@ -1099,5 +1133,76 @@ impl CompilerHost for BuildCompilerHost {
     // PORT: not in Go (see `CompilerHost::freeable_worker_parses`).
     fn freeable_worker_parses(&self) -> bool {
         self.host.freeable_worker_parses()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execute::build::command_line::BuildOptions;
+    use std::cell::OnceCell;
+
+    const OLD: &str = "export declare const a: number;\n";
+    const NEW: &str = "export declare const a: string;\n";
+
+    /// bwsig2: a build writes a `.d.ts` that a project of its cycle parsed
+    /// before the write. The write keeps the modification time (a coarse
+    /// clock) and no watch event names the file (an output directory that
+    /// is not watched). The cycle keeps the first parse (Go `sourceFiles`),
+    /// and the next cycle parses the file again, as Go does
+    /// (`drop_written_watch_sources`).
+    #[test]
+    fn a_written_file_is_parsed_again_in_the_next_cycle() {
+        let dir = std::env::temp_dir().join(format!(
+            "ts_goport_written_watch_parse_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dts = dir.join("a.d.ts");
+        std::fs::write(&dts, OLD).unwrap();
+        // The compiler takes normalized paths: a Windows temp dir has backslashes.
+        let normalized =
+            |p: &std::path::Path| crate::frontend::tspath::normalize_slashes(p.to_str().unwrap());
+        let compare_paths_options = ComparePathsOptions {
+            use_case_sensitive_file_names: true,
+            current_directory: normalized(&dir),
+        };
+        let command = Rc::new(ParsedBuildCommandLine {
+            build_options: BuildOptions::default(),
+            compiler_options: Rc::new(CompilerOptions::default()),
+            projects: Vec::new(),
+            errors: Vec::new(),
+            raw: CompilerOptionsValue::Nil,
+            compare_paths_options: compare_paths_options.clone(),
+            resolved_project_paths: OnceCell::new(),
+            locale: OnceCell::new(),
+        });
+        let sys: Rc<dyn System> = Rc::new(crate::execute::tsc::new_os_system().unwrap());
+        let host = BuildHost::new(sys, command, compare_paths_options);
+        host.watch_sources.replace(Some(FxHashMap::default()));
+        let file_name = normalized(&dts);
+        let opts = SourceFileParseOptions {
+            path: host.to_path(&file_name),
+            file_name,
+            external_module_indicator_options: ExternalModuleIndicatorOptions::default(),
+        };
+        let text = || host.get_source_file(&opts).unwrap().text.to_string();
+
+        assert_eq!(text(), OLD);
+        let m_time = std::fs::metadata(&dts).unwrap().modified().unwrap();
+        // The task write: the path goes into `written`, then the file.
+        host.written.insert(opts.path.clone());
+        std::fs::write(&dts, NEW).unwrap();
+        let file = std::fs::File::options().write(true).open(&dts).unwrap();
+        file.set_modified(m_time).unwrap();
+        drop(file);
+        assert_eq!(text(), OLD, "a later program of the cycle");
+        // The end of `build_all_tasks`, then `resetCaches`.
+        host.drop_written_watch_sources();
+        host.written.clear();
+        host.source_files.reset();
+        assert_eq!(text(), NEW, "the next cycle");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

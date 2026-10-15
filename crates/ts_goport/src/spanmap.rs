@@ -151,6 +151,7 @@ pub struct SpanMap {
 
     // origOnce guards lazy construction of the interval index used for original-to-virtual lookups.
     original_index: OnceLock<OriginalIndex>,
+    pub(crate) mapper_info: crate::ext::spanmap_ext::MapperInfo, // PORT: ext
 }
 
 // Go: spanmap/spanmap.go:140 MappingErrorKind
@@ -348,7 +349,8 @@ impl SpanMap {
 
         let orig_start = m.map_low(virtual_start, start_idx, start_in);
         let orig_end = m.map_high(virtual_end, end_idx, end_in).max(orig_start);
-        (TextRange::new(orig_start, orig_end), Fidelity::APPROXIMATE)
+        let ends = (virtual_start, virtual_end, orig_start, orig_end); // PORT: ext
+        crate::ext::spanmap_ext::union_span(&m.segments, ends, start_in && end_in)
     }
 
     // Go: spanmap/spanmap.go:279 SpanMap.VirtualToOriginalSpanForFeature
@@ -830,6 +832,7 @@ pub fn new(segments: &[Segment]) -> SpanMap {
     SpanMap {
         segments: sorted,
         original_index: OnceLock::new(),
+        mapper_info: Default::default(), // PORT: ext
     }
 }
 

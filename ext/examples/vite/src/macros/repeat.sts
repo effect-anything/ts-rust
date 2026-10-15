@@ -1,0 +1,5 @@
+export syntax repeat:stmt {
+  rule { repeat($count:expr) $body:stmt } => {
+    for (let index = 0; index < $count; index += 1) $body
+  }
+}

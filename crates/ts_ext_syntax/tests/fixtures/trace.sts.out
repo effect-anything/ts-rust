@@ -1,0 +1,27 @@
+exit: 1
+--- stdout
+// tsc-ext: expand --trace
+
+if (!(done)) go();
+unless done work();
+
+--- stderr
+trace: trace.sts (stage tsc)
+  1. 6:1 unless `unless done then go(); …`
+       ✗ rule 1/2 (line 3) stopped at 6:8 `done`, expected `( ... )`
+       ✓ rule 2/2 (line 4) matched `unless done then go();`
+       ⇒ unless at 6:1: `unless done then go();` →
+         `if (!(done)) go();`
+  2. 7:1 unless `unless done work(); …`
+       ✗ rule 1/2 (line 3) stopped at 7:8 `done`, expected `( ... )`
+       ✗ rule 2/2 (line 4) stopped at 7:13 `work`, expected `then`
+trace.sts:7:13: error SWR4001: No rule for macro unless accepted this input: 2 rule attempt(s).
+  7 | unless done work();
+    |             ^^^^
+  note: trace.sts:7:1: In this use of unless
+  7 | unless done work();
+    | ^^^^^^
+  note: trace.sts:4:8: The closest rule was still expecting syntax here
+  4 |   rule { unless $c:expr then $b:stmt } => { if (!($c)) $b }
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  help: tsc-ext explain SWR4001

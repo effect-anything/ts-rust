@@ -1,0 +1,37 @@
+[package]
+name = "ts_ext_syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Content mapper: Sweetener, then the TypeGPU session. Not linked into tsc (the cargo `tsgo` binary)."
+
+[[bin]]
+name = "tsc-ext"
+path = "src/bin/tsc_ext.rs"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+ts_ext_sweetener = { path = "../ts_ext_sweetener" }
+ts_ext_typegpu = { path = "../ts_ext_typegpu" }
+ts_goport = { path = "../ts_goport" }
+napi = { version = "3", default-features = false, features = ["napi4"] }
+napi-derive = "3"
+serde_json = "1"
+
+[dev-dependencies]
+rustc-hash = "=2.1.2"
+
+[build-dependencies]
+napi-build = "2"
+
+[lints.rust]
+# napi-derive emits unsafe. The rest of this crate does not use it.
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+redundant_clone = "warn"

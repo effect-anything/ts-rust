@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "introduced": [
+    { "spelling": "left", "space": "value", "kind": "lexical" },
+    { "spelling": "right", "space": "value", "kind": "lexical" }
+  ],
+  "relationship": "Each binding is visible only in the recursively expanded remaining clauses."
+}

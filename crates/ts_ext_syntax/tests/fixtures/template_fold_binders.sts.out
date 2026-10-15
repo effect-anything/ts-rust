@@ -1,0 +1,11 @@
+exit: 1
+--- stdout
+// tsc-ext: expand
+
+const b = ;
+
+--- stderr
+template_fold_binders.sts:4:5: error SWR2017: Invalid argument for template operation #fold.
+  4 |     #fold($x, init: { true }) { ($acc, $item, $i) => { $acc && $item } }
+    |     ^^^^^
+  help: tsc-ext explain SWR2017

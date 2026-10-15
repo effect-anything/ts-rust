@@ -1,0 +1,7 @@
+// tsc-ext: expand
+export syntax twice:expr { rule { twice($x:expr) } => { [$x, $x] } }
+async function g() { return twice(await h()); }
+const k = twice(typeof q);
+const n = twice(new Foo(1));
+const s = twice(x as T);
+const t = twice(key in o);

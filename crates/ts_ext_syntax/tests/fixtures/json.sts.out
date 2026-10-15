@@ -1,0 +1,10 @@
+exit: 0
+--- stdout
+{
+  "code": "// tsc-ext: expand --json\n\nexport const pair = [1, 1];\n",
+  "diagnostics": [],
+  "file": "json.sts",
+  "stage": "tsc"
+}
+
+--- stderr

@@ -1,0 +1,6 @@
+import { (<-) } from "./declarative.sts" for syntax;
+
+function* exchange() {
+  received <-;
+  return received;
+}

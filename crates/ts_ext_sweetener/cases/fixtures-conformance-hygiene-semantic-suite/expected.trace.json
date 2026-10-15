@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "requiredOperations": [
+    "fresh",
+    "capture",
+    "definition",
+    "binding-contract",
+    "binding-resolution",
+    "name-assignment"
+  ]
+}

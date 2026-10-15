@@ -1,0 +1,3 @@
+import { duplicate } from "./macros.sts" for syntax;
+
+export const coordinates: readonly number[] = duplicate(12);

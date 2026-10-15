@@ -1,0 +1,1 @@
+replaces function statements marked with "use gpu" in place when conditions aren't ideal (like within switch statements)

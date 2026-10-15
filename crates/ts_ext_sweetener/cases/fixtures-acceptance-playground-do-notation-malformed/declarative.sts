@@ -1,0 +1,57 @@
+export syntax class Bind {
+  fields {
+    name: binding;
+    source: expr;
+  }
+
+  rule { $name:binding <- $source:expr; }
+  expect "expression after <-";
+  rule { $name:binding <- $source:expr }
+  expect "expression after <-";
+}
+
+export syntax class BindAll {
+  fields {
+    names: binding*;
+    sources: expr*;
+  }
+
+  rule { [$($names:binding),*] <- [$($sources:expr),*]; }
+  rule { [$($names:binding),*] <- [$($sources:expr),*] }
+}
+
+export rec syntax doSteps:expr {
+  rule {
+    doSteps($monad:expr) {
+      return $result:expr;
+    }
+  } => {
+    $monad.of($result)
+  }
+
+  rule {
+    doSteps($monad:expr) {
+      $step:BindAll
+      $($rest:tt)+
+    }
+  }
+  bind $step.names in $rest as lexical value
+  => {
+    $monad.flatMap($monad.all([$($step.sources),*]), ([$($step.names),*]) =>
+      doSteps($monad) { $($rest)+ }
+    )
+  }
+
+  rule {
+    doSteps($monad:expr) {
+      $step:Bind
+      $($rest:tt)+
+    }
+  }
+  bind $step.name in $rest as lexical value
+  => {
+    $monad.flatMap($step.source, ($step.name) =>
+      doSteps($monad) { $($rest)+ }
+    )
+  }
+}

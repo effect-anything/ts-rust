@@ -1,0 +1,20 @@
+import {
+  collect,
+  duplicate as twice,
+  event,
+  maybe,
+  (|>),
+} from "./macros.sts" for syntax;
+
+event OrderPlaced(id: string, total: number);
+
+const cents = (value: number) => Math.round(value * 100);
+
+export const order: maybe<OrderPlaced> = new OrderPlaced("A-17", 42.5);
+export const audit = collect(order.id, order.total);
+export const transformed = order.total |> cents;
+export const copies = twice((order.id));
+
+export function readyToShip(candidate: OrderPlaced): string {
+  return `${candidate.id}:${candidate.total |> cents}`;
+}

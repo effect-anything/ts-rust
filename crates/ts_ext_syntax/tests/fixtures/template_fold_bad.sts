@@ -1,0 +1,5 @@
+// tsc-ext: expand
+export syntax sum:expr {
+  rule { sum($($x:expr),*) } => { #fold($x, init: 0) { ($acc, $item, $index) => { $acc + $item } } }
+}
+const a = sum(1);

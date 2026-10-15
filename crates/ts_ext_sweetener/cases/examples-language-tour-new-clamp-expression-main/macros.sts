@@ -1,0 +1,5 @@
+export syntax clamp:expr {
+  rule { clamp($value:expr, $minimum:expr, $maximum:expr) } => {
+    globalThis.Math.min($maximum, globalThis.Math.max($minimum, $value))
+  }
+}

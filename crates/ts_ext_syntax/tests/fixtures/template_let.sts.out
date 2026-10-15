@@ -1,0 +1,7 @@
+exit: 0
+--- stdout
+// tsc-ext: expand
+
+const a = ((v) => v + v)(f());
+
+--- stderr

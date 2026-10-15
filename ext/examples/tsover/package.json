@@ -1,0 +1,8 @@
+{
+  "name": "example-tsover",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}

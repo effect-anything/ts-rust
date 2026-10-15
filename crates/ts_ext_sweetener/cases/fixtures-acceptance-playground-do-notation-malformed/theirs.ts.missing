@@ -1,0 +1,7 @@
+upstream expand did not produce TypeScript.
+The diagnostic is the reference. Do not treat this case as an expansion pass.
+
+/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/do-notation/malformed/input.sts:4:11 TS4001: No rule for macro doSteps accepted this input: expression after <-.
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/do-notation/malformed/input.sts:3:16 In this use of doSteps
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/do-notation/malformed/declarative.sts:7:27 The closest rule was still expecting syntax here
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/playground/do-notation/malformed/declarative.sts:9:27 The closest rule was still expecting syntax here

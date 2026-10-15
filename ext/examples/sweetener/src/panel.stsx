@@ -1,0 +1,8 @@
+import { shade } from "./view";
+import { frame } from "./main";
+
+export function Panel(props: { n: number }) {
+  "use gpu";
+  const bright = props.n + shade(1);
+  return <div>{frame(bright)}</div>;
+}

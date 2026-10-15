@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    { "macro": "data", "rule": "generic-data-declaration", "parent": null },
+    { "macro": "match", "rule": "constructor-arms", "parent": null }
+  ],
+  "order": "source-order"
+}

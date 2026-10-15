@@ -1,0 +1,23 @@
+import {
+  extend,
+  module,
+  (::),
+  record,
+} from "./declarative.sts" for syntax;
+
+const self = "outer self";
+const body = "outer body";
+
+module List {
+  record Empty();
+  record Cons(head: number, tail: Empty | Cons);
+}
+
+extend List.Cons {
+  last(self: List.Cons): number {
+    return self.tail instanceof List.Empty ? self.head : last(self.tail);
+  }
+}
+
+const list = new List.Cons(1, new List.Cons(3, new List.Empty()));
+export const hygieneResult = [self, body, last() :: list];

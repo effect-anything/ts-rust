@@ -1,0 +1,6 @@
+import { invariant } from "./macros.sts" for syntax;
+
+export function divide(left: number, right: number): number {
+  invariant(right !== 0, "division by zero");
+  return left / right;
+}

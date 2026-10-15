@@ -586,13 +586,28 @@ pub fn collect_all_affected_files(program: &Program) {
 
     let mut handler = AffectedFilesHandler::new(program);
     let mut result: FxIndexSet<Node> = FxIndexSet::default();
-    let changed_files: Vec<Path> = program
+    let mut changed_files: Vec<Path> = program
         .snapshot
         .borrow()
         .changed_files_set
         .iter()
         .cloned()
         .collect();
+    // PORT: Go runs both loops on work groups. Each `computeDtsSignature` is a
+    // d.ts emit of one file (affectedfileshandler.go:69), and where its
+    // widenings come first sets the d.ts text, so the order counts. Single
+    // threaded, Go runs each queue last queued first (singleThreadedWorkGroup
+    // pop, core/workgroup.go:78), so the port runs both loops in reverse
+    // (dtsorder1: better-auth/00/incr step 2). Go calls `getDtsMayChange` in
+    // the `Range` before it queues, but the port calls it in the reversed
+    // loop, so new pending-emit entries come in reverse order. Go's order
+    // there comes from random map order, so the reverse is still one of Go's
+    // possible orders. The flag is the program's own, as Go's
+    // `program.program.SingleThreaded()`, not that of the current program.
+    let single_threaded = program.program().single_threaded();
+    if single_threaded {
+        changed_files.reverse();
+    }
     for file in &changed_files {
         for affected_file in handler.get_files_affected_by(file) {
             result.insert(affected_file);
@@ -602,6 +617,10 @@ pub fn collect_all_affected_files(program: &Program) {
     // For all the affected files, get all the files that would need to change their dts or js files,
     // update their diagnostics
     let emit_kind = get_file_emit_kind(program.snapshot.borrow().options);
+    let mut result: Vec<Node> = result.into_iter().collect();
+    if single_threaded {
+        result.reverse();
+    }
     for file in result {
         // remove the cached semantic diagnostics and handle dts emit and js emit if needed
         let dts_may_change = handler.get_dts_may_change(path_of(file), emit_kind);
@@ -610,4 +629,94 @@ pub fn collect_all_affected_files(program: &Program) {
 
     // Update the snapshot with the new state
     handler.update_snapshot();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::enter_program;
+    use crate::execute::incremental::incremental::create_host;
+    use crate::execute::incremental::program::new_program;
+    use crate::program::{go_frontend_program, release_program, try_load_version};
+
+    // followups64 (R215 reviewer item a): `collect_all_affected_files` takes
+    // the single-thread order from its own program, as Go's
+    // `program.program.SingleThreaded()`, not from the current program.
+    // The product makes the program current while it uses it, so here a
+    // second load of the same files is current while the handler runs.
+    // `b.ts` imports `a.ts`, and the new `a.ts` has a new signature, so the
+    // affected files are `a.ts`, then `b.ts`. The single-thread order runs
+    // them last queued first, so the pending emit lists `b.ts` first.
+    #[test]
+    fn affected_file_order_reads_the_program_flag() {
+        let dir =
+            std::env::temp_dir().join(format!("goport-affected-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+        write(
+            "tsconfig.json",
+            r#"{"compilerOptions":{"incremental":true,"types":[]},"files":["a.ts","b.ts"]}"#,
+        );
+        write("b.ts", "import { x } from './a';\nexport const y = x;\n");
+        let config = format!("{}/tsconfig.json", dir.to_string_lossy().replace('\\', "/"));
+        let load = |single_threaded: bool| {
+            try_load_version(&config, |options| {
+                if single_threaded {
+                    options.single_threaded = Tristate::True;
+                }
+            })
+            .unwrap_or_else(|e| panic!("cannot load {config}: {e}"))
+        };
+        // The incremental program of the current program.
+        let incremental = |old: Option<&Program>| {
+            let host = create_host(go_frontend_program().expect("frontend").host().clone());
+            new_program(old, host, None, false)
+        };
+        for (own, current, expected) in [
+            (true, false, ["b.ts", "a.ts"]),
+            (false, true, ["a.ts", "b.ts"]),
+        ] {
+            write("a.ts", "export const x = 1;\n");
+            let first = load(false);
+            let old = {
+                let _scope = enter_program(Some(first));
+                let old = incremental(None);
+                // As after an emit, so the new snapshot does not take the
+                // old pending emit with its order.
+                old.snapshot
+                    .borrow_mut()
+                    .affected_files_pending_emit
+                    .clear();
+                old
+            };
+            write("a.ts", "export const x = 'a';\n");
+            let second = load(own);
+            let new = {
+                let _scope = enter_program(Some(second));
+                incremental(Some(&old))
+            };
+            let other = load(current);
+            {
+                let _scope = enter_program(Some(other));
+                collect_all_affected_files(&new);
+            }
+            let pending: Vec<String> = new
+                .snapshot
+                .borrow()
+                .affected_files_pending_emit
+                .keys()
+                .map(|path| path.0.rsplit('/').next().unwrap_or_default().to_string())
+                .collect();
+            drop((old, new));
+            for program in [first, second, other] {
+                release_program(program);
+            }
+            assert_eq!(
+                pending, expected,
+                "own --singleThreaded {own}, current program --singleThreaded {current}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

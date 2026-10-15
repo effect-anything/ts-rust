@@ -1,0 +1,4 @@
+input.sts(3,1): error TS2451: Cannot redeclare block-scoped variable 'Brand'.
+input.sts(4,1): error TS2451: Cannot redeclare block-scoped variable 'Brand'.
+input.sts(5,1): error TS2451: Cannot redeclare block-scoped variable 'Brand'.
+input.sts(6,1): error TS2451: Cannot redeclare block-scoped variable 'Brand'.

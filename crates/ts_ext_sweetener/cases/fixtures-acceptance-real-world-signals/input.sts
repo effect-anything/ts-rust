@@ -1,0 +1,25 @@
+import { effect, state } from "./macros.sts" for syntax;
+
+state count = 1;
+state label = "start";
+state flag = false;
+
+export const seen: string[] = [];
+
+effect {
+  seen.push(`${label}:${count}`);
+}
+
+count = 5;
+count += 2;
+count *= 3;
+count -= 1;
+count >>= 1;
+flag ||= true;
+label = "done";
+
+// An assignment is an expression, so it has the value it wrote.
+export const assigned: number = (count = 42);
+
+export const observed: readonly string[] = [...seen];
+export const settled: readonly [number, boolean] = [count, flag];

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    { "macro": "protocol", "rule": "protocol-declaration", "parent": null },
+    {
+      "macro": "implements",
+      "rule": "item-infix-implementation",
+      "parent": null
+    }
+  ],
+  "order": "source-order"
+}

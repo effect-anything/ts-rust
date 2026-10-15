@@ -1,0 +1,4 @@
+// tsc-ext: expand
+export syntax parameter it:expr;
+export { it };
+const c = [it, it];

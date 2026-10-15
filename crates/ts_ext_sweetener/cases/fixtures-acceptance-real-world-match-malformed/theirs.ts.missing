@@ -1,0 +1,7 @@
+upstream expand did not produce TypeScript.
+The diagnostic is the reference. Do not treat this case as an expansion pass.
+
+/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/match/malformed/input.sts:5:51 TS4001: No rule for macro match accepted this input: expected `MatchArm` or `_`.
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/match/malformed/input.sts:5:23 In this use of match
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/match/malformed/macros.sts:74:36 The closest rule was still expecting syntax here
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/match/malformed/macros.sts:74:55 The closest rule was still expecting syntax here

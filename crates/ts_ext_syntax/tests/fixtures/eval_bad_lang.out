@@ -1,0 +1,6 @@
+exit: 2
+--- stdout
+
+--- stderr
+tsc-ext eval: --lang takes ts or tsx, not rs
+Run `tsc-ext eval --help` for usage.

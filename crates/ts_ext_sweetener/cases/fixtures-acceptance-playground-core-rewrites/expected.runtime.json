@@ -1,0 +1,8 @@
+{
+  "exports": {
+    "result": {
+      "nanKind": "NaN",
+      "rejectedExtraArgument": true
+    }
+  }
+}

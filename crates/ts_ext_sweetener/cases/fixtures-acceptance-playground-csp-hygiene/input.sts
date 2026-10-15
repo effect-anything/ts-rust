@@ -1,0 +1,12 @@
+import { (<-), (->) } from "./declarative.sts" for syntax;
+
+const received = "outer received";
+const channel = {};
+
+function* exchange(): Generator<Effect, number, number> {
+  4 -> channel;
+  received <- channel;
+  return received + 1;
+}
+
+export const hygieneResult = [received, exchange];

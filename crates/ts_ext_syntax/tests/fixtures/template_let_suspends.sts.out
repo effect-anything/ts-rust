@@ -1,0 +1,8 @@
+exit: 0
+--- stdout
+// tsc-ext: expand
+
+const a = ((topic) => ((topic_1) => topic_1.join(" "))(topic.map(f)))(xs);
+async function load(id) { let topic_2; return (topic_2 = id, ((topic_3) => topic_3.name)(await get(topic_2))); }
+
+--- stderr

@@ -1,0 +1,9 @@
+import { function } from "./declarative.sts" for syntax shadows core;
+
+const right = "outer right";
+
+export function add(left: number, right: number): number {
+  return left + right;
+}
+
+export const hygieneResult = [right, add(2)(3)];

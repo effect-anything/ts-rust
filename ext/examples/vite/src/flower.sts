@@ -1,0 +1,104 @@
+import { (|>) } from "./macros/pipe.sts" for syntax;
+import { unless } from "./macros/unless.sts" for syntax;
+import tgpu, { d, std } from "typegpu";
+import { FRAME_MM, Length, clipOf } from "./measure";
+
+export const VERTEX_COUNT = 648;
+
+export const flowerParams = d.struct({
+  scale: d.f32,
+  spin: d.f32,
+  petals: d.f32,
+  point: d.f32,
+  time: d.f32,
+  tint: d.vec3f,
+});
+
+export const params = tgpu.slot<any>();
+
+export type Scene = {
+  scale: number;
+  petals: number;
+  point: number;
+  tint: readonly [number, number, number];
+};
+
+export function flowerScale(petalMm: number): number {
+  const petal = new Length(petalMm);
+  const frame = new Length(FRAME_MM);
+  return clipOf(petal, frame);
+}
+
+export function spanLabel(petalMm: number): string {
+  const petal = new Length(petalMm);
+  return petal.millimeters |> formatMillimeters;
+}
+
+function formatMillimeters(value: number): string {
+  return `${Math.round(value)} mm across`;
+}
+
+export function liveSpin(base: number, elapsed: number, speed: number): number {
+  unless (speed > 0) {
+    return base;
+  }
+  return base + elapsed * speed;
+}
+
+const hueRotate = tgpu.fn([d.vec3f, d.f32], d.vec3f)((color, angle) => {
+  "use gpu";
+  const c = std.cos(angle);
+  const s = std.sin(angle);
+  const y = color.x * 0.299 + color.y * 0.587 + color.z * 0.114;
+  const i = color.x * 0.596 - color.y * 0.274 - color.z * 0.321;
+  const q = color.x * 0.211 - color.y * 0.523 + color.z * 0.311;
+  const ii = i * c - q * s;
+  const qq = i * s + q * c;
+  return d.vec3f(
+    y + ii * 0.956 + qq * 0.621,
+    y - ii * 0.272 - qq * 0.647,
+    y - ii * 1.107 + qq * 1.704,
+  );
+});
+
+export const vertex = tgpu.vertexFn({
+  in: { vertexIndex: d.builtin.vertexIndex },
+  out: { position: d.builtin.position, along: d.f32, angle: d.f32 },
+})((input) => {
+  "use gpu";
+  const id = d.f32(input.vertexIndex);
+  const segment = std.floor(id / 3);
+  const corner = id - segment * 3;
+  const turn = (segment / 216) * 6.2831855;
+  const next = ((segment + 1) / 216) * 6.2831855;
+  const mid = (turn + next) * 0.5;
+  const edge = std.select(next, turn, corner === 1);
+  const angle = std.select(edge, mid, corner === 0);
+  const lobe = std.abs(std.sin(angle * params.$.petals * 0.5));
+  const shape = std.pow(lobe, std.mix(0.28, 1.45, params.$.point));
+  const radius = params.$.scale * shape;
+  const reach = std.select(radius, 0, corner === 0);
+  const along = std.select(shape, 0, corner === 0);
+  const theta = angle + params.$.spin + (1.5707963 - 3.14159265 / params.$.petals);
+  return {
+    position: d.vec4f(std.cos(theta) * reach, std.sin(theta) * reach, 0, 1),
+    along,
+    angle,
+  };
+});
+
+export const fragment = tgpu.fragmentFn({
+  in: { along: d.f32, angle: d.f32 },
+  out: d.vec4f,
+})((input) => {
+  "use gpu";
+  const drift = params.$.time * 0.65;
+  const along = std.clamp(input.along + std.sin(drift + input.angle * params.$.petals) * 0.12, 0, 1);
+  const bias = params.$.tint;
+  const center = std.mix(d.vec3f(0.98, 0.96, 0.93), bias, 0.28);
+  const side = std.sin(input.angle * params.$.petals + drift) * 0.5 + 0.5;
+  const rim = std.mix(hueRotate(bias, drift + 0.9), hueRotate(bias, drift - 0.7), side);
+  const lower = std.mix(center, bias, std.clamp(along * 2, 0, 1));
+  const upper = std.mix(bias, rim, std.clamp((along - 0.5) * 2, 0, 1));
+  return d.vec4f(std.select(lower, upper, along >= 0.5), 1);
+});

@@ -1,0 +1,21 @@
+// A recursive macro: each rule rewrites into a smaller use of the same macro
+// until one of the base cases matches.
+export rec syntax (->):expr {
+  rule { (-> $value:expr) } => {
+    $value
+  }
+
+  rule {
+    (-> $value:expr, $next:ident($($argument:expr),*), $($rest:tt)+)
+  } => {
+    (-> $next($value, $($argument),*), $($rest)+)
+  }
+
+  rule { (-> $value:expr, $next:ident($($argument:expr),*),) } => {
+    $next($value, $($argument),*)
+  }
+
+  rule { (-> $value:expr, $next:ident($($argument:expr),*)) } => {
+    $next($value, $($argument),*)
+  }
+}

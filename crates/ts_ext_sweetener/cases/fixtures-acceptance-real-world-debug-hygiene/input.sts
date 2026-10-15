@@ -1,0 +1,12 @@
+import { assert, dbg } from "./macros.sts" for syntax;
+
+// `inspected`, `actual`, and `expected` are the macros' own temporaries.
+const inspected = 1;
+const actual = 2;
+const expected = 3;
+
+export const total: number = dbg(inspected + actual + expected);
+
+export function check(): void {
+  assert(inspected === 1);
+}

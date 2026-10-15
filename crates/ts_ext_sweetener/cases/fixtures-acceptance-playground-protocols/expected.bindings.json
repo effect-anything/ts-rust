@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "introduced": [
+    { "spelling": "Equal", "space": "type", "kind": "recursive" },
+    { "spelling": "Equal", "space": "value", "kind": "recursive" },
+    { "spelling": "T", "space": "type", "kind": "lexical" },
+    { "spelling": "left", "space": "value", "kind": "lexical" },
+    { "spelling": "right", "space": "value", "kind": "lexical" }
+  ],
+  "relationship": "The protocol introduces paired type/value bindings; its subject scopes method types, and implementation parameters scope their method bodies."
+}

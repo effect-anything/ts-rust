@@ -1,0 +1,26 @@
+export syntax each:jsxChild {
+  rule {
+    {each ($items:expr as $item:binding $(, $index:binding)?)}
+      $body:jsxChild
+    {end}
+  }
+  bind $item in $body as lexical value;
+  bind $index in $body as lexical value;
+  => {
+    {($items).map(($item $(, $index)*) => $body)}
+  }
+}
+
+export syntax when:jsxChild {
+  rule {
+    {when ($condition:expr)} $then:jsxChild {else} $otherwise:jsxChild {end}
+  }
+  => {
+    {($condition) ? $then : $otherwise}
+  }
+
+  rule { {when ($condition:expr)} $then:jsxChild {end} }
+  => {
+    {($condition) ? $then : null}
+  }
+}

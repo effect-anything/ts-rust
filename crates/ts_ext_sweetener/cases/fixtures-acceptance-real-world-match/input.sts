@@ -1,0 +1,38 @@
+import { match } from "./macros.sts" for syntax;
+
+export type Event =
+  | { readonly type: "click"; readonly x: number; readonly y: number }
+  | { readonly type: "key"; readonly key: string }
+  | { readonly type: "scroll"; readonly delta: readonly number[] };
+
+export function describe(event: Event): string {
+  return match (event) {
+    { type: "click", x, y } if (x > 0) => `click ${x},${y}`,
+    { type: "click" } => "click offscreen",
+    { type: "key", key: "Escape" } => "escape",
+    { type: "key", key } => `key ${key}`,
+    { type: "scroll", delta: [first, second] } => `scroll ${first}/${second}`,
+    _ => "unknown"
+  };
+}
+
+// No wildcard: every member of the union is answered, and the compiler is what
+// says so. Adding a member to Event makes this a type error.
+export function name(event: Event): string {
+  return match (event) {
+    { type: "click" } => "click",
+    { type: "key" } => "key",
+    { type: "scroll" } => "scroll"
+  };
+}
+
+const samples: readonly Event[] = [
+  { type: "click", x: 3, y: 4 },
+  { type: "click", x: 0, y: 0 },
+  { type: "key", key: "Escape" },
+  { type: "key", key: "a" },
+  { type: "scroll", delta: [1, 2] },
+];
+
+export const described: readonly string[] = samples.map(describe);
+export const named: readonly string[] = samples.map(name);

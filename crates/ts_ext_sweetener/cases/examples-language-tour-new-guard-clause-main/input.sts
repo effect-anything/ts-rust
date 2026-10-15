@@ -1,0 +1,6 @@
+import { guard } from "./macros.sts" for syntax;
+
+export function greet(name: string): string {
+  guard (name.length > 0) else { return "Hello, stranger"; }
+  return `Hello, ${name}`;
+}

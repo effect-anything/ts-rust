@@ -1,0 +1,5 @@
+# actionlint: the one custom runner label, in testbox.yml (a job that runs only with the
+# Blacksmith app; see its header).
+self-hosted-runner:
+  labels:
+    - blacksmith-32vcpu-ubuntu-2404

@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "diagnostics": [
+    "SWR4001: No rule for macro match accepted this input: expected `MatchArm` or `_`."
+  ]
+}

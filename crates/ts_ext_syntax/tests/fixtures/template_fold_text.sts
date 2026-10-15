@@ -1,0 +1,7 @@
+// tsc-ext: expand
+export syntax pairs:expr {
+  rule { pairs($($k:ident = $v:expr),*) } => {
+    #fold($k, init: { {} }) { ($acc, $item, $index) => { ({ ...$acc, [#text($item)]: $index }) } }
+  }
+}
+const o = pairs(a = 1, b = 2);

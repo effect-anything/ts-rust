@@ -1,0 +1,17 @@
+[package]
+name = "ts_ext_sweetener"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Sweetener expansion, cases, and tools. ts_ext_syntax only composes this with TypeGPU."
+
+[dependencies]
+ts_goport = { path = "../ts_goport" }
+
+[[example]]
+name = "capture_ours"
+path = "scripts/capture_ours.rs"
+
+[lints]
+workspace = true

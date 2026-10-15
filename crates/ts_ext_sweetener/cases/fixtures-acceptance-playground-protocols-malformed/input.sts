@@ -1,0 +1,5 @@
+import { protocol } from "./declarative.sts" for syntax;
+
+protocol Equal<T> {
+  equals(left: T, right: T) boolean;
+}

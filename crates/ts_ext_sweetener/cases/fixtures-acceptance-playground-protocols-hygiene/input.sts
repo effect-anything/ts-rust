@@ -1,0 +1,24 @@
+import { implements, protocol } from "./declarative.sts" for syntax;
+
+const implementations = "outer implementations";
+const implementation = "outer implementation";
+
+protocol Equal<T> {
+  equals(left: T, right: T): boolean;
+}
+
+class User {
+  constructor(readonly id: number) {}
+}
+
+User implements Equal<User> {
+  equals(left: User, right: User): boolean {
+    return left.id === right.id;
+  }
+}
+
+export const hygieneResult = [
+  implementations,
+  implementation,
+  Equal.equals(new User(1), new User(1)),
+];
