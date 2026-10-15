@@ -3682,10 +3682,9 @@ impl Server {
         if let Some(v) = initialization_options.enable_telemetry {
             enable_telemetry = v;
         }
-        let mut run_external_code = false;
-        if let Some(v) = initialization_options.run_external_code {
-            run_external_code = v;
-        }
+        // PORT: ext: `--runExternalCode` on the command line is the default
+        let run_external_code =
+            crate::ext::lsp_trust::run_external_code(initialization_options.run_external_code);
         let client_capabilities = self.shared.client_capabilities();
         let has_dynamic_watch_registration = client_capabilities
             .workspace

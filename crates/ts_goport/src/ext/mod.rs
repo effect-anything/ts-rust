@@ -9,6 +9,7 @@ pub const MAPPER_NAME: &str = "typegpu";
 
 pub mod align;
 pub mod line_map;
+pub mod lsp_trust;
 pub mod mapper_deps;
 pub mod mapper_protocol;
 pub mod native_mapper;
