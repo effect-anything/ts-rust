@@ -36,9 +36,16 @@ pub fn run_lsp(args: &[String]) -> i32 {
         0,
         "use the given PID for the parent process watchdog",
     );
+    // PORT: ext: trust for editors that cannot send initializationOptions.
+    let run_external_code = flag.bool(
+        "runExternalCode",
+        false,
+        "allow configured content mappers to run external code (default when the client sends no runExternalCode option)",
+    );
     if flag.parse(args).is_err() {
         return 2;
     }
+    crate::ext::lsp_trust::set_command_line_flag(run_external_code.get());
 
     if !stdio.get() {
         let _ = writeln!(stdio::Stderr, "only stdio is supported");
