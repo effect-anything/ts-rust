@@ -1926,6 +1926,84 @@ fn unicode_identifiers_expand() {
     check_map(code, &out).unwrap();
 }
 
+/// The output token at the `nth` occurrence of `needle` maps exactly to
+/// source text `want` at the source occurrence `source_nth`.
+fn assert_exact(
+    code: &str,
+    out: &ts_ext_sweetener::Expansion,
+    needle: &str,
+    nth: usize,
+    source_nth: usize,
+) {
+    let at = out.code.match_indices(needle).nth(nth).unwrap().0;
+    let origin = out
+        .origins
+        .iter()
+        .find(|origin| origin.virtual_start as usize == at)
+        .unwrap_or_else(|| panic!("no origin at {needle}#{nth}: {}", out.code));
+    assert!(
+        !origin.introduced,
+        "{needle}#{nth} introduced: {}",
+        out.code
+    );
+    let want = code.match_indices(needle).nth(source_nth).unwrap().0;
+    assert_eq!(origin.original_start as usize, want, "{needle}#{nth}");
+}
+
+#[test]
+fn template_holes_chains_and_procedural_forms_keep_exact_origins() {
+    // `${... |> f}` inside a template literal.
+    let code = "export operator (|>):expr {\n  fixity infix;\n  associativity left;\n  precedence 40;\n  rule { $value:expr |> $callee:ident } => { $callee($value) }\n}\nconst s = `${user.id}:${user.total |> cents}`;\n";
+    let out = expand(ExpandRequest {
+        filename: "t.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(
+        out.code.contains("`${user.id}:${cents(user.total)}`"),
+        "{}",
+        out.code
+    );
+    check_map(code, &out).unwrap();
+    assert_exact(code, &out, "cents", 0, 0);
+    assert_exact(code, &out, "total", 0, 0);
+    assert_exact(code, &out, "user", 0, 0);
+    // A left-associative chain re-expanded as one operand.
+    let code = "export syntax class Callee {\n  fields { name: ident; }\n  rule { $name:ident }\n}\nexport operator (|>>):expr {\n  fixity infix;\n  associativity left;\n  precedence 40;\n  rule { $value:expr |>> $f:Callee } => { $f.name($value) }\n}\nconst r = alpha |>> first |>> second;\n";
+    let out = expand(ExpandRequest {
+        filename: "c.sts",
+        code,
+        phase: Phase::Check,
+    });
+    assert!(out.code.contains("second(first(alpha))"), "{}", out.code);
+    check_map(code, &out).unwrap();
+    for word in ["alpha", "first", "second"] {
+        assert_exact(code, &out, word, 0, 0);
+    }
+    // A procedural form (printed as source by the form pass).
+    let code = "export syntax class Step {\n  fields { name: binding?; value: expr?; rest: stmt?; }\n  rule { $name:binding <- $value:expr; }\n  rule { $rest:stmt }\n}\nexport syntax gen:expr {\n  rule { gen { $($step:Step)+ } } => {\n    Effect.gen(function* () {\n        $(#if(present $step.name) { const $step.name = yield* $step.value; }\n            #else { $step.rest })*\n      })\n  }\n}\nexport syntax class Field {\n  fields { name: ident; kind: type; }\n  rule { $name:ident : $kind:type }\n}\nexport syntax effect:item {\n  rule { effect $name:binding($($parameter:Field),*) $body:tt }\n  => {\n    #core(export const $name = ($($parameter.name: $parameter.kind),*) =>\n      gen $body;)\n  }\n}\neffect report(id: string) {\n  user <- lookup(id);\n  const count = user.length;\n}\n";
+    let out = expand(ExpandRequest {
+        filename: "e.sts",
+        code,
+        phase: Phase::Check,
+    });
+    check_map(code, &out).unwrap();
+    assert_exact(code, &out, "report", 0, 0);
+    assert_exact(code, &out, "lookup", 0, 0);
+    assert_exact(code, &out, "count", 0, 0);
+    let user = code.find("user <-").unwrap();
+    let at = out.code.find("user =").unwrap();
+    let origin = out
+        .origins
+        .iter()
+        .find(|o| o.virtual_start as usize == at)
+        .unwrap();
+    assert_eq!(
+        (origin.original_start as usize, origin.introduced),
+        (user, false)
+    );
+}
+
 /// Seeded xorshift64. Deterministic so this runs as an ordinary unit test.
 struct Rng(u64);
 
@@ -2135,7 +2213,7 @@ fn edit_at_char_boundary(rng: &mut Rng, code: &mut String) {
     }
 }
 
-fn assert_exact(code: &str) {
+fn assert_fuzz_exact(code: &str) {
     // `expand` catches a panic and reports it. This runs on the calling
     // thread, so a byte-slicing bug fails the test instead.
     let out = std::panic::catch_unwind(|| ts_ext_sweetener::expand_unchecked(code));
@@ -2148,7 +2226,7 @@ fn assert_exact(code: &str) {
 #[test]
 fn multibyte_boundaries_keep_an_exact_map() {
     for code in boundary_programs() {
-        assert_exact(&code);
+        assert_fuzz_exact(&code);
     }
 }
 
