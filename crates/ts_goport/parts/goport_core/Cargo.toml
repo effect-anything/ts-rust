@@ -15,7 +15,7 @@ path = "../../src/goport_core_root.rs"
 goport_util = { path = "../goport_util" }
 # ast/store.rs `ZeroOnceLock`: the registry entry arrays in `.bss`.
 goport_cell = { path = "../goport_cell" }
-rustc-hash = "=2.1.2"
+rustc-hash = "=2.1.3"
 indexmap = "=2.14.0"
 # The map of std, with lookups by a hash made before (raw-entry): the loader
 # finds the task data of a path with the hash that a parse worker made
@@ -23,9 +23,9 @@ indexmap = "=2.14.0"
 # same version.
 hashbrown = { version = "=0.17.1", default-features = false, features = ["raw-entry"] }
 memchr = "=2.8.2"
-smallvec = "=1.15.1"
+smallvec = "=1.16.0"
 bumpalo = "=3.20.3"
-xxhash-rust = { version = "=0.8.15", features = ["xxh3"] }
+xxhash-rust = { version = "=0.8.16", features = ["xxh3"] }
 flate2 = "=1.1.10"
 jiff = { version = "=0.2.37", default-features = false, features = ["std"] }
 

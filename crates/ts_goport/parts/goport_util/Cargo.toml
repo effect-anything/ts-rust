@@ -12,11 +12,11 @@ publish = false
 path = "../../src/goport_util_root.rs"
 
 [dependencies]
-rustc-hash = "=2.1.2"
+rustc-hash = "=2.1.3"
 indexmap = "=2.14.0"
 memchr = "=2.8.2"
 # jsnum.rs (was the ts_jsnum crate).
-num-bigint = "=0.4.6"
+num-bigint = "=0.5.1"
 num-traits = "=0.2.19"
 ryu-js = "=1.0.2"
 

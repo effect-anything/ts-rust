@@ -11,12 +11,12 @@ license.workspace = true
 goport_core = { path = "parts/goport_core", default-features = false }
 goport_lsproto = { path = "parts/goport_lsproto" }
 goport_util = { path = "parts/goport_util" }
-rustc-hash = "=2.1.2"
+rustc-hash = "=2.1.3"
 indexmap = "=2.14.0"
 memchr = "=2.8.2"
-smallvec = "=1.15.1"
+smallvec = "=1.16.0"
 bumpalo = "=3.20.3"
-xxhash-rust = { version = "=0.8.15", features = ["xxh3"] }
+xxhash-rust = { version = "=0.8.16", features = ["xxh3"] }
 flate2 = "=1.1.10"
 jiff = { version = "=0.2.37", default-features = false, features = ["std"] }
 
