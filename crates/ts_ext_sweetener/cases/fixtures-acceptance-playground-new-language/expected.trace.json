@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    { "macro": "module", "rule": "namespace-body", "parent": null },
+    { "macro": "record", "rule": "empty-record", "parent": "module" },
+    { "macro": "record", "rule": "field-record", "parent": "module" },
+    { "macro": "extend", "rule": "extension-method", "parent": null },
+    { "macro": "optional", "rule": "optional-type", "parent": null },
+    { "macro": "::", "rule": "receiver-dispatch", "parent": null }
+  ],
+  "order": "source-order"
+}

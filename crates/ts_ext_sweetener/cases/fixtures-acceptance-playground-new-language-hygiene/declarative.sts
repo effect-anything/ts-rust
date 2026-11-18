@@ -1,0 +1,85 @@
+export syntax module:item {
+  rule {
+    module $name:binding {
+      $($body:item)*
+    }
+  }
+  bind $name in following as recursive type;
+  bind $name in following as recursive value;
+  expect "module item";
+  => {
+    #core(namespace $name {
+      $($body)*
+    })
+  }
+}
+
+export syntax class RecordField {
+  fields {
+    name: binding;
+    valueType: type;
+  }
+
+  rule { $name:binding: $valueType:type }
+  expect "field type after colon";
+}
+
+export syntax record:item {
+  rule { record $name:binding(); }
+  bind $name in following as recursive type;
+  bind $name in following as recursive value;
+  => {
+    #core(export class $name {})
+  }
+
+  rule {
+    record $name:binding($($field:RecordField),+);
+  }
+  bind $name in following as recursive type;
+  bind $name in following as recursive value;
+  bind $field.name in $field.name as lexical value;
+  expect "field type after colon";
+  => {
+    #core(export class $name {
+      $($field.name: $field.valueType;)*
+      constructor($($field.name: $field.valueType),*) {
+        $(this.$field.name = $field.name;)*
+      }
+    })
+  }
+}
+
+export syntax extend:item {
+  rule {
+    extend $target:type {
+      $name:binding($self:binding: $selfType:type): $result:type {
+        $($body:stmt)*
+      }
+    }
+  }
+  bind $name in following as recursive value;
+  bind $self in $body as lexical value;
+  expect "extension method body";
+  => {
+    #core(function $name($self: $selfType): $result { $($body)* })
+  }
+}
+
+export syntax optional:type {
+  rule { optional<$value:type> }
+  expect "type inside optional angle brackets";
+  => {
+    $value | undefined
+  }
+}
+
+export operator (::):expr {
+  fixity infix;
+  associativity left;
+  precedence 50;
+  rule { $method:ident() :: $receiver:expr }
+  expect "receiver expression";
+  => {
+    $method($receiver)
+  }
+}

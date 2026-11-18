@@ -1,0 +1,5 @@
+import { assert } from "./macros.sts" for syntax;
+
+export function check(): void {
+  assert();
+}

@@ -1,0 +1,15 @@
+exit: 1
+--- stdout
+// tsc-ext: expand
+
+const o = pairs(a = 1, b = 2);
+
+--- stderr
+template_fold_text.sts:4:77: error SWR2011: Template refers to unknown capture $item.
+  4 |     #fold($k, init: { {} }) { ($acc, $item, $index) => { ({ ...$acc, [#text($item)]: $index }) } }
+    |                                                                             ^
+  help: tsc-ext explain SWR2011
+template_fold_text.sts:4:71: error SWR2017: Invalid argument for template operation #text.
+  4 |     #fold($k, init: { {} }) { ($acc, $item, $index) => { ({ ...$acc, [#text($item)]: $index }) } }
+    |                                                                       ^
+  help: tsc-ext explain SWR2017

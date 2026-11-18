@@ -1,0 +1,52 @@
+export syntax method:item {
+  rule {
+    method $head:binding {
+      $(
+        request { $($request:tt)+ }
+        expect $expectation:expr;
+        => { $($expansion:tt)* }
+      )+
+    }
+  }
+  => {
+    #syntax {
+      syntax $head:expr {
+        $(
+          rule { $($request)+ }
+          expect $expectation;
+          => { $($expansion)* }
+        )+
+      }
+    }
+  }
+
+  rule {
+    method $head:binding($($headParameter:binding: $headType:type),*)
+    $($segment:ident($($parameter:binding: $parameterType:type),*))+:
+    $result:type {
+      $($body:stmt)*
+    }
+  }
+  bind $headParameter in $body as lexical value;
+  bind $parameter in $body as lexical value;
+  => {
+    #syntax {
+      syntax $head:expr {
+        rule {
+          $head($(#metavar("headArgument", $headParameter):expr),*)
+          $($segment($(#metavar("argument", $parameter):expr),*))+ 
+        }
+        expect "upper argument segment";
+        => {
+          ((
+              $($headParameter: $headType),*,
+              $($($parameter: $parameterType),*),*
+            ): $result => { $($body)* })(
+            $(#metavar("headArgument", $headParameter)),*,
+            $($(#metavar("argument", $parameter)),*),*
+          )
+        }
+      }
+    }
+  }
+}

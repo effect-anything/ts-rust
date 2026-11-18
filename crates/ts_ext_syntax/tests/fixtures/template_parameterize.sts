@@ -1,0 +1,6 @@
+// tsc-ext: expand
+export syntax parameter it:expr;
+export syntax with:expr {
+  rule { with($v:expr, $b:expr) } => { #let(t = $v) { #parameterize(it = t) { $b } } }
+}
+const a = with(load(), it.x + it.y);

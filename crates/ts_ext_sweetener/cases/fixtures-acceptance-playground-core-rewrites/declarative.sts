@@ -1,0 +1,36 @@
+export syntax typeof:expr shadows core {
+  literal globalThis.NaN as NaN;
+
+  rule { typeof NaN } => {
+    "NaN"
+  }
+
+  fallback rule { typeof $value:expr } => {
+    #core(typeof $value)
+  }
+}
+
+export syntax function:item shadows core {
+  rule {
+    export function $name:binding(
+      $($parameter:binding: $parameterType:type),+
+    ): $result:type {
+      $($body:stmt)*
+    }
+  }
+  bind $name in following as recursive value;
+  bind $parameter in $body as lexical value;
+  expect "function body";
+  => {
+    #core(export function $name(
+      $($parameter: $parameterType),*
+    ): $result {
+      if (arguments.length !== globalThis.Number(#count($parameter))) {
+        throw new globalThis.Error(
+          #text($name) + " requires " + globalThis.Number(#count($parameter)) + " argument(s)",
+        );
+      }
+      $($body)*
+    })
+  }
+}

@@ -1,0 +1,11 @@
+import { match } from "./macros.sts" for syntax;
+
+// `matched` is the name the macro gives its subject temporary.
+const matched = "call-site binding";
+
+export const kept: string = matched;
+
+export const chosen: string = match (matched) {
+  "call-site binding" => matched,
+  _ => "other"
+};

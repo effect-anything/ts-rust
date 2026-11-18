@@ -1,0 +1,63 @@
+import { each, when } from "./macros/jsx.sts" for syntax;
+
+export type Slider = {
+  id: "petal" | "petals" | "point" | "speed";
+  name: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+};
+
+export function DebugPanel(props: {
+  label: string;
+  scale: number;
+  petals: number;
+  point: number;
+  tint: string;
+  onTint: (value: string) => void;
+  rows: readonly Slider[];
+  onChange: (id: Slider["id"], value: number) => void;
+}) {
+  return (
+    <aside>
+      <header>
+        <h2>Flower</h2>
+        <p>{props.label}</p>
+      </header>
+      <label className="tint">
+        <span>Tint</span>
+        <input type="color" value={props.tint} onChange={(event) => props.onTint(event.target.value)} />
+      </label>
+      {each (props.rows as row)}
+        <label key={row.id}>
+          <span>
+            {row.name}
+            <b>{row.value.toFixed(2)}</b>
+          </span>
+          <input
+            type="range"
+            min={row.min}
+            max={row.max}
+            step={row.step}
+            value={row.value}
+            onChange={(event) => props.onChange(row.id, Number(event.target.value))}
+          />
+        </label>
+      {end}
+      {when (props.scale > 1)}
+        <p className="flag">larger than the frame</p>
+      {else}
+        <p className="flag">inside the frame</p>
+      {end}
+      {when (props.petals >= 6)}
+        <p className="flag">dense flower</p>
+      {end}
+      {when (props.point > 0.65)}
+        <p className="flag">pointed petals</p>
+      {else}
+        <p className="flag">round petals</p>
+      {end}
+    </aside>
+  );
+}

@@ -1,0 +1,21 @@
+import { helper } from "./runtime.js";
+
+// Introduces a binding of its own. A call site using the same spelling must
+// keep its own, and this must keep the one it introduced.
+export syntax withTemporary:expr {
+  rule { withTemporary($value:expr) } => {
+    ((tmp: number) => tmp + ($value))(1)
+  }
+}
+
+// The template names `helper`, which is bound where this macro is defined.
+// A different `helper` at the call site must not be the one that runs.
+export syntax describe:expr {
+  rule { describe($value:expr) } => { helper($value) }
+}
+
+// A binding the macro introduces and then uses in syntax it was given.
+export syntax withEach:expr {
+  rule { withEach($values:expr, $body:expr) }
+  => { ($values).map((item: number) => ($body)) }
+}

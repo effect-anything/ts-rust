@@ -2770,6 +2770,9 @@ static HANDLERS: LazyLock<HandlerMap> = LazyLock::new(|| {
         lsproto::CUSTOM_TEXT_DOCUMENT_SOURCE_DEFINITION_INFO,
         Server::handle_source_definition,
     );
+    let show_expansion = crate::ext_ls::handle_show_expansion; // PORT: ext
+    let info = lsproto::CUSTOM_TEXT_DOCUMENT_SHOW_EXPANSION_INFO;
+    register_language_service_document_request_handler(&mut handlers, info, show_expansion);
     register_language_service_document_request_handler(
         &mut handlers,
         lsproto::TEXT_DOCUMENT_TYPE_DEFINITION_INFO,
@@ -4128,7 +4131,7 @@ impl Server {
         ls: &ls::LanguageService,
         params: &lsproto::HoverParams,
     ) -> Result<lsproto::HoverResponse, GoError> {
-        ls.provide_hover(ctx, params)
+        crate::ext_ls::provide_hover(ls, ctx, params) // PORT: ext
     }
 
     // Go: server.go:1952 handlePrepareRename

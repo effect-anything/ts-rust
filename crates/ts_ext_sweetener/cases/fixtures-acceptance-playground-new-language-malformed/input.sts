@@ -1,0 +1,5 @@
+import { module, record } from "./declarative.sts" for syntax;
+
+module List {
+  record Cons(head:, tail: Cons);
+}

@@ -1,0 +1,4 @@
+import { (**) } from "./macros.sts" for syntax shadows core;
+
+export const square = 5 ** 2;
+export const tower = 2 ** 3 ** 2;

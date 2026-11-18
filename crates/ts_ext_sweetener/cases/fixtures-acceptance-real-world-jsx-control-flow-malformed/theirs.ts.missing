@@ -1,0 +1,6 @@
+upstream expand did not produce TypeScript.
+The diagnostic is the reference. Do not treat this case as an expansion pass.
+
+/Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/jsx-control-flow/malformed/input.stsx:10:22 TS4001: No rule for macro each accepted this input: expected a braced group.
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/jsx-control-flow/malformed/input.stsx:9:5 In this use of each
+  /Users/kee/Workspace/github.com/effect-anything/ts-rust/crates/ts_ext_syntax/conformance/cases/sweetener/fixtures/acceptance/real-world/jsx-control-flow/malformed/macros.sts:5:5 The closest rule was still expecting syntax here

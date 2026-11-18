@@ -1,0 +1,8 @@
+// tsc-ext: expand
+export syntax parameter (%):expr;
+export operator (|>):expr {
+  fixity infix; associativity right; precedence 20;
+  rule { $value:expr |> $body:expr } => { #let(topic = $value) { #parameterize(required % = topic) { $body } } }
+}
+const a = xs |> %.map(f) |> %.join(" ");
+async function load(id) { return id |> await get(%) |> %.name; }

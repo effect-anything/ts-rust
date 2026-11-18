@@ -1,0 +1,33 @@
+import { make } from "effect/reactivity/Atom";
+import { useAtom, useAtomValue } from "@effect/atom-react";
+
+// Module atom. The value is stable, so this is not a hook.
+// `atom count = 1` => `const countAtom = make(1)`.
+export syntax atom:item {
+  rule { atom $name:binding = $initial:expr; }
+  bind #join($name, suffix: "Atom") in following as lexical value;
+  => {
+    const #join($name, suffix: "Atom") = make($initial);
+  }
+}
+
+// React. One hook call, same shape as `state` / `useState`:
+// `atom count;` => `const [count, setCount] = useAtom(countAtom)`.
+// `count` is the value. `setCount` writes. Call this unconditionally.
+export syntax atom:stmt {
+  rule { atom $name:ident; }
+  bind $name in following as lexical value;
+  bind #join($name, prefix: "set", casing: "upper-first") in following as lexical value;
+  => {
+    const [$name, #join($name, prefix: "set", casing: "upper-first")] = useAtom(#join($name, suffix: "Atom"));
+  }
+}
+
+// Read-only subscription. No setter.
+export syntax atomValue:stmt {
+  rule { atomValue $name:ident; }
+  bind $name in following as lexical value;
+  => {
+    const $name = useAtomValue(#join($name, suffix: "Atom"));
+  }
+}

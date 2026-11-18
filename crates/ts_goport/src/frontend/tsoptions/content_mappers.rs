@@ -107,6 +107,8 @@ pub fn resolve_content_mapper_manifest(
             )),
         );
     }
+    // PORT: not in tsgo. A native mapper in a platform package (ext/native_mapper.rs).
+    let exec = crate::ext::native_mapper::exec(host, &resolver, &package_directory, &name, exec);
     let (compiler_options, _) = cm.compiler_options.get_value();
     let (dynamic_config, _) = cm.dynamic_config.get_value();
     let (output_extensions, valid) = cm.output_extensions.get_value();

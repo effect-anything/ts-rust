@@ -1,0 +1,11 @@
+import { method } from "./declarative.sts" for syntax;
+
+method between(value: number)
+  lower(minimum: number)
+  upper(maximum: number): boolean {
+    return value > minimum && value < maximum;
+  }
+
+export const result = between(3)
+  lower(1)
+  upper(5);

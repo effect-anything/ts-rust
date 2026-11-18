@@ -453,6 +453,12 @@ impl Checker {
                 self.check_truthiness_of_type(left_type, left);
             }
         }
+        // PORT: operator overloading (ext/overload.rs).
+        if let Some(t) =
+            crate::ext::overload::check_binary(self, left, operator, right, left_type, right_type)
+        {
+            return t;
+        }
         match operator {
             SyntaxKind::AsteriskToken
             | SyntaxKind::AsteriskAsteriskToken

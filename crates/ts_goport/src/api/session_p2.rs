@@ -937,6 +937,7 @@ impl Session {
         // apart until the write failures are in.
         let mut results = program_emit::emit_file_results(options);
         let writes = std::mem::take(&mut *writes.lock().unwrap_or_else(PoisonError::into_inner));
+        let writes = crate::ext::precheck::rewrite_writes(writes); // PORT: ext emit rewrite
         let mut output_files: Option<FxHashMap<String, String>> = None;
         if keep_outputs {
             let outputs = output_files.get_or_insert_with(FxHashMap::default);

@@ -1,0 +1,6 @@
+// Statement. The body runs when the condition is false.
+export syntax unless:stmt {
+  rule { unless ($condition:expr) { $($body:stmt)* } } => {
+    if (!($condition)) { $($body)* }
+  }
+}

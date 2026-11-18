@@ -1,0 +1,2 @@
+// tsc-ext: expand --stage nope
+const a = 1;

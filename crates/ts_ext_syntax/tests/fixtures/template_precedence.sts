@@ -1,0 +1,15 @@
+// tsc-ext: expand
+export syntax both:expr { rule { both($a:expr, $b:expr) } => { $a && $b } }
+export syntax neg:expr { rule { neg($a:expr) } => { -$a } }
+export syntax mem:expr { rule { mem($a:expr) } => { $a.length + $a } }
+export syntax all:expr { rule { all($($x:expr),*) } => { #fold($x, init: { true }) { ($acc, $item, $index) => { $acc && $item } } } }
+const a = both(p, q || r);
+const b = both(a ? b : c, x = 1);
+const c = !both(p, q);
+const d = neg(x + 1) * 2;
+const e = neg(x * y) * 2;
+const f = mem(a + b);
+const g = all(p, q || r, s);
+x = both(p, q);
+call(both(p, q), [both(p, q)]);
+const h = both(p, q) ? 1 : 2;

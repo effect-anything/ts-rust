@@ -1,0 +1,11 @@
+import { function, typeof } from "./declarative.sts" for syntax shadows core;
+
+const Number = "outer Number";
+const Error = "outer Error";
+const NaN = 4;
+
+export function exact(value: number): number {
+  return value;
+}
+
+export const hygieneResult = [Number, Error, typeof NaN, exact(2)];

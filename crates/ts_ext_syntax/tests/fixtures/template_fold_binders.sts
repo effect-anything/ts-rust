@@ -1,0 +1,7 @@
+// tsc-ext: expand
+export syntax all:expr {
+  rule { all($($x:expr),*) } => {
+    #fold($x, init: { true }) { ($acc, $item, $i) => { $acc && $item } }
+  }
+}
+const b = all(p);

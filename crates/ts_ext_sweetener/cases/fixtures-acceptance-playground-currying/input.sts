@@ -1,0 +1,7 @@
+import { function } from "./declarative.sts" for syntax shadows core;
+
+export function add(left: number, right: number): number {
+  return left + right;
+}
+
+export const result = [add(2, 3), add(2)(3)];

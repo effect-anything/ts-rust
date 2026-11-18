@@ -1,0 +1,8 @@
+[
+  {
+    "code": "SWR4001",
+    "stage": "expansion",
+    "severity": "error",
+    "messageArguments": ["if", "return statement in else block"]
+  }
+]

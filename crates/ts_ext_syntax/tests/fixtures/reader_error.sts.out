@@ -1,0 +1,7 @@
+exit: 1
+--- stdout
+// tsc-ext: expand --format tsc
+const a = f(1));
+
+--- stderr
+reader_error.sts(2,15): error SWR1002: Sweetener reader error, not a TypeScript parse error: unexpected closing delimiter ')'

@@ -1,0 +1,8 @@
+// A statement macro. `:stmt` says where it may be written.
+export syntax unless:stmt {
+  // The pattern on the left is what you write; the template on the right is
+  // what it becomes. `$($body:stmt)*` captures any number of statements.
+  rule { unless ($condition:expr) { $($body:stmt)* } } => {
+    if (!($condition)) { $($body)* }
+  }
+}

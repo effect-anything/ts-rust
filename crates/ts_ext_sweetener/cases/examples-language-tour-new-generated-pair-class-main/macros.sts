@@ -1,0 +1,13 @@
+export syntax pair:item {
+  rule { pair $name:binding<$leftType:type, $rightType:type>; }
+  bind $name in following as recursive type;
+  bind $name in following as recursive value;
+  => {
+    class $name {
+      constructor(
+        readonly left: $leftType,
+        readonly right: $rightType,
+      ) {}
+    }
+  }
+}

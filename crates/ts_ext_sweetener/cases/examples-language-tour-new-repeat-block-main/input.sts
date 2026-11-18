@@ -1,0 +1,6 @@
+import { repeat } from "./macros.sts" for syntax;
+
+export const values: number[] = [];
+repeat(4) {
+  values.push(values.length);
+}

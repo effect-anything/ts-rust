@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "introduced": [
+    { "spelling": "List", "space": "type", "kind": "recursive" },
+    { "spelling": "List", "space": "value", "kind": "recursive" },
+    { "spelling": "Empty", "space": "type", "kind": "recursive" },
+    { "spelling": "Empty", "space": "value", "kind": "recursive" },
+    { "spelling": "Cons", "space": "type", "kind": "recursive" },
+    { "spelling": "Cons", "space": "value", "kind": "recursive" },
+    { "spelling": "head", "space": "value", "kind": "lexical" },
+    { "spelling": "tail", "space": "value", "kind": "lexical" },
+    { "spelling": "last", "space": "value", "kind": "recursive" },
+    { "spelling": "self", "space": "value", "kind": "lexical" }
+  ],
+  "relationship": "The module binds its namespace in type and value spaces; nested records bind their constructors and correlated fields, while the extension method binds its recursive name and receiver only in their declared regions."
+}

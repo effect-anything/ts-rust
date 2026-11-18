@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "introduced": [{ "spelling": "value", "space": "value", "kind": "lexical" }],
+  "relationship": "Function parameters bind references in both prefix statements and the final expression."
+}

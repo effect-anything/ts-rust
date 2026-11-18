@@ -1,0 +1,5 @@
+import { clamp } from "./macros.sts" for syntax;
+
+export const low = clamp(-4, 0, 10);
+export const middle = clamp(6, 0, 10);
+export const high = clamp(14, 0, 10);

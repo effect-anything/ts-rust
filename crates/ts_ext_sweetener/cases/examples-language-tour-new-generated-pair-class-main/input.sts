@@ -1,0 +1,4 @@
+import { pair } from "./macros.sts" for syntax;
+
+pair Entry<string, number>;
+export const score = new Entry("Ada", 10);

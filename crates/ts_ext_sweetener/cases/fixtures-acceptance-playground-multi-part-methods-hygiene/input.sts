@@ -1,0 +1,18 @@
+import { method } from "./declarative.sts" for syntax;
+
+const value = "outer value";
+const minimum = "outer minimum";
+const maximum = "outer maximum";
+
+method between(value: number)
+  lower(minimum: number)
+  upper(maximum: number): boolean {
+    return value > minimum && value < maximum;
+  }
+
+export const hygieneResult = [
+  value,
+  minimum,
+  maximum,
+  between(3) lower(1) upper(5),
+];

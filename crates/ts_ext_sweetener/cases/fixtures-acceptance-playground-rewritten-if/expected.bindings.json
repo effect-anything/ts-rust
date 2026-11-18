@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "introduced": [],
+  "relationship": "The rewritten statement introduces no bindings and preserves the surrounding function scope."
+}

@@ -1,0 +1,52 @@
+export syntax duplicate:expr {
+  rule { duplicate($value:tt) } => { [$value, $value] }
+}
+
+export syntax guard:stmt {
+  rule { guard($condition:expr) $body:stmt }
+  => { return; }
+}
+
+export syntax makeConstant:item {
+  rule { makeConstant } => { export const generated = 7; }
+}
+
+export syntax maybe:type {
+  rule { maybe<$value:type> } => { $value | undefined }
+}
+
+export syntax class EventField {
+  fields {
+    name: binding;
+    valueType: type;
+  }
+
+  rule { $name:binding: $valueType:type }
+  expect "event field after colon";
+}
+
+export syntax event:item {
+  rule { event $name:binding($($field:EventField),+); }
+  bind $name in following as recursive type;
+  bind $name in following as recursive value;
+  bind $field.name in $field.name as lexical value;
+  => {
+    #core(export class $name {
+      $($field.name: $field.valueType;)*
+      constructor($($field.name: $field.valueType),*) {
+        $(this.$field.name = $field.name;)*
+      }
+    })
+  }
+}
+
+export syntax collect:expr {
+  rule { collect($($value:expr),+) } => { [$($value),*] }
+}
+
+export operator (|>):expr {
+  fixity infix;
+  associativity left;
+  precedence 40;
+  rule { $value:expr |> $callee:ident } => { $callee($value) }
+}

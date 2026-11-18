@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    { "macro": "if", "rule": "complete-if-else", "parent": null }
+  ],
+  "order": "parent-first"
+}

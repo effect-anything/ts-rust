@@ -1,0 +1,4 @@
+import { (==) } from "./macros.sts" for syntax shadows core;
+
+export const nanEqualsItself = globalThis.NaN == globalThis.NaN;
+export const signedZerosDiffer = !(0 == -0);

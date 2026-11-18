@@ -4417,6 +4417,7 @@ declare module "user" { import { x } from "amb"; export const y: typeof x; }
                 extension: extension.to_string(),
                 mappings: JsonValue(mappings),
                 diagnostic_directives: None,
+                expansions: Vec::new(),
             }
         }
 
@@ -4435,6 +4436,7 @@ declare module "user" { import { x } from "amb"; export const y: typeof x; }
                     start: 0,
                     length: 1,
                     code: 9001,
+                    ext: Default::default(),
                 });
             }
             if params.content.contains("@supp") {
@@ -4444,6 +4446,7 @@ declare module "user" { import { x } from "amb"; export const y: typeof x; }
                         extension: ".ts".to_string(),
                         mappings: JsonValue(b"[]".to_vec()),
                         diagnostic_directives: None,
+                        expansions: Vec::new(),
                     },
                 });
             }

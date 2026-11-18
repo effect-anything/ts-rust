@@ -1,0 +1,22 @@
+import { assert, dbg } from "./macros.sts" for syntax;
+
+// The macro introduces a binding spelled `inspected`; this one must survive.
+export const inspected = "call-site binding";
+
+export function total(values: readonly number[]): number {
+  const sum = dbg(values.reduce((left, right) => left + right, 0));
+  assert(sum >= 0);
+  assert(values.length === 3);
+  return sum;
+}
+
+export function describeFailure(values: readonly number[]): string {
+  try {
+    total(values);
+    return "no failure";
+  } catch (error) {
+    return error instanceof Error ? error.message : "unknown";
+  }
+}
+
+export const failure: string = describeFailure([1, 2]);

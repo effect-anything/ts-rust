@@ -1,0 +1,117 @@
+export syntax class ProtocolParameter {
+  fields {
+    name: binding;
+    valueType: type;
+  }
+
+  rule { $name:binding: $valueType:type }
+}
+
+export syntax class ProtocolMethod {
+  fields {
+    name: ident;
+    parameters: ProtocolParameter*;
+    resultType: type;
+  }
+
+  rule {
+    $name:ident($($parameters:ProtocolParameter),*): $resultType:type;
+  }
+  expect ": followed by a return type";
+}
+
+export syntax protocol:item {
+  rule {
+    protocol $name:binding<$subject:binding> {
+      $($method:ProtocolMethod)+
+    }
+  }
+  bind $name in following as recursive type;
+  bind $name in following as recursive value;
+  bind $subject in $method as lexical type;
+  bind $method.parameters.name in $method.parameters.name as lexical value;
+  expect ": followed by a return type";
+  => {
+    #core(interface $name<$subject> {
+      $($method.name(
+        $($method.parameters.name: $method.parameters.valueType),*
+      ): $method.resultType;)+
+    })
+
+    #core(const $name = (() => {
+      const implementations = new globalThis.WeakMap<object, $name<unknown>>();
+      return {
+        register<ImplementationSubject>(
+          prototype: object,
+          implementation: $name<ImplementationSubject>,
+        ): void {
+          implementations.set(
+            prototype,
+            implementation as $name<unknown>,
+          );
+        },
+        $($method.name<$subject extends object>(
+          $($method.parameters.name: $method.parameters.valueType),*
+        ): $method.resultType {
+          const implementation = implementations.get(
+            globalThis.Object.getPrototypeOf([
+              $($method.parameters.name),*
+            ][0]!)
+          ) as $name<$subject> | undefined;
+          if (implementation === undefined) {
+            throw new globalThis.Error(
+              "Missing " + #text($name) + " implementation"
+            );
+          }
+          return implementation.$method.name(
+            $($method.parameters.name),*
+          );
+        },)+
+      };
+    })();)
+  }
+}
+
+export syntax class ImplementationParameter {
+  fields {
+    name: binding;
+    valueType: type;
+  }
+
+  rule { $name:binding: $valueType:type }
+}
+
+export syntax class ProtocolImplementationMethod {
+  fields {
+    name: ident;
+    parameters: ImplementationParameter*;
+    resultType: type;
+    body: stmt*;
+  }
+
+  rule {
+    $name:ident($($parameters:ImplementationParameter),*): $resultType:type {
+      $($body:stmt)*
+    }
+  }
+}
+
+export operator implements:item {
+  fixity infix;
+  associativity none;
+  precedence 10;
+  rule {
+    $class:ident implements $protocol:ident<$subject:type> {
+      $($method:ProtocolImplementationMethod)+
+    }
+  }
+  bind $method.parameters.name in $method.body as lexical value;
+  expect "protocol implementation body";
+  => {
+    #core($protocol.register($class.prototype, {
+      $($method.name(
+        $($method.parameters.name: $method.parameters.valueType),*
+      ): $method.resultType { $($method.body)* }),+
+    });)
+  }
+}

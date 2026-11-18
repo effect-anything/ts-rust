@@ -1,0 +1,11 @@
+import { record } from "./macros.sts" for syntax;
+
+// One line each. The class, its fields, its constructor, and a printer are
+// all generated — and TypeScript type-checks the result as ordinary code.
+record Point(x: number, y: number);
+record Named(label: string, at: Point);
+
+export const origin = new Point(0, 0);
+export const corner = new Named("corner", new Point(3, 4));
+
+export const printed: string = corner.toString();

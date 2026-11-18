@@ -695,7 +695,7 @@ struct ResolvedLocation {
 pub struct OriginalTextFile {
     file_name: &'static str,
     text: FileText,
-    line_map: Vec<i32>,
+    line_map: Rc<Vec<i32>>,
 }
 
 // Go: diagnosticwriter/diagnosticwriter.go:131 newOriginalTextFile (tsgo#4712, ts#63936)
@@ -703,7 +703,7 @@ fn new_original_text_file(file: Node, file_name: &'static str) -> Rc<OriginalTex
     let text = source_file_original_text(file);
     Rc::new(OriginalTextFile {
         file_name,
-        line_map: compute_ecma_line_starts(&text),
+        line_map: crate::ext::line_map::original_line_map(&text), // PORT: shared (ext/line_map.rs)
         text,
     })
 }

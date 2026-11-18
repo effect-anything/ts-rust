@@ -1,0 +1,37 @@
+import { coreItem, emitCompilerFixture } from "./fine-jsx-implementation.stsx" for syntax;
+
+export syntax class CompilerFixtureComponent {
+  fields {
+    name: binding;
+    propsType: type;
+  }
+
+  rule {
+    function $name:binding({ cond = false, id }: $propsType:type) {
+      return (<><div className={identity(styles.a, id !== null ? styles.b : {})}></div>{cond === false && (<div className={identity(styles.c, DISPLAY ? styles.d : {})} />)}</>);
+    }
+  }
+}
+
+export syntax memoized:item {
+  rule { memoized $component:CompilerFixtureComponent }
+  => {
+    emitCompilerFixture(
+      $component.name,
+      $component.propsType
+    )
+  }
+}
+
+export syntax function:item shadows core {
+  rule { $component:CompilerFixtureComponent }
+  => {
+    emitCompilerFixture(
+      $component.name,
+      $component.propsType
+    )
+  }
+
+  fallback rule { $declaration:tt }
+  => { coreItem $declaration }
+}

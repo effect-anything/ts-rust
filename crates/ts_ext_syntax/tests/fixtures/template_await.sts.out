@@ -1,0 +1,11 @@
+exit: 0
+--- stdout
+// tsc-ext: expand
+
+async function g() { return [await h(), await h()]; }
+const k = [typeof q, typeof q];
+const n = [new Foo(1), new Foo(1)];
+const s = [x as T, x as T];
+const t = [key in o, key in o];
+
+--- stderr

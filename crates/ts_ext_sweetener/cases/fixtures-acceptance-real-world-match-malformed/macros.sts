@@ -1,0 +1,109 @@
+import { matchUnhandled } from "./runtime.js";
+
+export syntax class MatchField {
+  fields {
+    name: ident;
+    pattern: tt?;
+  }
+
+  rule { $name:ident: $pattern:tt }
+  rule { $name:ident }
+}
+
+export rec syntax matchTest:expr {
+  rule { matchTest($subject:expr, _) } => { true }
+
+  rule { matchTest($subject:expr, { $($field:MatchField),* }) } => {
+    typeof $subject === "object" && $subject !== null
+    $(#if(present $field.pattern) {
+        && matchTest(($subject)[#text($field.name)], $field.pattern)
+      })*
+  }
+
+  rule { matchTest($subject:expr, [$($element:tt),*]) } => {
+    globalThis.Array.isArray($subject)
+      && ($subject).length === #count($element)
+      $(&& matchTest(($subject)[#index()], $element))*
+  }
+
+  rule { matchTest($subject:expr, $name:ident) }
+  refine $name spelling starts-with-lowercase
+  => { true }
+
+  rule { matchTest($subject:expr, $value:tt) } => { ($subject) === $value }
+}
+
+export rec syntax matchBind:stmt {
+  rule { matchBind($subject:expr, _); } => { }
+
+  rule { matchBind($subject:expr, { $($field:MatchField),* }); } => {
+    $(#if(present $field.pattern) {
+        matchBind(($subject)[#text($field.name)], $field.pattern);
+      } #else {
+        const $field.name = ($subject)[#text($field.name)];
+      })*
+  }
+
+  rule { matchBind($subject:expr, [$($element:tt),*]); } => {
+    $(matchBind(($subject)[#index()], $element);)*
+  }
+
+  rule { matchBind($subject:expr, $name:binding); }
+  refine $name spelling starts-with-lowercase
+  bind $name in following as lexical value;
+  => { const $name = $subject; }
+
+  rule { matchBind($subject:expr, $value:tt); } => { }
+}
+
+export syntax class MatchArm {
+  fields {
+    pattern: tt;
+    guard: expr?;
+    body: expr;
+  }
+
+  rule { $pattern:tt if ($guard:expr) => $body:expr }
+  rule { $pattern:tt => $body:expr }
+}
+
+export syntax match:expr {
+  // A wildcard arm answers every value, so the match has no unhandled case and
+  // must not ask for one: reaching `matchUnhandled` would be a type error even
+  // though nothing can get there.
+  rule { match ($subject:expr) { $($arm:MatchArm),+ , _ => $fallback:expr } }
+  => {
+    ((matched) => {
+      $(if (matchTest(matched, $arm.pattern)) {
+        matchBind(matched, $arm.pattern);
+        #if(present $arm.guard) {
+          if ($arm.guard) { return $arm.body; }
+        } #else {
+          return $arm.body;
+        }
+      })+
+      return $fallback;
+    })($subject)
+  }
+
+  rule { match ($subject:expr) { _ => $fallback:expr } } => {
+    ((matched) => {
+      matched;
+      return $fallback;
+    })($subject)
+  }
+
+  rule { match ($subject:expr) { $($arm:MatchArm),+ } } => {
+    ((matched) => {
+      $(if (matchTest(matched, $arm.pattern)) {
+        matchBind(matched, $arm.pattern);
+        #if(present $arm.guard) {
+          if ($arm.guard) { return $arm.body; }
+        } #else {
+          return $arm.body;
+        }
+      })+
+      return matchUnhandled(matched);
+    })($subject)
+  }
+}

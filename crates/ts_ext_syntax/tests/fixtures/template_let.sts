@@ -1,0 +1,3 @@
+// tsc-ext: expand
+export syntax twice:expr { rule { twice($x:expr) } => { #let(v = $x) { v + v } } }
+const a = twice(f());

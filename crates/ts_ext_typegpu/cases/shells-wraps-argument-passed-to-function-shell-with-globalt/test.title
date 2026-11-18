@@ -1,0 +1,1 @@
+wraps argument passed to function shell with globalThis set call

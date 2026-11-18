@@ -1,0 +1,5 @@
+import { check } from "./macros.sts" for syntax;
+
+const total = 6 * 7;
+check(total === 42);
+export { total };

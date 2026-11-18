@@ -1,0 +1,6 @@
+{
+  "exports": {
+    "inspected": "call-site binding",
+    "failure": "assertion failed: values.length === 3\n  values.length = 2\n  3 = 3"
+  }
+}

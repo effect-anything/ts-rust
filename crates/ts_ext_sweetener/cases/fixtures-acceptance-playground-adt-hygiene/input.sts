@@ -1,0 +1,15 @@
+import { data, match } from "./declarative.sts" for syntax;
+
+const value = "outer value";
+const matched = "outer matched";
+
+data Option<T> = None() | Some(value: T);
+
+export const hygieneResult = [
+  value,
+  matched,
+  match (Some(3)) {
+    Some(value) => value + 1;
+    None() => 0;
+  },
+];

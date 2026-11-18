@@ -108,6 +108,7 @@ impl LanguageService {
         let mut synthesized_by_file: IndexMap<Node, Vec<Diagnostic>> = IndexMap::new();
         for diag_slice in diagnostics {
             for diag in diag_slice.iter() {
+                let diag = &crate::ext_ls::with_expansion_context(diag); // PORT: ext
                 if is_synthesized_content_mapped_diagnostic(diag) {
                     synthesized_by_file
                         .entry(diag.file())
@@ -151,7 +152,7 @@ pub fn is_synthesized_content_mapped_diagnostic(diag: &Diagnostic) -> bool {
         return false;
     }
     let (_, fidelity) = SpanMap::virtual_to_original_span(Some(span_map), diag.loc());
-    fidelity == Fidelity::NONE
+    fidelity == Fidelity::NONE && !crate::ext_ls::inside(span_map, diag.loc()) // PORT: ext
 }
 
 // Go: ls/diagnostics.go:97 aggregateSynthesizedDiagnostics

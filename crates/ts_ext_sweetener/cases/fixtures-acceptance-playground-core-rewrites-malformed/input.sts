@@ -1,0 +1,3 @@
+import { function } from "./declarative.sts" for syntax shadows core;
+
+export function exact(value: number): number;

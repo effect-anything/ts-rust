@@ -1,0 +1,3 @@
+import { list } from "./macros.sts" for syntax;
+
+export const names: list<string> = ["Ada", "Grace", "Edsger"];

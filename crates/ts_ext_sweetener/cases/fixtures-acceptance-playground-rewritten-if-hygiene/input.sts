@@ -1,0 +1,13 @@
+import { if } from "./declarative.sts" for syntax shadows core;
+
+const IF = "call-site IF";
+
+function choose(predicate: boolean): number {
+  if (predicate) {
+    return 3;
+  } else {
+    return 2;
+  }
+}
+
+export const hygieneResult = [IF, choose(true)];

@@ -1,0 +1,1 @@
+input.sts(3,23): error TS2448: Block-scoped variable 'vector' used before its declaration.

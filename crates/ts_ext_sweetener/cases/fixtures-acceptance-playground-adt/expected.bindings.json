@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "introduced": [
+    { "spelling": "Option", "space": "type", "kind": "recursive" },
+    { "spelling": "T", "space": "type", "kind": "lexical" },
+    { "spelling": "None", "space": "value", "kind": "recursive" },
+    { "spelling": "Some", "space": "value", "kind": "recursive" },
+    { "spelling": "value", "space": "value", "kind": "lexical" }
+  ],
+  "relationship": "The data name and constructors bind following items; the type parameter binds constructor field types, and each constructor or match field binds only its generated lexical region."
+}

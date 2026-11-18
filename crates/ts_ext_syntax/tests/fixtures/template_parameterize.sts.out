@@ -1,0 +1,7 @@
+exit: 0
+--- stdout
+// tsc-ext: expand
+
+const a = ((t) => t.x + t.y)(load());
+
+--- stderr

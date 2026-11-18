@@ -1,0 +1,26 @@
+export operator (->):stmt {
+  fixity infix;
+  associativity none;
+  precedence 20;
+  context generator;
+  rule { $value:expr -> $channel:expr; }
+  context generator;
+  expect "channel expression";
+  => {
+    yield put($channel, $value);
+  }
+}
+
+export operator (<-):stmt {
+  fixity infix;
+  associativity none;
+  precedence 20;
+  context generator;
+  rule { $name:binding <- $channel:expr; }
+  bind $name in following as lexical value;
+  context generator;
+  expect "channel expression";
+  => {
+    const $name = yield take($channel);
+  }
+}

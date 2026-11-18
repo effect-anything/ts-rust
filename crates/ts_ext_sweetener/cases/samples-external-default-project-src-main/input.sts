@@ -1,0 +1,13 @@
+import { duplicate as twice, guard, makeConstant, maybe, (|>) } from "./macros.sts" for syntax;
+
+makeConstant
+
+export const answer: maybe<number[]> = twice(21);
+const double = (value: number) => value * 2;
+export const piped = 21 |> double;
+
+export function checked(ok: boolean) {
+  guard(ok) {
+    throw new Error("unreachable after expansion");
+  }
+}

@@ -48,6 +48,8 @@ mod flags_macros {
     pub(crate) use goport_util::{go_enum, go_flags};
 }
 pub mod frontend;
+// Not part of the port. The port calls `ext::precheck` only.
+pub mod ext;
 // Go `internal/ipc` (tsgo#4712).
 pub mod ipc;
 // The jemalloc arena layout at start: Linux only (THP).

@@ -1,0 +1,3 @@
+import { wrap } from "./macros.sts" for syntax;
+
+export const heading = wrap("Sweetener", "<h1>", "</h1>");

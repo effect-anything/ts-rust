@@ -1,0 +1,8 @@
+import { state } from "./macros.sts" for syntax;
+
+state count = 1;
+
+// The storage the macro derives is `countSignal`; this one must stay separate.
+const other = count + 1;
+
+export const observed: readonly number[] = [count, other];

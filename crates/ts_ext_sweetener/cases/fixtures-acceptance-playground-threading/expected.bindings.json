@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "introduced": [],
+  "relationship": "Threading preserves captured call-site bindings and introduces no runtime bindings."
+}

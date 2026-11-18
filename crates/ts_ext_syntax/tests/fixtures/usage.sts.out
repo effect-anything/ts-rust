@@ -1,0 +1,6 @@
+exit: 2
+--- stdout
+
+--- stderr
+tsc-ext expand: --stage takes tsc or bundle, not nope
+Run `tsc-ext expand --help` for usage.

@@ -1,0 +1,1 @@
+input.sts(11,31): error TS1135: Argument expression expected.

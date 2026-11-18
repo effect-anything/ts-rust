@@ -1,0 +1,10 @@
+import { function } from "./declarative.sts" for syntax shadows core;
+
+const doubled = "outer doubled";
+const value = "outer value";
+const calculate = function(value: number) {
+  const doubled = value * 2;
+  doubled + 1
+};
+
+export const hygieneResult = [doubled, value, calculate(3)];

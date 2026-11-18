@@ -1,0 +1,4 @@
+import { constant } from "./macros.sts" for syntax;
+
+constant answer = 42;
+export const doubled = answer * 2;

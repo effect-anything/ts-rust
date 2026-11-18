@@ -440,6 +440,7 @@ pub struct MappedOutput {
     // virtual ranges and optionally report an error when no diagnostic is produced.
     // PORT: Go `*DiagnosticDirectives`; nil is `None`.
     pub diagnostic_directives: Option<DiagnosticDirectives>,
+    pub expansions: Vec<crate::ext::mapper_protocol::ExpansionInformation>, // PORT: ext
 }
 
 impl MappedOutput {
@@ -458,7 +459,8 @@ impl MappedOutput {
             first,
             "diagnosticDirectives",
             &self.diagnostic_directives,
-        )
+        )?;
+        marshal_field_omitempty(enc, first, "expansions", &self.expansions) // PORT: ext
     }
 
     /// Decodes one member of `MappedOutput`; false for an unknown name.
@@ -472,6 +474,7 @@ impl MappedOutput {
             "extension" => json_unmarshal_decode(dec, &mut self.extension)?,
             "mappings" => json_unmarshal_decode(dec, &mut self.mappings)?,
             "diagnosticDirectives" => json_unmarshal_decode(dec, &mut self.diagnostic_directives)?,
+            "expansions" => json_unmarshal_decode(dec, &mut self.expansions)?, // PORT: ext
             _ => return Ok(false),
         }
         Ok(true)
@@ -769,6 +772,7 @@ pub struct Diagnostic {
     pub start: i32,
     pub length: i32,
     pub code: i32,
+    pub ext: crate::ext::mapper_protocol::DiagnosticExt, // PORT: ext
 }
 
 impl MarshalerTo for Diagnostic {
@@ -779,6 +783,7 @@ impl MarshalerTo for Diagnostic {
         marshal_field(enc, first, "start", &self.start)?;
         marshal_field(enc, first, "length", &self.length)?;
         marshal_field(enc, first, "code", &self.code)?;
+        self.ext.marshal_fields(enc, first)?; // PORT: ext
         write_object_end(enc);
         Ok(())
     }
@@ -795,6 +800,7 @@ impl UnmarshalerFrom for Diagnostic {
                 "start" => json_unmarshal_decode(dec, &mut self.start)?,
                 "length" => json_unmarshal_decode(dec, &mut self.length)?,
                 "code" => json_unmarshal_decode(dec, &mut self.code)?,
+                "category" | "relatedInformation" => self.ext.decode_field(name, dec)?, // PORT: ext
                 _ => return Ok(false),
             }
             Ok(true)
@@ -2711,6 +2717,8 @@ fn decode_transform_result(
             d.code,
             &d.message_text,
         ));
+        let at = |p| original_positions.normalize(p); // PORT: ext
+        d.ext.apply(result.diagnostics.last_mut(), at);
     }
     Ok(result)
 }
@@ -2748,6 +2756,9 @@ fn decode_mapped_output<'a>(
     } else {
         result.mappings = Some(Arc::new(spanmap::new(&[])));
     }
+    let v = |p| virtual_positions.normalize_text_pos(p); // PORT: ext
+    let o = |p| original_positions.normalize_text_pos(p);
+    crate::ext::mapper_protocol::attach_expansions(&mut result.mappings, &output.expansions, v, o);
     result.diagnostic_directives = normalize_diagnostic_directives(
         output.diagnostic_directives.as_ref(),
         &virtual_positions,
@@ -3179,6 +3190,7 @@ mod tests {
                             start: 0,
                             length: 3.min(length),
                             code: 9999,
+                            ext: Default::default(),
                         }],
                         ..Default::default()
                     })))
@@ -3299,6 +3311,7 @@ mod tests {
                         mapped_output: MappedOutput {
                             text: p.content,
                             extension: ".ts".to_string(),
+                            expansions: Vec::new(),
                             mappings: JsonValue(mappings.into_bytes()),
                             diagnostic_directives: protocol_diagnostic_directives(
                                 vec![MappedDiagnosticDirective {
@@ -3317,6 +3330,7 @@ mod tests {
                             start: emoji_length,
                             length: text_length - emoji_length,
                             code: 1001,
+                            ext: Default::default(),
                         }],
                         ..Default::default()
                     })))

@@ -1,0 +1,2913 @@
+import { error, service } from "./service.sts" for syntax;
+import { effect, handle } from "./effect.sts" for syntax;
+import { query } from "./query.sts" for syntax;
+import { each, when } from "./jsx.sts" for syntax;
+import { Context, Data, Effect, Layer } from "effect";
+import { and, asc, desc, eq, gt, gte, lt, lte, ne, or } from "drizzle-orm";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { boolean, integer, pgTable, serial, text } from "drizzle-orm/pg-core";
+import { Fragment, h } from "./jsx-runtime.js";
+
+void h;
+void Fragment;
+
+error DbError { sql: string }
+error NotFound { id: string }
+
+service Database {
+  query(sql: string): Effect<readonly string[], DbError>;
+  lookup(id: string): Effect<string, NotFound>;
+}
+
+export const users = pgTable("users", {
+  id: serial().primaryKey(),
+  name: text().notNull(),
+  age: integer().notNull(),
+});
+
+export const posts = pgTable("posts", {
+  id: serial().primaryKey(),
+  authorId: integer().notNull(),
+  title: text().notNull(),
+  published: boolean().notNull(),
+});
+
+
+effect report_0(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_0 = (id: string) => handle report_0(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_0 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_0 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 0</p>
+    {else}
+      <p>ready 0</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_1(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_1 = (id: string) => handle report_1(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_1 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_1 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 1</p>
+    {else}
+      <p>ready 1</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_2(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_2 = (id: string) => handle report_2(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_2 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_2 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 2</p>
+    {else}
+      <p>ready 2</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_3(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_3 = (id: string) => handle report_3(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_3 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_3 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 3</p>
+    {else}
+      <p>ready 3</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_4(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_4 = (id: string) => handle report_4(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_4 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_4 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 4</p>
+    {else}
+      <p>ready 4</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_5(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_5 = (id: string) => handle report_5(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_5 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_5 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 5</p>
+    {else}
+      <p>ready 5</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_6(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_6 = (id: string) => handle report_6(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_6 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_6 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 6</p>
+    {else}
+      <p>ready 6</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_7(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_7 = (id: string) => handle report_7(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_7 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_7 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 7</p>
+    {else}
+      <p>ready 7</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_8(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_8 = (id: string) => handle report_8(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_8 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_8 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 8</p>
+    {else}
+      <p>ready 8</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_9(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_9 = (id: string) => handle report_9(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_9 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_9 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 9</p>
+    {else}
+      <p>ready 9</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_10(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_10 = (id: string) => handle report_10(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_10 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_10 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 10</p>
+    {else}
+      <p>ready 10</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_11(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_11 = (id: string) => handle report_11(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_11 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_11 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 11</p>
+    {else}
+      <p>ready 11</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_12(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_12 = (id: string) => handle report_12(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_12 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_12 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 12</p>
+    {else}
+      <p>ready 12</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_13(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_13 = (id: string) => handle report_13(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_13 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_13 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 13</p>
+    {else}
+      <p>ready 13</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_14(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_14 = (id: string) => handle report_14(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_14 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_14 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 14</p>
+    {else}
+      <p>ready 14</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_15(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_15 = (id: string) => handle report_15(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_15 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_15 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 15</p>
+    {else}
+      <p>ready 15</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_16(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_16 = (id: string) => handle report_16(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_16 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_16 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 16</p>
+    {else}
+      <p>ready 16</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_17(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_17 = (id: string) => handle report_17(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_17 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_17 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 17</p>
+    {else}
+      <p>ready 17</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_18(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_18 = (id: string) => handle report_18(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_18 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_18 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 18</p>
+    {else}
+      <p>ready 18</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_19(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_19 = (id: string) => handle report_19(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_19 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_19 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 19</p>
+    {else}
+      <p>ready 19</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_20(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_20 = (id: string) => handle report_20(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_20 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_20 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 20</p>
+    {else}
+      <p>ready 20</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_21(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_21 = (id: string) => handle report_21(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_21 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_21 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 21</p>
+    {else}
+      <p>ready 21</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_22(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_22 = (id: string) => handle report_22(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_22 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_22 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 22</p>
+    {else}
+      <p>ready 22</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_23(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_23 = (id: string) => handle report_23(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_23 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_23 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 23</p>
+    {else}
+      <p>ready 23</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_24(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_24 = (id: string) => handle report_24(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_24 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_24 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 24</p>
+    {else}
+      <p>ready 24</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_25(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_25 = (id: string) => handle report_25(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_25 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_25 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 25</p>
+    {else}
+      <p>ready 25</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_26(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_26 = (id: string) => handle report_26(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_26 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_26 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 26</p>
+    {else}
+      <p>ready 26</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_27(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_27 = (id: string) => handle report_27(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_27 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_27 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 27</p>
+    {else}
+      <p>ready 27</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_28(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_28 = (id: string) => handle report_28(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_28 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_28 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 28</p>
+    {else}
+      <p>ready 28</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_29(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_29 = (id: string) => handle report_29(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_29 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_29 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 29</p>
+    {else}
+      <p>ready 29</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_30(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_30 = (id: string) => handle report_30(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_30 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_30 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 30</p>
+    {else}
+      <p>ready 30</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_31(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_31 = (id: string) => handle report_31(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_31 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_31 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 31</p>
+    {else}
+      <p>ready 31</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_32(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_32 = (id: string) => handle report_32(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_32 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_32 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 32</p>
+    {else}
+      <p>ready 32</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_33(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_33 = (id: string) => handle report_33(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_33 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_33 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 33</p>
+    {else}
+      <p>ready 33</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_34(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_34 = (id: string) => handle report_34(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_34 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_34 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 34</p>
+    {else}
+      <p>ready 34</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_35(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_35 = (id: string) => handle report_35(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_35 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_35 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 35</p>
+    {else}
+      <p>ready 35</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_36(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_36 = (id: string) => handle report_36(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_36 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_36 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 36</p>
+    {else}
+      <p>ready 36</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_37(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_37 = (id: string) => handle report_37(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_37 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_37 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 37</p>
+    {else}
+      <p>ready 37</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_38(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_38 = (id: string) => handle report_38(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_38 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_38 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 38</p>
+    {else}
+      <p>ready 38</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_39(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_39 = (id: string) => handle report_39(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_39 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_39 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 39</p>
+    {else}
+      <p>ready 39</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_40(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_40 = (id: string) => handle report_40(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_40 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_40 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 40</p>
+    {else}
+      <p>ready 40</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_41(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_41 = (id: string) => handle report_41(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_41 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_41 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 41</p>
+    {else}
+      <p>ready 41</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_42(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_42 = (id: string) => handle report_42(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_42 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_42 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 42</p>
+    {else}
+      <p>ready 42</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_43(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_43 = (id: string) => handle report_43(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_43 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_43 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 43</p>
+    {else}
+      <p>ready 43</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_44(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_44 = (id: string) => handle report_44(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_44 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_44 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 44</p>
+    {else}
+      <p>ready 44</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_45(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_45 = (id: string) => handle report_45(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_45 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_45 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 45</p>
+    {else}
+      <p>ready 45</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_46(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_46 = (id: string) => handle report_46(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_46 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_46 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 46</p>
+    {else}
+      <p>ready 46</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_47(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_47 = (id: string) => handle report_47(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_47 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_47 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 47</p>
+    {else}
+      <p>ready 47</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_48(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_48 = (id: string) => handle report_48(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_48 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_48 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 48</p>
+    {else}
+      <p>ready 48</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_49(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_49 = (id: string) => handle report_49(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_49 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_49 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 49</p>
+    {else}
+      <p>ready 49</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_50(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_50 = (id: string) => handle report_50(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_50 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_50 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 50</p>
+    {else}
+      <p>ready 50</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_51(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_51 = (id: string) => handle report_51(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_51 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_51 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 51</p>
+    {else}
+      <p>ready 51</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_52(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_52 = (id: string) => handle report_52(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_52 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_52 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 52</p>
+    {else}
+      <p>ready 52</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_53(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_53 = (id: string) => handle report_53(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_53 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_53 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 53</p>
+    {else}
+      <p>ready 53</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_54(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_54 = (id: string) => handle report_54(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_54 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_54 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 54</p>
+    {else}
+      <p>ready 54</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_55(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_55 = (id: string) => handle report_55(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_55 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_55 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 55</p>
+    {else}
+      <p>ready 55</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_56(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_56 = (id: string) => handle report_56(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_56 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_56 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 56</p>
+    {else}
+      <p>ready 56</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_57(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_57 = (id: string) => handle report_57(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_57 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_57 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 57</p>
+    {else}
+      <p>ready 57</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_58(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_58 = (id: string) => handle report_58(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_58 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_58 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 58</p>
+    {else}
+      <p>ready 58</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_59(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_59 = (id: string) => handle report_59(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_59 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_59 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 59</p>
+    {else}
+      <p>ready 59</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_60(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_60 = (id: string) => handle report_60(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_60 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_60 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 60</p>
+    {else}
+      <p>ready 60</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_61(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_61 = (id: string) => handle report_61(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_61 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_61 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 61</p>
+    {else}
+      <p>ready 61</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_62(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_62 = (id: string) => handle report_62(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_62 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_62 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 62</p>
+    {else}
+      <p>ready 62</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_63(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_63 = (id: string) => handle report_63(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_63 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_63 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 63</p>
+    {else}
+      <p>ready 63</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_64(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_64 = (id: string) => handle report_64(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_64 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_64 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 64</p>
+    {else}
+      <p>ready 64</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_65(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_65 = (id: string) => handle report_65(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_65 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_65 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 65</p>
+    {else}
+      <p>ready 65</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_66(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_66 = (id: string) => handle report_66(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_66 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_66 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 66</p>
+    {else}
+      <p>ready 66</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_67(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_67 = (id: string) => handle report_67(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_67 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_67 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 67</p>
+    {else}
+      <p>ready 67</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_68(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_68 = (id: string) => handle report_68(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_68 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_68 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 68</p>
+    {else}
+      <p>ready 68</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_69(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_69 = (id: string) => handle report_69(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_69 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_69 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 69</p>
+    {else}
+      <p>ready 69</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_70(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_70 = (id: string) => handle report_70(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_70 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_70 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 70</p>
+    {else}
+      <p>ready 70</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_71(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_71 = (id: string) => handle report_71(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_71 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_71 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 71</p>
+    {else}
+      <p>ready 71</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_72(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_72 = (id: string) => handle report_72(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_72 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_72 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 72</p>
+    {else}
+      <p>ready 72</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_73(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_73 = (id: string) => handle report_73(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_73 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_73 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 73</p>
+    {else}
+      <p>ready 73</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_74(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_74 = (id: string) => handle report_74(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_74 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_74 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 74</p>
+    {else}
+      <p>ready 74</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_75(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_75 = (id: string) => handle report_75(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_75 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_75 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 75</p>
+    {else}
+      <p>ready 75</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_76(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_76 = (id: string) => handle report_76(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_76 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_76 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 76</p>
+    {else}
+      <p>ready 76</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_77(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_77 = (id: string) => handle report_77(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_77 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_77 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 77</p>
+    {else}
+      <p>ready 77</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_78(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_78 = (id: string) => handle report_78(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_78 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_78 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 78</p>
+    {else}
+      <p>ready 78</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);
+
+
+effect report_79(id: string) {
+  user <- lookup(id);
+  rows <- lookup(id);
+  const count = rows.length + rows.length;
+  return `${user}: ${count}`;
+}
+
+export const safe_79 = (id: string) => handle report_79(id) {
+  NotFound(error) => Effect.succeed(`no such user ${error.id}`),
+  DbError(error) => Effect.succeed(`query failed: ${error.sql}`)
+};
+
+export const feed_79 = (db: NodePgDatabase, minAge: number) =>
+query(db) {
+  select { author: users.name, title: posts.title }
+  from users
+  join posts on posts.authorId == users.id
+  where users.age >= minAge and posts.published == true
+  order by users.name, posts.id desc
+  limit 20
+};
+
+export const panel_79 = (items: readonly string[], loading: boolean) => (
+  <section>
+    {when (loading)}
+      <p>loading 79</p>
+    {else}
+      <p>ready 79</p>
+    {end}
+    {each (items as item, index)}
+      <span key={index}>{item}</span>
+    {end}
+  </section>
+);

@@ -24,6 +24,7 @@
 compile_error!("build ts_goport for wasm with --no-default-features, as crates/ts_wasm does");
 
 // The port below the language service (crate split step 2): each module keeps its path.
+pub use goport_core::ext; // PORT: not in Go (ts-rust extensions)
 pub use goport_core::{
     ast, astdata, astnav, baseline, binder, checker, contentmapper, core, declarations, diag,
     diagnostics, diagnostics_loc, emitter, evaluator, execute, fast_mode, flags, frontend, fswatch,
@@ -49,6 +50,7 @@ pub use goport_core::{args, effect_cached, effect_export_member};
 pub mod api;
 pub mod cmd;
 pub mod format;
+pub mod ext_ls; // PORT: not in Go (language features for ts-rust extensions)
 pub mod ls;
 pub mod lsp;
 pub mod project;

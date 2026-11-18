@@ -1,0 +1,111 @@
+import { createEffect, createSignal } from "./runtime.js";
+
+export syntax state:item {
+  rule { state $name:binding = $initial:expr; }
+  bind #join($name, suffix: "Signal") in following as lexical value;
+  => {
+    const #join($name, suffix: "Signal") = createSignal($initial);
+    #syntax {
+      syntax $name:expr {
+        rule { $name = #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(#metavar("value", $name))
+        }
+
+        rule { $name += #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() + #metavar("value", $name)
+          )
+        }
+
+        rule { $name -= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() - #metavar("value", $name)
+          )
+        }
+
+        rule { $name *= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() * #metavar("value", $name)
+          )
+        }
+
+        rule { $name /= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() / #metavar("value", $name)
+          )
+        }
+
+        rule { $name %= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() % #metavar("value", $name)
+          )
+        }
+
+        rule { $name **= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() ** #metavar("value", $name)
+          )
+        }
+
+        rule { $name &= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() & #metavar("value", $name)
+          )
+        }
+
+        rule { $name |= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() | #metavar("value", $name)
+          )
+        }
+
+        rule { $name ^= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() ^ #metavar("value", $name)
+          )
+        }
+
+        rule { $name <<= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() << #metavar("value", $name)
+          )
+        }
+
+        rule { $name >>= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() >> #metavar("value", $name)
+          )
+        }
+
+        rule { $name >>>= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").set(
+            #join($name, suffix: "Signal").get() >>> #metavar("value", $name)
+          )
+        }
+
+        rule { $name &&= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").get() &&
+            #join($name, suffix: "Signal").set(#metavar("value", $name))
+        }
+
+        rule { $name ||= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").get() ||
+            #join($name, suffix: "Signal").set(#metavar("value", $name))
+        }
+
+        rule { $name ??= #metavar("value", $name):expr } => {
+          #join($name, suffix: "Signal").get() ??
+            #join($name, suffix: "Signal").set(#metavar("value", $name))
+        }
+
+        rule { $name } => { #join($name, suffix: "Signal").get() }
+      }
+    }
+  }
+}
+
+export syntax effect:item {
+  rule { effect { $($body:stmt)+ } } => {
+    createEffect(() => { $($body)+ });
+  }
+}

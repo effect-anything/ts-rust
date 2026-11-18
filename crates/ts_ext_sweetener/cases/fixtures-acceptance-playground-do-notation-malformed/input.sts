@@ -1,0 +1,6 @@
+import { doSteps } from "./declarative.sts" for syntax;
+
+const result = doSteps(box) {
+  value <-;
+  return value;
+};

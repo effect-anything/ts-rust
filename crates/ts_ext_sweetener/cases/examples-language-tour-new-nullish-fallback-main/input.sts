@@ -1,0 +1,4 @@
+import { fallback } from "./macros.sts" for syntax;
+
+const configured: string | undefined = undefined;
+export const label: string = fallback(configured, "default");

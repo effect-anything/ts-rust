@@ -1,0 +1,19 @@
+import { effect, state } from "./macros.sts" for syntax;
+
+// Reactive state that reads and writes like a plain variable.
+state count = 1;
+state label = "start";
+
+export const seen: string[] = [];
+
+// Re-runs whenever a signal it read has been written.
+effect {
+  seen.push(`${label}:${count}`);
+}
+
+count = 5;
+count += 2;
+label = "done";
+
+export const observed: readonly string[] = [...seen];
+export const total: number = count;

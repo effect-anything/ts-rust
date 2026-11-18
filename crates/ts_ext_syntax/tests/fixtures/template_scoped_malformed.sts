@@ -1,0 +1,5 @@
+// tsc-ext: expand
+export syntax f:expr { rule { f($x:expr) } => { #let(v = $x) } }
+export syntax g:expr { rule { g($x:expr) } => { #parameterize(v = $x) } }
+const a = f(1);
+const b = g(1);

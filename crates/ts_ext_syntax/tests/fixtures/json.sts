@@ -1,0 +1,5 @@
+// tsc-ext: expand --json
+export syntax twice:expr {
+  rule { twice($x:expr) } => { [$x, $x] }
+}
+export const pair = twice(1);

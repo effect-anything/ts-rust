@@ -1,0 +1,123 @@
+import React, { createContext } from "react";
+import { createRoot } from "react-dom/client";
+import "../../macro-suite/theme.css";
+import {
+  callback,
+  context,
+  deferred,
+  effect,
+  latestRef,
+  memo,
+  reducer,
+  reactId,
+  ref,
+  state,
+  states,
+  toggle,
+  transition,
+} from "./react-hooks.sts" for syntax;
+
+const PrefixContext = createContext("Sweetened");
+
+function counterReducer(value: number, amount: number): number {
+  return value + amount;
+}
+
+export function HookCarnival() {
+  state count: number = 0;
+  state step: number = 1;
+  states {
+    page = 1;
+    query = "";
+  }
+  toggle detailsOpen = false;
+  reducer reducedCount with dispatchCount using counterReducer initially 0;
+  ref stepInput: HTMLInputElement | null = null;
+  context prefix from PrefixContext;
+  memo doubled [count] as number = count * 2;
+  deferred deferredCount = count;
+  latestRef latestStep = step;
+  reactId stepInputId;
+  transition navigation;
+  callback increment [step] () { setCount((value) => value + step); }
+  callback incrementWithLatest [] () {
+    setCount((value) => value + latestStep.current);
+  }
+  callback async incrementLater [step] () {
+    await Promise.resolve();
+    setCount((value) => value + step);
+  }
+  effect [count, prefix] {
+    document.title = `${prefix}: ${count}`;
+    return () => {
+      document.title = "Sweetener React hooks";
+    };
+  }
+  return (
+    <main>
+      <h1>{prefix} React hook macros</h1>
+      <p className="hero">Count {count}; doubled {doubled}; deferred {deferredCount}</p>
+      <p>Reducer count: {reducedCount}</p>
+      <p>Search page {page}; query {query || "(empty)"}</p>
+      <button type="button" onClick={() => setPage((value) => value + 1)}>
+        Next search page
+      </button>
+      <input value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
+      <button type="button" onClick={increment}>Increment</button>
+      <button type="button" onClick={incrementWithLatest}>
+        Increment through latest ref
+      </button>
+      <button type="button" onClick={() => void incrementLater()}>
+        Increment asynchronously
+      </button>
+      <button type="button" onClick={() => dispatchCount(step)}>
+        Dispatch reducer
+      </button>
+      <label>
+        Step
+        <input
+          id={stepInputId}
+          ref={stepInput}
+          type="number"
+          value={step}
+          onChange={(event) => setStep(Number(event.currentTarget.value))}
+        />
+      </label>
+      <button type="button" onClick={toggleDetailsOpen}>Toggle details</button>
+      <button
+        type="button"
+        disabled={navigationPending}
+        onClick={() => startNavigation(() => setCount((value) => value + 1))}
+      >
+        {navigationPending ? "Updating…" : "Update in a transition"}
+      </button>
+      {detailsOpen ? (
+        <p>Generated bindings: setDetailsOpen and toggleDetailsOpen.</p>
+      ) : null}
+    </main>
+  );
+}
+
+export function SecondaryCounter() {
+  state count = 10;
+  toggle detailsOpen = true;
+  return (
+    <section>
+      <button type="button" onClick={() => setCount((value) => value + 1)}>
+        Independent count: {count}
+      </button>
+      <button type="button" onClick={toggleDetailsOpen}>
+        Independent details: {String(detailsOpen)}
+      </button>
+    </section>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <PrefixContext value="Sweetened">
+      <HookCarnival />
+      <SecondaryCounter />
+    </PrefixContext>
+  </React.StrictMode>,
+);

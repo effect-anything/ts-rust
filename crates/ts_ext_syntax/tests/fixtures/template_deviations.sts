@@ -1,0 +1,18 @@
+// tsc-ext: expand
+export syntax obj:expr { rule { obj($v:expr) } => { { value: $v } } }
+export syntax fn1:expr { rule { fn1($v:expr) } => { function () { return $v; } } }
+export syntax arrow:expr { rule { arrow() } => { () => 1 } }
+export syntax seq:expr { rule { seq($a:expr, $b:expr) } => { $a, $b } }
+export syntax scale:expr {
+  rule { scale($($x:expr),*) } => {
+    #fold($x, init: { 0 }) { ($acc, $item, $index) => { $acc * 2 + $item } }
+  }
+}
+
+const f = () => obj(1);
+obj(2);
+fn1(3)();
+const p = true && arrow();
+const g = [seq(a, b)];
+const c = scale(a, b + 1, c ? 1 : 2);
+const o = obj(4);

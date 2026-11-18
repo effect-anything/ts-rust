@@ -1,0 +1,55 @@
+export rec syntax (->):expr {
+  rule { (-> $value:expr) }
+  expect "expression or call step"
+  => {
+    $value
+  }
+
+  rule { (-> $value:expr, $next:ident($($argument:expr),*),) }
+  expect "expression or call step"
+  => {
+    $next($value, $($argument),*)
+  }
+
+  rule {
+    (-> $value:expr, $next:ident($($argument:expr),*), $($rest:tt)+)
+  }
+  expect "expression or call step"
+  => {
+    (-> $next($value, $($argument),*), $($rest)+)
+  }
+
+  rule { (-> $value:expr, $next:ident($($argument:expr),*)) }
+  expect "expression or call step"
+  => {
+    $next($value, $($argument),*)
+  }
+}
+
+export rec syntax (->>):expr {
+  rule { (->> $value:expr) }
+  expect "expression or call step"
+  => {
+    $value
+  }
+
+  rule { (->> $value:expr, $next:ident($($argument:expr),*),) }
+  expect "expression or call step"
+  => {
+    $next($($argument),*, $value)
+  }
+
+  rule {
+    (->> $value:expr, $next:ident($($argument:expr),*), $($rest:tt)+)
+  }
+  expect "expression or call step"
+  => {
+    (->> $next($($argument),*, $value), $($rest)+)
+  }
+
+  rule { (->> $value:expr, $next:ident($($argument:expr),*)) }
+  expect "expression or call step"
+  => {
+    $next($($argument),*, $value)
+  }
+}

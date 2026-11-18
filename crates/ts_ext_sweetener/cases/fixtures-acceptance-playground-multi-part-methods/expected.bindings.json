@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "introduced": [
+    { "spelling": "between", "space": "syntax-expr", "kind": "generated" },
+    { "spelling": "value", "space": "value", "kind": "lexical" },
+    { "spelling": "minimum", "space": "value", "kind": "lexical" },
+    { "spelling": "maximum", "space": "value", "kind": "lexical" }
+  ],
+  "relationship": "The method declaration registers its first segment as a generated expression-syntax binding; each typed declaration parameter scopes the captured implementation body used by that generated macro."
+}

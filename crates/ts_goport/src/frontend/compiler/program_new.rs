@@ -624,14 +624,15 @@ impl NewProgram {
             };
             match new_host.get_content_mapped_source_files(old_file.parse_options(), &mapper) {
                 Ok(files) => {
-                    new_file = files.canonical;
+                    new_file = crate::ext::precheck::checked(files.canonical); // PORT: ext
                     old_supplemental_files = old_file.supplemental_source_files();
                     new_supplemental_files = files.supplemental;
                 }
                 Err(_) => return (None, None, false),
             }
         } else {
-            new_file = new_host.get_source_file(old_file.parse_options());
+            new_file =
+                crate::ext::precheck::checked(new_host.get_source_file(old_file.parse_options())); // PORT: ext
         }
 
         // If this file is part of a package redirect group (same package installed in multiple

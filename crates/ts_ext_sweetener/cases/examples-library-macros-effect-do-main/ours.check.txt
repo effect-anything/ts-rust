@@ -1,0 +1,7 @@
+input.sts(1,44): error ext-syntax4001: TS4001: No rule for macro error accepted this input: 1 rule attempt(s).
+input.sts(2,51): error ext-syntax4001: TS4001: No rule for macro error accepted this input: 1 rule attempt(s).
+input.sts(5,29): error ext-syntax4001: TS4001: No rule for macro gen accepted this input: 1 rule attempt(s).
+input.sts(13,13): error ext-syntax4001: TS4001: No rule for macro service accepted this input: 1 rule attempt(s).
+input.sts(14,5): error ext-syntax4001: TS4001: No rule for macro service accepted this input: 1 rule attempt(s).
+input.sts(20,4): error ext-syntax4001: TS4001: No rule for macro service accepted this input: 1 rule attempt(s).
+input.sts(20,24): error ext-syntax4001: TS4001: No rule for macro service accepted this input: 1 rule attempt(s).

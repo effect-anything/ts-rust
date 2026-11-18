@@ -1,0 +1,23 @@
+// A macro can generate declarations, not just expressions. `:item` says this
+// one is written where a declaration goes.
+export syntax class Field {
+  fields { name: ident; kind: type; }
+  rule { $name:ident: $kind:type }
+}
+
+export syntax record:item {
+  rule { record $name:ident($($field:Field),*); } => {
+    export class $name {
+      $(readonly $field.name: $field.kind;)*
+
+      constructor($($field.name: $field.kind),*) {
+        $(this.$field.name = $field.name;)*
+      }
+
+      // Generated alongside the class, from the same declaration.
+      toString(): string {
+        return `${#text($name)}(${[$(String(this.$field.name)),*].join(", ")})`;
+      }
+    }
+  }
+}

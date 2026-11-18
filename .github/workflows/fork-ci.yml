@@ -1,0 +1,220 @@
+# Format, lint, build and test on every pull request and on each push to main that changes code.
+# The full protected set (TestLocal shards, gate, bound runs, LSP and API oracles, np-suite) stays in
+# the revision pipeline (scripts/goport/candidate.sh). This workflow is a fast check that the tree
+# builds and its own tests pass on Linux (x64 and arm64), macOS and Windows (x64, MSVC), that
+# the tsc compiles for Intel macOS, and that the wasm module (npm/wasm) passes its package tests.
+#
+# Fork CI (effect-anything/ts-rust, a public repo): free GitHub-hosted runners only (4 vCPU Linux and
+# Windows, 3 vCPU macOS arm64). Caches: Swatinem/rust-cache per job and runner (dependencies only;
+# the workspace crates rebuild), saved on pushes to main and wip and restored by pull requests,
+# which read the caches of their base branch.
+name: Fork CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, wip]
+    paths:
+      - "crates/**"
+      - "tools/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "UPSTREAM.json"
+      - "scripts/upstream/pin.py"
+      - ".github/workflows/fork-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -C debuginfo=0
+  # The toolchain of shipped bins (release.yml), the candidate evidence, fmt and clippy
+  # (scripts/goport/README.md, "Build toolchain").
+  RUSTUP_TOOLCHAIN: 1.95.0
+
+jobs:
+  lint:
+    name: fmt, codegen, clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal -c rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+          cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' }}
+      - run: cargo fmt --all -- --check
+      - name: Generated AST files match the codegen
+        run: |
+          cargo run --locked --quiet -p ts_ast_codegen -- check crates/ts_goport/src/astdata/syntax_kind.rs
+          cargo run --locked --quiet -p ts_ast_codegen -- check-ast crates/ts_goport/src/astdata/ast_generated.rs
+      # The packages of the revision quality step (candidate.sh): 0 warnings.
+      - run: cargo clippy --locked -p ts_goport -p goport_core -p goport_util -p goport_lsproto --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Free GitHub-hosted runners. macos-latest is arm64; the Windows runner builds
+        # x86_64-pc-windows-msvc.
+        runner:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.runner }}
+    # 4 vCPU (3 on macOS): the release build of the workspace and go_baselines take longer than on
+    # the 12 to 16 vCPU runners upstream uses. GitHub's limit is 360.
+    timeout-minutes: 300
+    # Git Bash on Windows.
+    defaults:
+      run:
+        shell: bash
+    env:
+      # One test thread, as goport-tests.sh runs them.
+      RUST_TEST_THREADS: 1
+    steps:
+      # LF in the working tree, as on the other hosts: Git for Windows sets core.autocrlf=true, which
+      # gives the test fixtures and the scripts CRLF (README.md, "Develop on Windows").
+      - if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      # GitHub-hosted Linux runners have about 14 GB free; a release build of the workspace needs
+      # more. Drop preinstalled SDKs this workflow never uses (about 25 GB).
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
+          df -h /
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      # main's Go pin is the saved state's batch.upstreamPin.to. UPSTREAM.json "current" can be an older
+      # pin until the default pin switch (AGENTS.md, "Pin").
+      - name: Resolve the Go pin
+        id: pin
+        run: |
+          key=$(jq -r '.batch.upstreamPin.to // empty' docs/typechecker-state/current.json)
+          # Windows has python, not python3.
+          py=python3
+          [[ $RUNNER_OS != Windows ]] || py=python
+          "$py" scripts/upstream/pin.py show ${key:+"$key"} > "$RUNNER_TEMP/pin.json"
+          jq -r '"repo=\(.repo)", "commit=\(.commit)", "subdir=\(.subdir // "")"' "$RUNNER_TEMP/pin.json" >> "$GITHUB_OUTPUT"
+      - name: Check out the pinned Go source
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.pin.outputs.repo }}
+          ref: ${{ steps.pin.outputs.commit }}
+          path: go-pin
+          sparse-checkout: ${{ steps.pin.outputs.subdir }}
+          persist-credentials: false
+      # The go_baselines temp roots default to zbook paths on Linux (/tmp on macOS). Windows gets
+      # native paths (C:\...), as the tests' own temp dirs are.
+      - name: Set the test paths
+        run: |
+          native() { if [[ $RUNNER_OS == Windows ]]; then cygpath -w "$1"; else echo "$1"; fi; }
+          echo "TS_GO_REPO=$(native "$GITHUB_WORKSPACE/go-pin${SUBDIR:+/$SUBDIR}")" >> "$GITHUB_ENV"
+          echo "TSCTEST_TMP=$(native "$RUNNER_TEMP/tsctest")" >> "$GITHUB_ENV"
+          echo "COMPILER_RUNNER_TMP=$(native "$RUNNER_TEMP/compiler-runner")" >> "$GITHUB_ENV"
+        env:
+          SUBDIR: ${{ steps.pin.outputs.subdir }}
+      # The astnav tests run the JS TypeScript of the Go repo's lockfile under Node (Go
+      # testutil/jstest: <repo>/node_modules/typescript). Only that package, not the repo's npm ci.
+      - name: Install the Go repo's typescript package
+        run: |
+          url=$(jq -r '.packages["node_modules/typescript"].resolved' go-pin/package-lock.json)
+          mkdir -p go-pin/node_modules/typescript
+          curl -sSfL "$url" | tar xz -C go-pin/node_modules/typescript --strip-components=1
+          jq -r .version go-pin/node_modules/typescript/package.json
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      # One cache per runner (OS and arch). Only dependencies are kept (about 1 GB each), so the
+      # four test caches, lint and the release caches fit the 10 GB repo budget.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-${{ matrix.runner }}
+          cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' }}
+      - name: Build
+        run: |
+          cargo test --release --locked --workspace --no-run
+          cargo test --release --locked -p ts_goport --test go_baselines --no-run
+      - name: Unit and integration tests
+        run: cargo test --release --locked --workspace --no-fail-fast
+      # go_baselines has `test = false`, so --workspace skips it. TestLocal (about 12,700 compiler
+      # cases) runs in 4 shards in goport-tests.sh, in the revision pipeline; the rest of the default
+      # go_baselines set runs here, also after a failed unit test.
+      - name: Go baselines
+        if: ${{ !cancelled() }}
+        run: |
+          skip=(--skip compiler_runner::test_local)
+          # Open on macOS: the 10 tests of project_lsp/resolveahead_test.rs (resolveahead1, merged
+          # after the macOS port) have never passed there. 9 find no resolve-ahead load and 1 finds
+          # no configured project. They pass on Linux.
+          [[ $RUNNER_OS != macOS ]] || skip+=(--skip project_lsp::resolveahead_test::)
+          cargo test --release --locked --no-fail-fast -p ts_goport --test go_baselines -- "${skip[@]}"
+      # Windows: the tsc against Go's tsc on Windows path forms, CRLF sources and a junction
+      # (scripts/goport/win-go-compare.sh). Go's tsc builds from the pinned Go source with the pin's
+      # Go (oracle.go), as the oracle does; both embed the lib files.
+      - name: Go version
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        id: go
+        run: jq -r '"version=\(.oracle.go | ltrimstr("go"))"' "$RUNNER_TEMP/pin.json" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+          cache: false
+      - name: Compare with Go
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        env:
+          SUBDIR: ${{ steps.pin.outputs.subdir }}
+        run: |
+          (cd "go-pin${SUBDIR:+/$SUBDIR}" && GOWORK=off CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/go/tsc.exe" ./cmd/tsc)
+          cargo build --release --locked -p ts_goport --bin tsgo
+          scripts/goport/win-go-compare.sh target/release/tsgo.exe "$RUNNER_TEMP/go/tsc.exe" "$RUNNER_TEMP/win-go"
+      # Intel Macs: the release ships an x86_64-apple-darwin tsc (release.yml builds it on an Intel
+      # runner). A cross check of the tsc here finds compile errors in its cfg paths on each PR.
+      - name: Check x86_64-apple-darwin
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
+        run: |
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" x86_64-apple-darwin
+          cargo check --locked -p ts_goport --bin tsgo --target x86_64-apple-darwin
+
+  # The wasm module of npm/wasm on a fast profile, and the package's tests in Node. The protected set
+  # builds no wasm32 target, so it did not see a checker panic that only the wasm build had (issue
+  # #83). Its repro is a test in npm/wasm/test/tsc.test.mjs.
+  wasm:
+    name: wasm
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal -t wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      # The release profile and no wasm-opt: about 1.5 minutes on 32 vCPU with no cache.
+      - name: Build the module
+        run: scripts/wasm/build.sh
+        env:
+          WASM_PROFILE: release
+          WASM_OPT: none
+      # Not `node --test`: on Node 24 its test process has execArgv flags that a Worker refuses
+      # (ERR_WORKER_INVALID_EXEC_ARGV), and npm/wasm/node.js gives its Worker that execArgv.
+      - name: Package tests
+        run: node npm/wasm/test/tsc.test.mjs

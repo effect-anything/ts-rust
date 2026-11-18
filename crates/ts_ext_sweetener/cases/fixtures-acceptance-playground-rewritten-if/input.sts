@@ -1,0 +1,11 @@
+import { if } from "./declarative.sts" for syntax shadows core;
+
+export function choose(predicate: boolean): number {
+  if (predicate) {
+    return 3;
+  } else {
+    return 2;
+  }
+}
+
+export const result = choose(true);

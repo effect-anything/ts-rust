@@ -1,0 +1,37 @@
+syntax class FunctionBody {
+  fields {
+    statements: stmt*;
+    result: expr;
+  }
+
+  rule {
+    {
+      $($statements:stmt)*
+      return $result:expr;
+    }
+  }
+  expect "final expression or return statement";
+
+  rule {
+    {
+      $($statements:stmt)*
+      $result:expr
+    }
+  }
+  expect "final expression or return statement";
+}
+
+export syntax function:expr shadows core {
+  rule {
+    function($($parameter:binding: $parameterType:type),*)
+    $body:FunctionBody
+  }
+  expect "final expression or return statement";
+  bind $parameter in $body as lexical value;
+  => {
+    #core(function($($parameter: $parameterType),*) {
+      $($body.statements)*
+      return #trim($body.result);
+    })
+  }
+}

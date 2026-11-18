@@ -1,0 +1,3 @@
+import { debug } from "./macros.sts" for syntax;
+
+export const inspected = debug(20 + 22);

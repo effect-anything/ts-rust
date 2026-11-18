@@ -1,0 +1,9 @@
+{
+  "name": "typescript",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Debug tsgo for the extension examples. bin/tsc links to target/debug/tsgo.",
+  "bin": {
+    "tsc": "./bin/tsc"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    { "macro": "->", "rule": "recursive", "parent": null },
+    { "macro": "->", "rule": "final-trailing", "parent": 0 }
+  ],
+  "order": "parent-first"
+}

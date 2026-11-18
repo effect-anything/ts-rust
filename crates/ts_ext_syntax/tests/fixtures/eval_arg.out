@@ -1,0 +1,4 @@
+exit: 0
+--- stdout
+const a = 1;
+--- stderr

@@ -1,0 +1,19 @@
+exit: 0
+--- stdout
+// tsc-ext: expand
+
+
+
+
+const a = (p && (q || r));
+const b = ((a ? b : c) && (x = 1));
+const c = !(p && q);
+const d = -(x + 1) * 2;
+const e = -(x * y) * 2;
+const f = ((a + b).length + (a + b));
+const g = (true && p && (q || r) && s);
+x = p && q;
+call(p && q, [p && q]);
+const h = p && q ? 1 : 2;
+
+--- stderr

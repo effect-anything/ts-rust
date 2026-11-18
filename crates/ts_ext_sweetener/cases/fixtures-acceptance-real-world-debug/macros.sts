@@ -1,0 +1,46 @@
+export syntax dbg:expr {
+  rule { dbg($value:expr) } => {
+    ((inspected) => {
+      globalThis.console.error(
+        `${#text($value)} = ${globalThis.JSON.stringify(inspected)}`,
+      );
+      return inspected;
+    })($value)
+  }
+}
+
+export syntax assert:stmt {
+  rule { assert($left:expr === $right:expr); } => {
+    {
+      const actual = $left;
+      const expected = $right;
+      if (!globalThis.Object.is(actual, expected)) {
+        throw new globalThis.Error(
+          `assertion failed: ${#text($left)} === ${#text($right)}` +
+            `\n  ${#text($left)} = ${globalThis.JSON.stringify(actual)}` +
+            `\n  ${#text($right)} = ${globalThis.JSON.stringify(expected)}`,
+        );
+      }
+    }
+  }
+
+  rule { assert($left:expr >= $right:expr); } => {
+    {
+      const actual = $left;
+      const bound = $right;
+      if (!(actual >= bound)) {
+        throw new globalThis.Error(
+          `assertion failed: ${#text($left)} >= ${#text($right)}` +
+            `\n  ${#text($left)} = ${globalThis.JSON.stringify(actual)}` +
+            `\n  ${#text($right)} = ${globalThis.JSON.stringify(bound)}`,
+        );
+      }
+    }
+  }
+
+  rule { assert($condition:expr); } => {
+    if (!($condition)) {
+      throw new globalThis.Error(`assertion failed: ${#text($condition)}`);
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    { "macro": "function", "rule": "two-parameter-currying", "parent": null }
+  ],
+  "order": "parent-first"
+}

@@ -165,12 +165,12 @@ fn emit_results_with(
     );
     let pooled = start_emit_files_with_pool(&source_files, |_| target.clone(), wrap)
         .map(PendingPoolEmit::wait);
-    match pooled {
+    crate::ext::precheck::rewritten(match pooled {
         Some(results) => results,
         None => run_emit_jobs(source_files, move |source_file| {
             wrap(&|| emit_source_file(source_file, &target))
         }),
-    }
+    })
 }
 
 /// PORT: not in Go. The API emit (`handle_emit`) writes the outputs after
@@ -283,7 +283,7 @@ impl PendingEmitBatch {
         .into_iter();
 
         // `combine_emit_results` of one result is that result.
-        has_file
+        let results = has_file
             .into_iter()
             .map(|has_file| {
                 if has_file {
@@ -292,7 +292,8 @@ impl PendingEmitBatch {
                     combine_emit_results(Vec::new())
                 }
             })
-            .collect()
+            .collect();
+        crate::ext::precheck::rewritten(results) // PORT: ext emit rewrite
     }
 }
 
@@ -585,7 +586,7 @@ fn file_emit(source_file: Node, target: &EmitterOptions) -> FileEmit {
     let has_js = matches!(emit_only, EmitOnly::All | EmitOnly::Js)
         && !options.emit_declaration_only.is_true()
         && !options.no_emit.is_true()
-        && source_file_content_mapper(source_file).is_empty();
+        && crate::ext::precheck::emits_javascript(source_file_content_mapper(source_file));
     if !has_js || js_emit_needs_checker(source_file) {
         return FileEmit::OnChecker;
     }

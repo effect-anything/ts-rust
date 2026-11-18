@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "invocations": [
+    { "macro": "function", "rule": "function-body", "parent": null }
+  ],
+  "order": "parent-first"
+}

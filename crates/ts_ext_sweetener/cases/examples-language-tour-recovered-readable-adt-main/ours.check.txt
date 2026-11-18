@@ -1,0 +1,9 @@
+input.sts(5,1): error TS2355: A function whose declared type is neither 'undefined', 'void', nor 'any' must return a value.
+input.sts(5,1): error TS2695: Left side of comma operator is unused and has no side effects.
+input.sts(5,1): error TS2355: A function whose declared type is neither 'undefined', 'void', nor 'any' must return a value.
+input.sts(5,1): error TS2695: Left side of comma operator is unused and has no side effects.
+input.sts(20,1): error TS2355: A function whose declared type is neither 'undefined', 'void', nor 'any' must return a value.
+input.sts(20,1): error TS2355: A function whose declared type is neither 'undefined', 'void', nor 'any' must return a value.
+input.sts(20,1): error TS2695: Left side of comma operator is unused and has no side effects.
+input.sts(20,1): error TS2695: Left side of comma operator is unused and has no side effects.
+input.sts(20,1): error TS2695: Left side of comma operator is unused and has no side effects.

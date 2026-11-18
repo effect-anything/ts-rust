@@ -1,0 +1,8 @@
+[
+  {
+    "code": "SWR4001",
+    "stage": "expansion",
+    "severity": "error",
+    "messageArguments": ["doSteps", "expression after <-"]
+  }
+]
