@@ -12,3 +12,4 @@ vendor/
 # Editor settings and napi native addons (built by `napi build`, not source).
 .zed/
 *.node
+.zvec-grep/
