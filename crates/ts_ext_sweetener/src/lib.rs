@@ -7,6 +7,7 @@
 pub mod catalog;
 pub mod structure;
 
+pub mod source_reader;
 mod sweetener;
 mod sweetener_budget;
 mod sweetener_cache;
@@ -333,6 +334,7 @@ pub fn expand_traced(request: ExpandRequest<'_>) -> (Expansion, Vec<TraceStep>) 
     (unchanged(request.code), Vec::new())
 }
 
+pub use source_reader::{SourceReader, clear_source_reader, set_source_reader};
 pub use sweetener_budget::ResourceBudget;
 pub use sweetener_origins::retarget_segments;
 

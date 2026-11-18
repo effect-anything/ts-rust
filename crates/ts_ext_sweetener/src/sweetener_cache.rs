@@ -44,7 +44,7 @@ fn modules() -> &'static Mutex<HashMap<ModuleKey, Arc<ReadSyntax>>> {
 /// file that did not exist then and does now changes resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Probe {
-    /// `read_to_string(path)`: hash of the text, `None` when it failed.
+    /// A read of `path`: hash of the text, `None` when it failed.
     Read(std::path::PathBuf, Option<u64>),
     /// `canonicalize(path)`: the target, `None` when it failed.
     Canonical(std::path::PathBuf, Option<std::path::PathBuf>),
@@ -52,7 +52,7 @@ pub enum Probe {
 
 impl Probe {
     fn observe_read(path: &std::path::Path) -> (Self, Option<String>) {
-        let text = std::fs::read_to_string(path).ok();
+        let text = crate::source_reader::read(path);
         (
             Self::Read(path.to_path_buf(), text.as_deref().map(hash_text)),
             text,
@@ -60,7 +60,10 @@ impl Probe {
     }
 
     fn observe_canonical(path: &std::path::Path) -> Self {
-        Self::Canonical(path.to_path_buf(), path.canonicalize().ok())
+        Self::Canonical(
+            path.to_path_buf(),
+            crate::source_reader::canonicalize(path).ok(),
+        )
     }
 
     fn still_holds(&self) -> bool {
@@ -93,21 +96,23 @@ pub(crate) fn record_probes(probes: &[Probe]) {
     }
 }
 
-/// `std::fs::read_to_string`, recorded (hit or miss) for memo validation.
+/// Read through the installed [`crate::SourceReader`] (the disk by default),
+/// recorded (hit or miss) for memo validation.
 pub fn read_file(path: &std::path::Path) -> Option<String> {
     let (probe, text) = Probe::observe_read(path);
     record(probe);
     text
 }
 
-/// `Path::canonicalize`, recorded for memo validation: a symlink retarget
-/// changes cycle keys, dependency names and messages.
+/// `canonicalize` through the installed [`crate::SourceReader`], recorded for
+/// memo validation: a symlink retarget changes cycle keys, dependency names
+/// and messages.
 pub fn canonicalize(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     let probe = Probe::observe_canonical(path);
     record(probe.clone());
     match probe {
         Probe::Canonical(_, Some(target)) => Ok(target),
-        _ => path.canonicalize(),
+        _ => crate::source_reader::canonicalize(path),
     }
 }
 
