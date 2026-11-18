@@ -1,4 +1,12 @@
 fn main() {
+    // Without the Node-API binding (feature `node`) there are no `napi_*`
+    // symbols to defer.
+    #[cfg(feature = "node")]
+    node();
+}
+
+#[cfg(feature = "node")]
+fn node() {
     napi_build::setup();
     // `napi_build::setup` lets the cdylib leave the `napi_*` symbols to the
     // Node process that loads it. The `tsc-ext` binary, the examples and the test

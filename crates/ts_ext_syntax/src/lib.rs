@@ -28,7 +28,8 @@ pub use session::{
     SessionDiagnostic, TransformSession, Transformed, unsupported_source, v3_source_map,
 };
 
-// napi-derive registers the exports outside `cfg(test)` only.
 pub mod answer;
+// napi-derive registers the exports outside `cfg(test)` only.
+#[cfg(feature = "node")]
 #[cfg_attr(test, allow(dead_code))]
 mod node;
